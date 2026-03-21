@@ -4624,6 +4624,714 @@ using LinearAlgebra
         end
     end
 
+    # ======================================================================
+    # GASPR -- Gas production cross sections
+    # ======================================================================
+    @testset "GASPR -- gas_multiplicity table" begin
+        # Primary charged-particle reactions MT103-107
+        @test gas_multiplicity(103) == (1,0,0,0,0)  # (n,p)
+        @test gas_multiplicity(104) == (0,1,0,0,0)  # (n,d)
+        @test gas_multiplicity(105) == (0,0,1,0,0)  # (n,t)
+        @test gas_multiplicity(106) == (0,0,0,1,0)  # (n,3He)
+        @test gas_multiplicity(107) == (0,0,0,0,1)  # (n,alpha)
+
+        # Multi-particle reactions
+        @test gas_multiplicity(108) == (0,0,0,0,2)  # (n,2alpha)
+        @test gas_multiplicity(109) == (0,0,0,0,3)  # (n,3alpha)
+        @test gas_multiplicity(28)  == (1,0,0,0,0)  # (n,np)
+        @test gas_multiplicity(22)  == (0,0,0,0,1)  # (n,nalpha)
+        @test gas_multiplicity(112) == (1,0,0,0,1)  # (n,p+alpha)
+
+        # Reactions with no gas production
+        @test gas_multiplicity(1)   == (0,0,0,0,0)  # total
+        @test gas_multiplicity(2)   == (0,0,0,0,0)  # elastic
+        @test gas_multiplicity(18)  == (0,0,0,0,0)  # fission
+        @test gas_multiplicity(102) == (0,0,0,0,0)  # capture
+        @test gas_multiplicity(999) == (0,0,0,0,0)  # unknown
+
+        # gas_yield with skip set
+        @test gas_yield(2) == (0,0,0,0,0)
+        @test gas_yield(103) == (1,0,0,0,0)
+        @test gas_yield(203) == (0,0,0,0,0)  # output MT, skip
+
+        # Higher MT numbers
+        @test gas_multiplicity(155) == (0,0,1,0,1)  # triton + alpha
+        @test gas_multiplicity(197) == (3,0,0,0,0)  # 3 protons
+        @test gas_multiplicity(199) == (2,0,0,0,1)  # 2p + alpha
+    end
+
+    @testset "GASPR -- accumulate_gas" begin
+        energies = [1.0, 10.0, 100.0]
+        reactions = Dict{Int,Vector{Float64}}(
+            103 => [0.0, 1.0, 2.0],   # (n,p) -> 1 proton
+            107 => [0.0, 0.5, 1.5],   # (n,alpha) -> 1 alpha
+            108 => [0.0, 0.1, 0.3],   # (n,2alpha) -> 2 alphas
+        )
+
+        result = accumulate_gas(energies, reactions)
+
+        # MT203 (protons) = 1*MT103
+        @test result.mt203 == [0.0, 1.0, 2.0]
+
+        # MT207 (alphas) = 1*MT107 + 2*MT108
+        @test result.mt207 == [0.0, 0.7, 2.1]
+
+        # No deuterons, tritons, He-3
+        @test all(result.mt204 .== 0.0)
+        @test all(result.mt205 .== 0.0)
+        @test all(result.mt206 .== 0.0)
+    end
+
+    @testset "GASPR -- compute_gas_production PointwiseMaterial" begin
+        ne = 5
+        energies = collect(range(1e-5, stop=2e7, length=ne))
+        # Columns: MT1(total), MT2(elastic), MT102(capture), MT103(n,p), MT107(n,alpha)
+        xs = zeros(ne, 5)
+        mt_list = [1, 2, 102, 103, 107]
+        for i in 1:ne
+            xs[i, 1] = 50.0  # total
+            xs[i, 2] = 20.0  # elastic
+            xs[i, 3] = 10.0  # capture
+            xs[i, 4] = 5.0   # (n,p)
+            xs[i, 5] = 3.0   # (n,alpha)
+        end
+        pendf = PointwiseMaterial(Int32(2631), energies, xs, mt_list)
+
+        result = compute_gas_production(pendf)
+
+        # Should have original MTs + MT203, MT207
+        @test 203 in result.mt_list
+        @test 207 in result.mt_list
+        # Original non-gas MTs preserved
+        @test 1 in result.mt_list
+        @test 2 in result.mt_list
+        @test 102 in result.mt_list
+        @test 103 in result.mt_list
+        @test 107 in result.mt_list
+
+        # Verify MT203 = 1 * sigma(103) = 5.0
+        idx203 = findfirst(==(203), result.mt_list)
+        @test all(result.cross_sections[:, idx203] .== 5.0)
+
+        # Verify MT207 = 1 * sigma(107) = 3.0
+        idx207 = findfirst(==(207), result.mt_list)
+        @test all(result.cross_sections[:, idx207] .== 3.0)
+
+        # No deuterons/tritons/He3 expected
+        @test !(204 in result.mt_list)
+        @test !(205 in result.mt_list)
+        @test !(206 in result.mt_list)
+    end
+
+    @testset "GASPR -- gas_production_dict" begin
+        result = GasProductionResult(
+            [1.0, 2.0],
+            [1.0, 2.0],   # protons (nonzero)
+            [0.0, 0.0],   # deuterons (zero -> omitted)
+            [0.0, 0.0],   # tritons (zero -> omitted)
+            [0.0, 0.0],   # He-3 (zero -> omitted)
+            [0.5, 1.0],   # alphas (nonzero)
+        )
+        d = gas_production_dict(result)
+        @test haskey(d, 203)
+        @test haskey(d, 207)
+        @test !haskey(d, 204)
+        @test !haskey(d, 205)
+        @test !haskey(d, 206)
+    end
+
+    # ======================================================================
+    # MIXR -- Cross section mixing
+    # ======================================================================
+    @testset "MIXR -- union_energy_grid" begin
+        e1 = [1.0, 5.0, 10.0]
+        e2 = [2.0, 5.0, 20.0]
+        xs1 = reshape([10.0, 5.0, 2.0], 3, 1)
+        xs2 = reshape([8.0, 4.0, 1.0], 3, 1)
+        m1 = PointwiseMaterial(Int32(1), e1, xs1, [1])
+        m2 = PointwiseMaterial(Int32(2), e2, xs2, [1])
+        comps = [MixComponent(m1, 0.5), MixComponent(m2, 0.5)]
+        ug = union_energy_grid(comps)
+        # Should contain all unique energies from both
+        @test ug == [1.0, 2.0, 5.0, 10.0, 20.0]
+
+        # Also test the raw vector-of-vectors form
+        ug2 = union_energy_grid([[1.0, 3.0], [2.0, 3.0, 4.0]])
+        @test ug2 == [1.0, 2.0, 3.0, 4.0]
+    end
+
+    @testset "MIXR -- interpolate_column" begin
+        e = [1.0, 10.0]
+        xs = [10.0, 20.0]
+        # At endpoints
+        @test interpolate_column(e, xs, 1.0) == 10.0
+        @test interpolate_column(e, xs, 10.0) == 20.0
+        # Midpoint lin-lin
+        @test isapprox(interpolate_column(e, xs, 5.5), 15.0, rtol=1e-12)
+        # Outside range -> 0
+        @test interpolate_column(e, xs, 0.5) == 0.0
+        @test interpolate_column(e, xs, 11.0) == 0.0
+        # Empty
+        @test interpolate_column(Float64[], Float64[], 5.0) == 0.0
+    end
+
+    @testset "MIXR -- MixComponent validation" begin
+        e = [1.0, 10.0]
+        xs = reshape([10.0, 20.0], 2, 1)
+        m = PointwiseMaterial(Int32(1), e, xs, [1])
+        # Valid
+        c = MixComponent(m, 0.5)
+        @test c.fraction == 0.5
+        # Negative fraction should throw
+        @test_throws ArgumentError MixComponent(m, -0.1)
+    end
+
+    @testset "MIXR -- mix_reactions Dict interface" begin
+        inp1 = MixInput([1.0, 10.0], Dict(1 => [10.0, 20.0]), 0.5)
+        inp2 = MixInput([1.0, 10.0], Dict(1 => [30.0, 40.0]), 0.5)
+        ugrid, mixed = mix_reactions([inp1, inp2])
+        @test haskey(mixed, 1)
+        idx1 = findfirst(==(1.0), ugrid)
+        @test isapprox(mixed[1][idx1], 20.0, rtol=1e-12)  # 0.5*10 + 0.5*30
+    end
+
+    @testset "MIXR -- mix_materials basic" begin
+        # Two isotopes with same MT, different grids
+        e1 = [1.0, 10.0]
+        e2 = [1.0, 10.0]
+        xs1 = reshape([10.0, 20.0], 2, 1)
+        xs2 = reshape([30.0, 40.0], 2, 1)
+        m1 = PointwiseMaterial(Int32(1), e1, xs1, [1])
+        m2 = PointwiseMaterial(Int32(2), e2, xs2, [1])
+
+        # Equal fractions
+        comps = [MixComponent(m1, 0.5), MixComponent(m2, 0.5)]
+        mixed = mix_materials(comps)
+
+        # At E=1: 0.5*10 + 0.5*30 = 20
+        idx1 = findfirst(==(1.0), mixed.energies)
+        @test isapprox(mixed.cross_sections[idx1, 1], 20.0, rtol=1e-12)
+
+        # At E=10: 0.5*20 + 0.5*40 = 30
+        idx10 = findfirst(==(10.0), mixed.energies)
+        @test isapprox(mixed.cross_sections[idx10, 1], 30.0, rtol=1e-12)
+    end
+
+    @testset "MIXR -- mix_materials with interpolation" begin
+        # Component 1: defined at [1, 10], Component 2: defined at [1, 5, 10]
+        e1 = [1.0, 10.0]
+        e2 = [1.0, 5.0, 10.0]
+        xs1 = reshape([10.0, 10.0], 2, 1)  # constant sigma=10
+        xs2 = reshape([20.0, 20.0, 20.0], 3, 1)  # constant sigma=20
+        m1 = PointwiseMaterial(Int32(1), e1, xs1, [1])
+        m2 = PointwiseMaterial(Int32(2), e2, xs2, [1])
+
+        comps = [MixComponent(m1, 0.3), MixComponent(m2, 0.7)]
+        mixed = mix_materials(comps)
+
+        # Union grid: [1, 5, 10]
+        @test length(mixed.energies) == 3
+
+        # At E=5: 0.3*10 + 0.7*20 = 3 + 14 = 17
+        idx5 = findfirst(==(5.0), mixed.energies)
+        @test isapprox(mixed.cross_sections[idx5, 1], 17.0, rtol=1e-12)
+    end
+
+    @testset "MIXR -- mix_materials multi-MT" begin
+        e = [1.0, 10.0]
+        # Component 1 has MT1 and MT2
+        xs1 = [10.0 20.0; 30.0 40.0]
+        m1 = PointwiseMaterial(Int32(1), e, xs1, [1, 2])
+        # Component 2 has only MT1
+        xs2 = reshape([5.0, 15.0], 2, 1)
+        m2 = PointwiseMaterial(Int32(2), e, xs2, [1])
+
+        comps = [MixComponent(m1, 0.6), MixComponent(m2, 0.4)]
+        mixed = mix_materials(comps)
+
+        @test 1 in mixed.mt_list
+        @test 2 in mixed.mt_list
+
+        # MT1: 0.6*10 + 0.4*5 = 8 at E=1
+        idx_mt1 = findfirst(==(1), mixed.mt_list)
+        idx_e1 = findfirst(==(1.0), mixed.energies)
+        @test isapprox(mixed.cross_sections[idx_e1, idx_mt1], 8.0, rtol=1e-12)
+
+        # MT2: 0.6*20 + 0.4*0 = 12 at E=1 (MT2 missing from m2 -> 0)
+        idx_mt2 = findfirst(==(2), mixed.mt_list)
+        @test isapprox(mixed.cross_sections[idx_e1, idx_mt2], 12.0, rtol=1e-12)
+    end
+
+    @testset "MIXR -- mix_materials mt_filter" begin
+        e = [1.0, 10.0]
+        xs = [10.0 20.0; 30.0 40.0]
+        m = PointwiseMaterial(Int32(1), e, xs, [1, 2])
+        comps = [MixComponent(m, 1.0)]
+        mixed = mix_materials(comps; mt_filter=[2])
+
+        @test mixed.mt_list == [2]
+        @test size(mixed.cross_sections, 2) == 1
+    end
+
+    @testset "MIXR -- single component identity" begin
+        e = [1.0, 5.0, 10.0]
+        xs = reshape([100.0, 200.0, 300.0], 3, 1)
+        m = PointwiseMaterial(Int32(42), e, xs, [1])
+        comps = [MixComponent(m, 1.0)]
+        mixed = mix_materials(comps)
+
+        # With fraction=1.0, should reproduce exactly
+        @test mixed.energies == e
+        @test isapprox(mixed.cross_sections[:, 1], xs[:, 1], rtol=1e-15)
+    end
+
+    # ======================================================================
+    # RESXSR -- Resonance cross section file
+    # ======================================================================
+    @testset "RESXSR -- extract_resxs basic" begin
+        ne = 200
+        energies = collect(range(1.0, stop=1e5, length=ne))
+        # MT1, MT2, MT102
+        xs = zeros(ne, 3)
+        for i in 1:ne
+            xs[i, 1] = 50.0   # total
+            xs[i, 2] = 30.0   # elastic
+            xs[i, 3] = 20.0   # capture
+        end
+        pendf = PointwiseMaterial(Int32(9228), energies, xs, [1, 2, 102])
+
+        rec = extract_resxs(pendf; elow=1.0, ehigh=1e5, awr=235.0)
+
+        @test rec.mat == 9228
+        @test rec.awr == 235.0
+        @test rec.nreac == 2  # no fission
+        @test length(rec.energies) >= 2
+        @test rec.energies[1] >= 1.0
+        @test rec.energies[end] <= 1e5
+        # Constant cross sections should thin heavily
+        @test all(rec.elastic .== 30.0)
+        @test all(rec.capture .== 20.0)
+    end
+
+    @testset "RESXSR -- extract_resxs with fission" begin
+        ne = 10
+        energies = collect(range(1.0, stop=1e5, length=ne))
+        # MT1, MT2, MT18, MT102
+        xs = zeros(ne, 4)
+        for i in 1:ne
+            xs[i, 1] = 100.0  # total
+            xs[i, 2] = 50.0   # elastic
+            xs[i, 3] = 30.0   # fission
+            xs[i, 4] = 20.0   # capture
+        end
+        pendf = PointwiseMaterial(Int32(9437), energies, xs, [1, 2, 18, 102])
+
+        rec = extract_resxs(pendf; elow=1.0, ehigh=1e5)
+
+        @test rec.nreac == 3  # fissile
+        @test all(rec.elastic .== 50.0)
+        @test all(rec.fission .== 30.0)
+        @test all(rec.capture .== 20.0)
+    end
+
+    @testset "RESXSR -- thinning" begin
+        # Create data with some linear variation that should be thinnable
+        ne = 100
+        energies = collect(range(1.0, stop=1000.0, length=ne))
+        xs = zeros(ne, 3)
+        for i in 1:ne
+            xs[i, 1] = 50.0   # total (constant)
+            xs[i, 2] = 30.0   # elastic (constant)
+            xs[i, 3] = 20.0   # capture (constant)
+        end
+        pendf = PointwiseMaterial(Int32(1), energies, xs, [1, 2, 102])
+
+        rec = extract_resxs(pendf; elow=1.0, ehigh=1000.0, eps=0.01)
+
+        # Constant data should be thinned to just 2 points
+        @test length(rec.energies) == 2
+        @test rec.energies[1] == 1.0
+        @test rec.energies[end] == 1000.0
+    end
+
+    @testset "RESXSR -- thin_resxs pure function" begin
+        e = collect(1.0:10.0)
+        # Constant columns: should thin to 2 points
+        c1 = fill(5.0, 10)
+        c2 = fill(3.0, 10)
+        e_thin, cols_thin = thin_resxs(e, (c1, c2), 0.01)
+        @test length(e_thin) == 2
+        @test e_thin[1] == 1.0
+        @test e_thin[end] == 10.0
+
+        # Linear data: should also thin to 2 (exact lin-lin)
+        c3 = collect(1.0:10.0)
+        c4 = collect(10.0:-1.0:1.0)
+        e_thin2, cols_thin2 = thin_resxs(e, (c3, c4), 0.001)
+        @test length(e_thin2) == 2
+
+        # Short arrays (<= 2 points): returned unchanged
+        e_short = [1.0, 2.0]
+        c_short = [5.0, 10.0]
+        e_s, cs = thin_resxs(e_short, (c_short,), 0.01)
+        @test e_s == e_short
+    end
+
+    @testset "RESXSR -- extract_resxs_dict" begin
+        energies = collect(range(0.1, stop=1e6, length=50))
+        reactions = Dict{Int,Vector{Float64}}(
+            2   => fill(30.0, 50),
+            102 => fill(20.0, 50),
+        )
+        e_thin, rx_thin = extract_resxs_dict(energies, reactions;
+                                              elow=1.0, ehigh=1e5, eps=0.01)
+        @test haskey(rx_thin, 2)
+        @test haskey(rx_thin, 102)
+        @test !haskey(rx_thin, 18)  # no fission
+        @test length(e_thin) >= 2
+        @test e_thin[1] >= 1.0
+        @test e_thin[end] <= 1e5
+    end
+
+    @testset "RESXSR -- write_resxs multi-record" begin
+        ne = 5
+        e = collect(range(1.0, stop=100.0, length=ne))
+        rec1 = RESXSRecord("mat1", 1, 10.0, 2, e,
+                           fill(5.0, ne), zeros(ne), fill(3.0, ne))
+        rec2 = RESXSRecord("mat2", 2, 20.0, 3, e,
+                           fill(8.0, ne), fill(1.0, ne), fill(4.0, ne))
+        buf = IOBuffer()
+        write_resxs(buf, [rec1, rec2]; user_id="test", description="multi-mat")
+        output = String(take!(buf))
+        @test occursin("mat1", output)
+        @test occursin("mat2", output)
+        @test occursin("multi-mat", output)
+    end
+
+    @testset "RESXSR -- write_resxs roundtrip" begin
+        ne = 10
+        energies = collect(range(1.0, stop=1e5, length=ne))
+        xs = zeros(ne, 3)
+        for i in 1:ne
+            xs[i, 1] = 50.0 + i
+            xs[i, 2] = 30.0 + i
+            xs[i, 3] = 20.0 + i
+        end
+        pendf = PointwiseMaterial(Int32(9228), energies, xs, [1, 2, 102])
+
+        buf = IOBuffer()
+        write_resxs(buf, pendf; elow=1.0, ehigh=1e5, eps=1e-6,
+                    name="U235", awr=235.0, user_id="test",
+                    description="Test RESXS output")
+        output = String(take!(buf))
+
+        # Should contain header
+        @test occursin("resxs", output)
+        @test occursin("test", output)
+        @test occursin("U235", output)
+        @test occursin("Test RESXS output", output)
+        # Should contain data lines
+        lines = split(output, '\n')
+        @test length(lines) >= 5  # header + control + description + data
+    end
+
+    @testset "RESXSR -- energy range filtering" begin
+        ne = 50
+        energies = collect(range(0.01, stop=1e7, length=ne))
+        xs = zeros(ne, 2)
+        for i in 1:ne
+            xs[i, 1] = 10.0 / sqrt(energies[i])
+            xs[i, 2] = 5.0 / sqrt(energies[i])
+        end
+        pendf = PointwiseMaterial(Int32(1), energies, xs, [2, 102])
+
+        # Restrict to narrow range
+        rec = extract_resxs(pendf; elow=100.0, ehigh=10000.0, eps=1e-6)
+
+        @test rec.energies[1] >= 100.0
+        @test rec.energies[end] <= 10000.0
+        @test all(rec.elastic .> 0.0)
+        @test all(rec.capture .> 0.0)
+    end
+
+    # ======================================================================
+    # COVR -- Covariance visualization and library output
+    # ======================================================================
+    @testset "COVR -- covariance_to_correlation" begin
+        C = [0.04 0.01 0.005;
+             0.01 0.09 0.015;
+             0.005 0.015 0.0025]
+        gb = [1.0, 10.0, 100.0, 1000.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+
+        cr = covariance_to_correlation(cov)
+        @test cr isa CorrelationMatrix
+        @test cr.mt1 == 2
+        @test cr.mt2 == 2
+        @test size(cr.correlation) == (3, 3)
+
+        # Diagonal of correlation should be 1.0
+        for i in 1:3
+            @test cr.correlation[i, i] ≈ 1.0 atol=1e-12
+        end
+
+        # Standard deviations: sqrt(diagonal)
+        @test cr.std_dev_1[1] ≈ sqrt(0.04) atol=1e-14
+        @test cr.std_dev_1[2] ≈ sqrt(0.09) atol=1e-14
+        @test cr.std_dev_1[3] ≈ sqrt(0.0025) atol=1e-14
+
+        # Off-diagonal: C[1,2]/(sqrt(C[1,1])*sqrt(C[2,2]))
+        expected_12 = 0.01 / (sqrt(0.04) * sqrt(0.09))
+        @test cr.correlation[1, 2] ≈ expected_12 atol=1e-12
+        @test cr.correlation[2, 1] ≈ expected_12 atol=1e-12
+
+        @test all(-1.0 .<= cr.correlation .<= 1.0)
+    end
+
+    @testset "COVR -- relative_std_dev" begin
+        C = [0.01 0.0; 0.0 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(1, 1, gb, C, true)
+        rsd = relative_std_dev(cov)
+        @test rsd[1] ≈ 0.1 atol=1e-14
+        @test rsd[2] ≈ 0.2 atol=1e-14
+    end
+
+    @testset "COVR -- is_valid_correlation" begin
+        C = [0.04 0.006; 0.006 0.01]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+        cr = covariance_to_correlation(cov)
+        @test is_valid_correlation(cr) == true
+    end
+
+    @testset "COVR -- max_abs_correlation" begin
+        C = [0.01 0.005; 0.005 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(18, 18, gb, C, true)
+        cr = covariance_to_correlation(cov)
+        expected = abs(0.005 / (sqrt(0.01) * sqrt(0.04)))
+        @test max_abs_correlation(cr) ≈ expected atol=1e-12
+    end
+
+    @testset "COVR -- cross-reaction correlation" begin
+        Cx = [0.04 0.0; 0.0 0.09]
+        Cy = [0.01 0.0; 0.0 0.16]
+        Cxy = [0.01 0.02; 0.015 0.06]
+        gb = [1.0, 10.0, 100.0]
+        cov_x = CovarianceMatrix(2, 2, gb, Cx, true)
+        cov_y = CovarianceMatrix(18, 18, gb, Cy, true)
+        cov_xy = CovarianceMatrix(2, 18, gb, Cxy, true)
+        cr = covariance_to_correlation(cov_xy, cov_x, cov_y)
+        @test cr.mt1 == 2
+        @test cr.mt2 == 18
+        @test cr.correlation[1, 1] ≈ 0.01 / (sqrt(0.04) * sqrt(0.01)) atol=1e-12
+    end
+
+    @testset "COVR -- format_covariance_output boxer" begin
+        C = [0.01 0.005; 0.005 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+        output = format_covariance_output([cov]; format=:boxer)
+        @test output isa String
+        @test length(output) > 0
+        @test occursin("rsd", output)
+    end
+
+    @testset "COVR -- format_covariance_output csv" begin
+        C = [0.01 0.005; 0.005 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+        output = format_covariance_output([cov]; format=:csv, matype=4)
+        @test output isa String
+        @test occursin("correlation", output)
+    end
+
+    @testset "COVR -- zero-diagonal handling" begin
+        C = [0.0 0.0; 0.0 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+        cr = covariance_to_correlation(cov)
+        @test cr.std_dev_1[1] == 0.0
+        @test cr.correlation[1, 1] == 0.0
+        @test cr.correlation[1, 2] == 0.0
+        @test !any(isnan, cr.correlation)
+    end
+
+    @testset "COVR -- covr_summary" begin
+        C = [0.01 0.005; 0.005 0.04]
+        gb = [1.0, 10.0, 100.0]
+        cov = CovarianceMatrix(2, 2, gb, C, true)
+        cr = covariance_to_correlation(cov)
+        summary = covr_summary([cr])
+        @test occursin("COVR Summary", summary)
+        @test occursin("MT2/MT2", summary)
+    end
+
+    # ======================================================================
+    # GAMINR -- Photon interaction cross sections
+    # ======================================================================
+    @testset "GAMINR -- photon group structures" begin
+        @test length(CSEWG_94) == 95
+        @test length(LANL_12_GAMMA) == 13
+        @test length(STEINER_21) == 22
+        @test length(STRAKER_22) == 23
+        @test length(LANL_48_GAMMA) == 49
+        @test length(LANL_24_GAMMA) == 25
+        @test length(VITAMINC_36) == 37
+        @test length(VITAMINE_38) == 39
+        @test length(VITAMINJ_42_GAMMA) == 43
+
+        for gs in [CSEWG_94, LANL_12_GAMMA, STEINER_21, STRAKER_22,
+                   LANL_48_GAMMA, LANL_24_GAMMA, VITAMINC_36, VITAMINE_38,
+                   VITAMINJ_42_GAMMA]
+            for i in 1:length(gs)-1
+                @test gs[i] < gs[i+1]
+            end
+        end
+    end
+
+    @testset "GAMINR -- get_photon_group_structure dispatch" begin
+        @test get_photon_group_structure(IGG_CSEWG94) === CSEWG_94
+        @test get_photon_group_structure(IGG_LANL12) === LANL_12_GAMMA
+        @test get_photon_group_structure(IGG_STEINER21) === STEINER_21
+        @test get_photon_group_structure(IGG_VITAMINJ42) === VITAMINJ_42_GAMMA
+        @test get_photon_group_structure(3) === LANL_12_GAMMA
+        @test get_photon_group_structure(10) === VITAMINJ_42_GAMMA
+    end
+
+    @testset "GAMINR -- weight functions" begin
+        @test photon_weight_constant(1e6) == 1.0
+        @test photon_weight_constant(1e3) == 1.0
+        @test photon_weight_inv_e(1e6) ≈ 1e-6 atol=1e-20
+        @test photon_weight_inv_e(100.0) ≈ 0.01 atol=1e-15
+
+        wfn2 = get_photon_weight_function(2)
+        @test wfn2(42.0) == 1.0
+        wfn3 = get_photon_weight_function(3)
+        @test wfn3(1000.0) ≈ 0.001 atol=1e-15
+    end
+
+    @testset "GAMINR -- photon_group_average constant XS" begin
+        energies = [1e4, 1e5, 5e5, 1e6, 2e6, 5e6, 1e7, 2e7]
+        xs = fill(10.0, length(energies))
+        bounds = LANL_12_GAMMA
+        avg, flux = photon_group_average(energies, xs, bounds;
+                                          weight_fn=photon_weight_constant)
+        ng = length(bounds) - 1
+        @test length(avg) == ng
+        for g in 1:ng
+            if bounds[g+1] > energies[1] && bounds[g] < energies[end]
+                @test avg[g] ≈ 10.0 atol=1e-10
+            end
+        end
+    end
+
+    @testset "GAMINR -- photon_group_average linear XS" begin
+        energies = collect(range(1e6, 5e6, length=100))
+        a = 1e-6
+        xs = a .* energies
+        bounds = [1e6, 2e6, 3e6, 4e6, 5e6]
+        avg, flux = photon_group_average(energies, xs, bounds;
+                                          weight_fn=photon_weight_constant)
+        for g in 1:4
+            emid = (bounds[g] + bounds[g+1]) / 2.0
+            expected = a * emid
+            @test avg[g] ≈ expected rtol=0.01
+        end
+    end
+
+    @testset "GAMINR -- photon_heating_kerma" begin
+        energies = collect(range(1e6, 5e6, length=50))
+        xs = fill(5.0, length(energies))
+        bounds = [1e6, 3e6, 5e6]
+        kerma = photon_heating_kerma(energies, xs, bounds;
+                                      weight_fn=photon_weight_constant)
+        @test length(kerma) == 2
+        for g in 1:2
+            emid = (bounds[g] + bounds[g+1]) / 2.0
+            @test kerma[g] ≈ 5.0 * emid rtol=0.01
+        end
+    end
+
+    @testset "GAMINR -- gaminr top-level" begin
+        energies = collect(range(1e4, 2e7, length=200))
+        xs_total = 1.0 ./ sqrt.(energies)
+        xs_coh = 0.3 ./ sqrt.(energies)
+        xs_incoh = 0.5 ./ sqrt.(energies)
+        xs_pe = 0.2 ./ sqrt.(energies)
+
+        reactions = [
+            (mt=501, name="total", energies=energies, xs=xs_total),
+            (mt=502, name="coherent", energies=energies, xs=xs_coh),
+            (mt=504, name="incoherent", energies=energies, xs=xs_incoh),
+            (mt=522, name="photoelectric", energies=energies, xs=xs_pe),
+        ]
+
+        result = gaminr(reactions, IGG_LANL12; iwt=2)
+        @test result isa PhotonMultiGroupXS
+        @test length(result.mt_list) == 4
+        @test size(result.xs, 1) == 12
+        @test size(result.xs, 2) == 4
+        @test all(result.xs .>= 0.0)
+        @test length(result.flux) == 12
+    end
+
+    @testset "GAMINR -- gaminr with heating" begin
+        energies = collect(range(1e4, 2e7, length=100))
+        xs_pe = 0.2 ./ sqrt.(energies)
+        reactions = [
+            (mt=522, name="photoelectric", energies=energies, xs=xs_pe),
+        ]
+        result = gaminr(reactions, IGG_LANL12; iwt=2, compute_heating=true)
+        @test all(result.heating .>= 0.0)
+        active = findall(result.flux .> 0.0)
+        @test !isempty(active)
+        @test all(result.heating[active] .> 0.0)
+    end
+
+    @testset "GAMINR -- gaminr dict interface" begin
+        energies = collect(range(1e4, 2e7, length=100))
+        xs_dict = Dict(
+            501 => 1.0 ./ sqrt.(energies),
+            502 => 0.3 ./ sqrt.(energies),
+        )
+        result = gaminr(energies, xs_dict, IGG_STEINER21; iwt=2)
+        @test result isa PhotonMultiGroupXS
+        @test length(result.mt_list) == 2
+        @test size(result.xs, 1) == 21
+    end
+
+    @testset "GAMINR -- 1/E weight function preserves constant XS" begin
+        energies = collect(range(1e6, 5e6, length=100))
+        xs = fill(3.0, length(energies))
+        bounds = [1e6, 3e6, 5e6]
+        avg_const, _ = photon_group_average(energies, xs, bounds;
+                                             weight_fn=photon_weight_constant)
+        avg_inve, _ = photon_group_average(energies, xs, bounds;
+                                            weight_fn=photon_weight_inv_e)
+        @test avg_const[1] ≈ 3.0 atol=0.01
+        @test avg_inve[1] ≈ 3.0 atol=0.01
+    end
+
+    @testset "GAMINR -- PHOTON_REACTIONS table" begin
+        @test length(PHOTON_REACTIONS) == 5
+        mts = [r.mt for r in PHOTON_REACTIONS]
+        @test 501 in mts
+        @test 502 in mts
+        @test 504 in mts
+        @test 516 in mts
+        @test 522 in mts
+    end
+
+    @testset "GAMINR -- group count consistency" begin
+        for (igg, expected_ng) in [(2,94), (3,12), (4,21), (5,22),
+                                    (6,48), (7,24), (8,36), (9,38), (10,42)]
+            gs = get_photon_group_structure(igg)
+            @test length(gs) - 1 == expected_ng
+        end
+    end
+
 end  # @testset "NJOY.jl"
 
 # Integration tests against NJOY2016 reference outputs (separate file)

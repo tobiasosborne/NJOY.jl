@@ -60,11 +60,26 @@ include("processing/group_structures.jl")
 include("processing/weight_functions.jl")
 include("processing/groupr.jl")
 
+# Processing modules (GASPR -- gas production cross sections)
+include("processing/gaspr.jl")
+
+# Processing modules (MIXR -- cross section mixing)
+include("processing/mixr.jl")
+
+# Processing modules (RESXSR -- resonance cross section file)
+include("processing/resxsr.jl")
+
 # Processing modules (MODER -- tape management and material extraction)
 include("processing/moder.jl")
 
 # Processing modules (ERRORR -- covariance processing)
 include("processing/errorr.jl")
+
+# Processing modules (COVR -- covariance visualization and library output)
+include("processing/covr.jl")
+
+# Processing modules (GAMINR -- photon interaction cross sections)
+include("processing/gaminr.jl")
 
 # Output formats (ACER -- ACE format for MCNP)
 include("formats/ace_types.jl")
@@ -164,6 +179,19 @@ export get_weight_function
 export weight_flat, weight_inv_e, weight_maxwell_fission
 export group_integrate, group_average, group_average_shielded
 
+# Public API -- GASPR (gas production cross sections)
+export GasProductionResult
+export gas_multiplicity, gas_yield, accumulate_gas, gas_production
+export gas_production_dict, compute_gas_production
+
+# Public API -- MIXR (cross section mixing)
+export MixComponent, MixInput, union_energy_grid
+export interpolate_column, mix_reactions, mix_materials
+
+# Public API -- RESXSR (resonance cross section file)
+export RESXSRecord, extract_resxs, extract_resxs_dict
+export thin_resxs, write_resxs
+
 # Public API -- MODER (tape management)
 export TapeEntry, TapeDirectory, ENDFTapeSection, ENDFTapeMaterial
 export read_tape_directory, extract_material, merge_tapes
@@ -176,6 +204,23 @@ export expand_covariance_block, multigroup_covariance
 export sandwich_covariance, sensitivity_jacobian
 export is_symmetric, is_psd
 export read_mf33, ni_covariance, nc_covariance, process_covariance
+
+# Public API -- COVR (covariance visualization and library output)
+export CorrelationMatrix
+export relative_std_dev, covariance_to_correlation
+export max_abs_correlation, is_valid_correlation
+export format_covariance_output, process_covr, covr_summary
+
+# Public API -- GAMINR (photon interaction cross sections)
+export PhotonMultiGroupXS, PhotonGroupId
+export IGG_CSEWG94, IGG_LANL12, IGG_STEINER21, IGG_STRAKER22
+export IGG_LANL48, IGG_LANL24, IGG_VITAMINC36, IGG_VITAMINE38, IGG_VITAMINJ42
+export CSEWG_94, LANL_12_GAMMA, STEINER_21, STRAKER_22
+export LANL_48_GAMMA, LANL_24_GAMMA, VITAMINC_36, VITAMINE_38, VITAMINJ_42_GAMMA
+export get_photon_group_structure, get_photon_weight_function
+export photon_weight_constant, photon_weight_inv_e
+export photon_group_average, photon_heating_kerma
+export gaminr, group_photon_xs, PHOTON_REACTIONS
 
 # Public API -- ACER (ACE format for MCNP)
 export ACEHeader, ACENeutronTable, ACETable
