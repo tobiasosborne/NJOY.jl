@@ -127,7 +127,8 @@ Uses upward recursion for l >= 5.
 - l=4: phi_4 = rho - atan((105*rho - 10*rho^3) / (105 - 45*rho^2 + rho^4))
 
 A small-angle test (phi/rho < 1e-6) sets the result to zero for l >= 2,
-matching the Fortran behavior.
+matching the Fortran behavior (reconr.f90 facphi uses `(phi/rho).lt.test`
+without abs(), so negative phi/rho also triggers the cutoff).
 """
 function phase_shift(l::Integer, rho::Real)
     rho = Float64(rho)
@@ -140,13 +141,15 @@ function phase_shift(l::Integer, rho::Real)
         return rho - atan(rho)
     elseif l == 2
         phi = rho - atan(3.0 * rho / (3.0 - r2))
-        if abs(phi / rho) < test
+        # Matches Fortran facphi (reconr.f90:4459): (phi/rho).lt.test (no abs)
+        if phi / rho < test
             phi = 0.0
         end
         return phi
     elseif l == 3
         phi = rho - atan((15.0 * rho - rho * r2) / (15.0 - 6.0 * r2))
-        if abs(phi / rho) < test
+        # Matches Fortran facphi (reconr.f90:4462): (phi/rho).lt.test (no abs)
+        if phi / rho < test
             phi = 0.0
         end
         return phi
@@ -155,7 +158,8 @@ function phase_shift(l::Integer, rho::Real)
         top = 105.0 * rho - 10.0 * r2 * rho
         bot = 105.0 - 45.0 * r2 + r4
         phi = rho - atan(top / bot)
-        if abs(phi / rho) < test
+        # Matches Fortran facphi (reconr.f90:4468): (phi/rho).lt.test (no abs)
+        if phi / rho < test
             phi = 0.0
         end
         return phi
@@ -170,7 +174,8 @@ function phase_shift(l::Integer, rho::Real)
         S_prev = shift_factor(l - 1, rho)
         phi_prev = phase_shift(l - 1, rho)
         phi = phi_prev + atan(P_prev / (Float64(l) - S_prev))
-        if rho != 0.0 && abs(phi / rho) < test
+        # Matches Fortran facphi: (phi/rho).lt.test (no abs)
+        if rho != 0.0 && phi / rho < test
             phi = 0.0
         end
         return phi

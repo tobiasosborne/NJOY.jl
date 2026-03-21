@@ -178,12 +178,15 @@ end
 # --------------------------------------------------------------------------
 
 """
-    ResonanceRange
+    ResonanceRange{P<:AbstractResonanceFormalism}
 
 Container for one resonance energy range from ENDF File 2 (MF2/MT151).
 Holds the formalism-specific parameters plus metadata about the range.
+
+Parameterized on `P` (the concrete formalism type) to enable type-stable
+dispatch in `cross_section(E, range)`.
 """
-struct ResonanceRange
+struct ResonanceRange{P<:AbstractResonanceFormalism}
     EL::Float64                      # lower energy bound [eV]
     EH::Float64                      # upper energy bound [eV]
     LRU::Int32                       # 0=scat-radius only, 1=resolved, 2=unresolved
@@ -191,5 +194,5 @@ struct ResonanceRange
     LFW::Int32                       # fission width flag (URR only)
     NRO::Int32                       # energy-dependent scatt. radius flag
     NAPS::Int32                      # scattering radius control
-    parameters::AbstractResonanceFormalism
+    parameters::P
 end

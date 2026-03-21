@@ -29,6 +29,11 @@ include("resonances/reader.jl")
 include("resonances/breit_wigner.jl")
 include("resonances/reich_moore.jl")
 
+# Processing modules (RECONR pipeline)
+include("processing/adaptive_grid.jl")
+include("processing/reconr.jl")
+include("processing/pendf_writer.jl")
+
 # Public API -- constants
 export PhysicsConstants, CODATA2014
 
@@ -65,5 +70,16 @@ export MF2Data, IsotopeData, read_mf2
 # Public API -- Cross section evaluation
 export cross_section, cross_section_slbw, cross_section_mlbw, cross_section_rm
 export cwaven_constant, channel_radius
+
+# Public API -- Adaptive grid reconstruction
+export AdaptiveConfig, adaptive_reconstruct, round_sigfig
+
+# Public API -- RECONR processing
+export MF3Section, ENDFMaterial, PointwiseMaterial
+export read_mf3_sections, build_grid, build_evaluator
+export merge_background!, reconstruct, reconr, sigma_mf2
+
+# Public API -- PENDF writer
+export write_pendf, write_pendf_file
 
 end # module NJOY

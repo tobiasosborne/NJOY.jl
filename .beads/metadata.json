@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "NJOY.jl",
+  "dolt_database": "NJOY_jl",
   "project_id": "55fdd2be-e613-4d2c-ba44-6860b9299033"
 }

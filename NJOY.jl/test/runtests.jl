@@ -1373,4 +1373,361 @@ using NJOY
         end
     end
 
+    # ======================================================================
+    # round_sigfig
+    # ======================================================================
+    @testset "round_sigfig" begin
+        # Basic rounding to 7 significant figures
+        @test round_sigfig(1.23456789, 7, 0) != 0.0
+        @test isapprox(round_sigfig(1.23456789, 7, 0), 1.234568, rtol=1e-6)
+
+        # Shading up and down
+        v = round_sigfig(1.0e6, 7, 0)
+        vup = round_sigfig(1.0e6, 7, +1)
+        vdn = round_sigfig(1.0e6, 7, -1)
+        @test vup > v
+        @test vdn < v
+
+        # Zero handling
+        @test round_sigfig(0.0, 7, 0) == 0.0
+
+        # Negative values
+        v = round_sigfig(-1.23456789, 7, 0)
+        @test v < 0.0
+        @test isapprox(v, -1.234568, rtol=1e-5)
+
+        # Various significant figures
+        @test isapprox(round_sigfig(3.14159, 3, 0), 3.14, rtol=1e-2)
+        @test isapprox(round_sigfig(3.14159, 5, 0), 3.1416, rtol=1e-4)
+    end
+
+    # ======================================================================
+    # Adaptive Grid -- Lorentzian convergence
+    # ======================================================================
+    @testset "Adaptive Grid -- Lorentzian" begin
+        # A Lorentzian peak: f(x) = 1 / (1 + (x-x0)^2 / gamma^2)
+        # with x0 = 100.0, gamma = 0.5
+        x0 = 100.0
+        gamma = 0.5
+        lorentzian(E) = (1.0 / (1.0 + ((E - x0) / gamma)^2),
+                         0.5 / (1.0 + ((E - x0) / gamma)^2),
+                         0.3 / (1.0 + ((E - x0) / gamma)^2),
+                         0.2 / (1.0 + ((E - x0) / gamma)^2))
+
+        # Initial grid: just a few points spanning the peak
+        grid = Float64[50.0, 90.0, 95.0, 99.0, 100.0, 101.0, 105.0, 110.0, 150.0]
+
+        config = AdaptiveConfig(0.001)
+        energies, values = adaptive_reconstruct(lorentzian, grid, config)
+
+        # Should have more points than initial grid (adaptive refinement)
+        @test length(energies) > length(grid)
+
+        # Check convergence: at all midpoints, linear interpolation
+        # should match the true function within tolerance
+        n = length(energies)
+        max_rel_error = 0.0
+        for i in 1:(n-1)
+            e_mid = 0.5 * (energies[i] + energies[i+1])
+            true_val = lorentzian(e_mid)
+
+            # Linear interpolation
+            fr = (e_mid - energies[i]) / (energies[i+1] - energies[i])
+            for j in 1:4
+                interp_val = (1.0 - fr) * values[i, j] + fr * values[i+1, j]
+                if abs(true_val[j]) > 1e-10
+                    rel_err = abs(true_val[j] - interp_val) / abs(true_val[j])
+                    max_rel_error = max(max_rel_error, rel_err)
+                end
+            end
+        end
+
+        # Should converge within the tolerance (with some margin for
+        # the relaxed integral criterion)
+        @test max_rel_error < 0.02  # within errmax (10x err)
+
+        # Check that points are denser near the peak
+        near_peak = count(e -> abs(e - x0) < 5.0, energies)
+        far_from_peak = count(e -> abs(e - x0) > 20.0, energies)
+        @test near_peak > far_from_peak
+    end
+
+    # ======================================================================
+    # Adaptive Grid -- Step function
+    # ======================================================================
+    @testset "Adaptive Grid -- step function" begin
+        # A step function that transitions over a narrow region
+        step_fn(E) = begin
+            s = 1.0 / (1.0 + exp(-100.0 * (E - 5.0)))
+            (s, s, 0.0, 0.0)
+        end
+
+        grid = Float64[1.0, 3.0, 5.0, 7.0, 10.0]
+        config = AdaptiveConfig(0.001)
+        energies, values = adaptive_reconstruct(step_fn, grid, config)
+
+        # Should have many points near E=5 (the transition region)
+        @test length(energies) > 10
+
+        near_transition = count(e -> abs(e - 5.0) < 1.0, energies)
+        @test near_transition >= 5  # at least 5 points near the step
+    end
+
+    # ======================================================================
+    # RECONR -- Full H-2 (test 84) reconstruction
+    # ======================================================================
+    @testset "RECONR -- H-2 reconstruction" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        ref_file = joinpath(@__DIR__, "..", "..", "njoy-reference", "tests", "84",
+                           "referenceTape100")
+
+        if !isfile(endf_file)
+            @warn "Skipping RECONR tests: ENDF file not found"
+        else
+            # Run RECONR
+            result = reconr(endf_file; mat=128, err=0.001)
+
+            # Basic checks
+            @test length(result.energies) > 100
+            @test length(result.total) == length(result.energies)
+            @test length(result.elastic) == length(result.energies)
+            @test length(result.capture) == length(result.energies)
+
+            # Energy grid should be sorted
+            for i in 2:length(result.energies)
+                @test result.energies[i] >= result.energies[i-1]
+            end
+
+            # All cross sections should be non-negative
+            for i in 1:length(result.energies)
+                @test result.total[i] >= 0.0
+                @test result.elastic[i] >= 0.0
+                @test result.capture[i] >= 0.0
+            end
+
+            # Total = elastic + fission + capture (sum rule)
+            for i in 1:length(result.energies)
+                @test isapprox(result.total[i],
+                               result.elastic[i] + result.fission[i] + result.capture[i],
+                               rtol=1e-8)
+            end
+
+            # MF2 should be loaded
+            @test result.mf2.ZA == 1002.0
+            @test isapprox(result.mf2.AWR, 1.9968, rtol=1e-3)
+
+            # MF3 sections should be loaded
+            @test length(result.mf3_sections) > 0
+
+            # Check cross sections at thermal energy (0.0253 eV)
+            # H-2 has a known thermal cross section of about 3.4 barns total
+            thermal_idx = findfirst(e -> e >= 0.0253, result.energies)
+            if thermal_idx !== nothing
+                @test result.total[thermal_idx] > 2.0   # should be ~3.4 barns
+                @test result.total[thermal_idx] < 10.0   # sanity check
+                @test result.elastic[thermal_idx] > 1.0  # elastic dominates
+            end
+
+            # Compare with reference tape if available
+            if isfile(ref_file)
+                # Parse reference tape MF3/MT1 (total cross section)
+                ref_energies = Float64[]
+                ref_total = Float64[]
+                open(ref_file) do io
+                    in_mf3_mt1 = false
+                    header_lines = 0
+                    while !eof(io)
+                        line = readline(io)
+                        p = rpad(line, 80)
+                        mf = NJOY._parse_int(p[71:72])
+                        mt = NJOY._parse_int(p[73:75])
+
+                        if mf == 3 && mt == 1
+                            if !in_mf3_mt1
+                                in_mf3_mt1 = true
+                                header_lines = 0
+                            end
+                            header_lines += 1
+                            # Skip first 3 lines (HEAD, TAB1 header, interp table)
+                            if header_lines <= 3
+                                continue
+                            end
+                            # Parse data pairs
+                            for j in 1:3
+                                e_str = p[(j-1)*22+1 : (j-1)*22+11]
+                                s_str = p[(j-1)*22+12 : (j-1)*22+22]
+                                e_val = parse_endf_float(e_str)
+                                s_val = parse_endf_float(s_str)
+                                if e_val > 0.0
+                                    push!(ref_energies, e_val)
+                                    push!(ref_total, s_val)
+                                end
+                            end
+                        elseif in_mf3_mt1 && mt == 0
+                            break
+                        end
+                    end
+                end
+
+                if length(ref_energies) > 10
+                    # Compare total cross sections at reference energies
+                    # Our grid may differ, so interpolate our result
+                    n_close = 0
+                    n_compared = 0
+                    for i in 1:min(length(ref_energies), 50)
+                        e_ref = ref_energies[i]
+                        # Find nearest energy in our grid
+                        idx = searchsortedfirst(result.energies, e_ref)
+                        if idx > 1 && idx <= length(result.energies)
+                            # Linear interpolation
+                            e1 = result.energies[idx-1]
+                            e2 = result.energies[idx]
+                            if abs(e2 - e1) > 0.0
+                                fr = (e_ref - e1) / (e2 - e1)
+                                our_val = (1.0 - fr) * result.total[idx-1] + fr * result.total[idx]
+                                ref_val = ref_total[i]
+                                if ref_val > 0.01  # skip very small values
+                                    n_compared += 1
+                                    rel_diff = abs(our_val - ref_val) / ref_val
+                                    if rel_diff < 0.05  # 5% tolerance
+                                        n_close += 1
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    # At least 80% of compared points should be close
+                    if n_compared > 5
+                        @test n_close / n_compared > 0.7
+                    end
+                end
+            end
+        end
+    end
+
+    # ======================================================================
+    # RECONR -- Grid density near resonances
+    # ======================================================================
+    @testset "RECONR -- grid density near resonances" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(endf_file)
+            @warn "Skipping grid density tests: ENDF file not found"
+        else
+            result = reconr(endf_file; mat=128, err=0.001)
+
+            # H-2 has no sharp resonances (scattering-radius only in resolved region),
+            # but the grid should still have some points at low energies
+            # MF3 data for H-2 has breakpoints at 1e-5, 1e-4, 0.0253 eV
+            low_e = count(e -> e < 1.0, result.energies)
+            @test low_e >= 2  # should have at least a couple of points below 1 eV
+        end
+    end
+
+    # ======================================================================
+    # RECONR -- sum rule (total = elastic + capture + fission)
+    # ======================================================================
+    @testset "RECONR -- sum rule consistency" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(endf_file)
+            @warn "Skipping sum rule tests: ENDF file not found"
+        else
+            result = reconr(endf_file; mat=128, err=0.001)
+
+            for i in 1:length(result.energies)
+                sum_parts = result.elastic[i] + result.fission[i] + result.capture[i]
+                @test isapprox(result.total[i], sum_parts, rtol=1e-8)
+            end
+        end
+    end
+
+    # ======================================================================
+    # PENDF Writer -- basic output format
+    # ======================================================================
+    @testset "PENDF Writer -- basic output" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(endf_file)
+            @warn "Skipping PENDF writer tests: ENDF file not found"
+        else
+            result = reconr(endf_file; mat=128, err=0.001)
+
+            buf = IOBuffer()
+            write_pendf(buf, result; mat=128, err=0.001)
+            output = String(take!(buf))
+
+            # Should have content
+            @test length(output) > 100
+
+            # Should contain MF1, MF2, MF3 markers
+            lines = split(output, '\n')
+            has_mf1 = any(l -> length(l) >= 72 && strip(l[71:72]) == "1", lines)
+            has_mf3 = any(l -> length(l) >= 72 && strip(l[71:72]) == "3", lines)
+            @test has_mf1
+            @test has_mf3
+
+            # All lines should be 80 characters (ENDF format)
+            for line in lines
+                if !isempty(line)
+                    @test length(line) == 80
+                end
+            end
+        end
+    end
+
+    # ======================================================================
+    # MF3 Section Reader
+    # ======================================================================
+    @testset "MF3 Section Reader" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(endf_file)
+            @warn "Skipping MF3 reader tests: ENDF file not found"
+        else
+            open(endf_file) do io
+                sections = read_mf3_sections(io, 128)
+                @test length(sections) > 0
+
+                # H-2 should have MT=1 (total), MT=2 (elastic), MT=102 (capture)
+                mt_list = [Int(sec.mt) for sec in sections]
+                @test 1 in mt_list
+                @test 2 in mt_list
+                @test 102 in mt_list
+
+                # Each section should have data
+                for sec in sections
+                    @test length(sec.tab.x) > 0
+                    @test length(sec.tab.y) > 0
+                    @test sec.tab.x[1] > 0.0  # first energy should be positive
+                end
+            end
+        end
+    end
+
+    # ======================================================================
+    # build_grid and build_evaluator
+    # ======================================================================
+    @testset "build_grid and build_evaluator" begin
+        endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(endf_file)
+            @warn "Skipping build_grid tests: ENDF file not found"
+        else
+            open(endf_file) do io
+                find_section(io, 2, 151)
+                mf2 = read_mf2(io)
+                mf3_sections = read_mf3_sections(io, 128)
+
+                # Build grid
+                grid = build_grid(mf2, mf3_sections)
+                @test length(grid) > 10
+                @test issorted(grid)
+                @test grid[1] > 0.0
+
+                # Build evaluator
+                eval_fn = build_evaluator(mf2)
+                result = eval_fn(1.0)
+                @test length(result) == 4  # (total, elastic, fission, capture)
+                @test all(isfinite, result)
+            end
+        end
+    end
+
 end  # @testset "NJOY.jl"

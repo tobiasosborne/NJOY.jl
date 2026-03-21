@@ -83,7 +83,8 @@ function read_mf2(io::IO)
                 # Create a minimal SLBW parameter set with no resonances
                 params = SLBWParameters(
                     Int32(0), SPI, AP,
-                    Int32[], Vector{Float64}[], Vector{Float64}[],
+                    Int32[], Float64[], Float64[], Int32[],
+                    Vector{Float64}[], Vector{Float64}[],
                     Vector{Float64}[], Vector{Float64}[],
                     Vector{Float64}[], Vector{Float64}[]
                 )

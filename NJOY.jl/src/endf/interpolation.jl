@@ -1,18 +1,16 @@
 # ENDF interpolation and integration -- translation of NJOY2016 endf.f90:
 #   terp1, terpa (-> interpolate), intega (-> integrate), gral (-> panel_integral)
 
-const _coulomb_threshold = Ref(0.0)
-
-"""Set kinematic threshold for Coulomb penetrability interpolation (law 6)."""
-set_coulomb_threshold!(thr::Real) = (_coulomb_threshold[] = Float64(thr))
-
 """
-    terp1(x1, y1, x2, y2, x, law) -> Float64
+    terp1(x1, y1, x2, y2, x, law; coulomb_threshold=0.0) -> Float64
 
 Interpolate one point between `(x1,y1)` and `(x2,y2)` using ENDF interpolation `law`.
+The `coulomb_threshold` keyword is the kinematic threshold for Coulomb penetrability
+interpolation (law 6). Defaults to 0.0.
 """
 function terp1(x1::Real, y1::Real, x2::Real, y2::Real,
-               x::Real, law::InterpolationLaw)
+               x::Real, law::InterpolationLaw;
+               coulomb_threshold::Real=0.0)
     x2 == x1 && return Float64(y1)
     (law == Histogram || y2 == y1 || x == x1) && return Float64(y1)
     if law == LinLin
@@ -25,7 +23,7 @@ function terp1(x1::Real, y1::Real, x2::Real, y2::Real,
         y1 == 0.0 ? 0.0 : y1 * exp(log(x / x1) * log(y2 / y1) / log(x2 / x1))
     elseif law == CoulombPen
         y1 == 0.0 && return 0.0
-        thr = _coulomb_threshold[]
+        thr = Float64(coulomb_threshold)
         t = sqrt(x1 - thr)
         b = log((x2 * y2) / (x1 * y1)) / (1.0 / t - 1.0 / sqrt(x2 - thr))
         a = exp(b / t) * x1 * y1
@@ -35,7 +33,8 @@ function terp1(x1::Real, y1::Real, x2::Real, y2::Real,
     end
 end
 
-terp1(x1, y1, x2, y2, x, i::Integer) = terp1(x1, y1, x2, y2, x, InterpolationLaw(i))
+terp1(x1, y1, x2, y2, x, i::Integer; coulomb_threshold::Real=0.0) =
+    terp1(x1, y1, x2, y2, x, InterpolationLaw(i); coulomb_threshold=coulomb_threshold)
 
 # --- Interval lookup ---
 
@@ -60,18 +59,21 @@ function _law_for_point(interp::InterpolationTable, idx::Int)
 end
 
 """
-    interpolate(tab::TabulatedFunction, x) -> Float64
+    interpolate(tab::TabulatedFunction, x; coulomb_threshold=0.0) -> Float64
 
 Interpolate the tabulated function at `x`. Returns 0.0 outside range.
+The `coulomb_threshold` keyword is passed through to `terp1` for law 6.
 """
-function interpolate(tab::TabulatedFunction, x::Real)
+function interpolate(tab::TabulatedFunction, x::Real;
+                     coulomb_threshold::Real=0.0)
     n = length(tab)
     n >= 1 || return 0.0
     (x < tab.x[1] || x > tab.x[n]) && return 0.0
     x == tab.x[1] && return Float64(tab.y[1])
     x == tab.x[n] && return Float64(tab.y[n])
     i, law = _find_interval(tab, x)
-    terp1(tab.x[i], tab.y[i], tab.x[i+1], tab.y[i+1], x, law)
+    terp1(tab.x[i], tab.y[i], tab.x[i+1], tab.y[i+1], x, law;
+          coulomb_threshold=coulomb_threshold)
 end
 
 # --- Analytical panel integral (NJOY's gral) ---
@@ -143,12 +145,14 @@ function panel_integral(xl::Real, yl::Real, xh::Real, yh::Real,
 end
 
 """
-    integrate(tab::TabulatedFunction, x1, x2) -> Float64
+    integrate(tab::TabulatedFunction, x1, x2; coulomb_threshold=0.0) -> Float64
 
 Integrate the tabulated function from `x1` to `x2` using analytical
 panel integrals (matching NJOY's `intega`/`gral`). Zero outside range.
+The `coulomb_threshold` keyword is available for future use with law 6.
 """
-function integrate(tab::TabulatedFunction, x1::Real, x2::Real)
+function integrate(tab::TabulatedFunction, x1::Real, x2::Real;
+                   coulomb_threshold::Real=0.0)
     n = length(tab)
     n >= 2 || return 0.0
     x1 >= x2 && return 0.0

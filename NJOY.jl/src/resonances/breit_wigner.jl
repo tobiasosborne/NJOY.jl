@@ -110,7 +110,6 @@ function cross_section_slbw(E::Real, params::SLBWParameters,
     for il in 1:Int(params.NLS)
         ll = Int(params.l_values[il])
         nrs = length(params.Er[il])
-        awri_l = params.AWRI[il]
         qx = params.QX[il]
         lrx = Int(params.LRX[il])
 
@@ -194,7 +193,9 @@ function cross_section_slbw(E::Real, params::SLBWParameters,
             if T > 0.0
                 # Doppler-broadened line shapes
                 ex = 2.0 * (E - erp) / gtt
-                delta = sqrt(4.0 * tbk * E / awri_l)
+                # Use global awri (from first l-group), matching Fortran reconr.f90:2797
+                # where awri is set once from res(inow+12) and not updated per l-group
+                delta = sqrt(4.0 * tbk * E / awri)
                 theta = gtt / delta
                 ax = theta * ex / 2.0
                 y = theta / 2.0
@@ -425,9 +426,11 @@ function cross_section_mlbw(E::Real, params::MLBWParameters,
     sig_elastic *= pifac
     sig_fission *= 2.0 * pifac
     sig_capture *= 2.0 * pifac
-    if sig_competitive != 0.0
-        sig_competitive *= 2.0 * pifac
-    end
+    # Note: sig_competitive is NOT scaled by 2*pifac here, matching NJOY2016 Fortran
+    # (reconr.f90:3007-3012). The Fortran accumulates sigp(5) with the same comfac
+    # as sigp(3)/sigp(4) (which includes the 2*gne/gtt factor) but does NOT apply
+    # the final 2*pifac scaling to sigp(5). This is arguably a Fortran bug (sigp(5)
+    # should be scaled like sigp(3)/sigp(4)), but we match NJOY2016 exactly.
 
     # Total = elastic + fission + capture + competitive
     sig_total = sig_elastic + sig_fission + sig_capture + sig_competitive
@@ -442,20 +445,29 @@ end
     cross_section(E, range::ResonanceRange; temperature=0.0, table=nothing) -> CrossSections
 
 Compute resonance cross sections at energy E [eV] for the given resonance range.
-Dispatches to the appropriate formalism based on the parameter type.
+Uses multiple dispatch on the parameter type for type stability.
 """
+function cross_section(E::Real, range::ResonanceRange{SLBWParameters};
+                       temperature::Real=0.0,
+                       table::Union{Nothing,FaddeevaTable}=nothing)
+    return cross_section_slbw(E, range.parameters, range;
+                              temperature=temperature, table=table)
+end
+
+function cross_section(E::Real, range::ResonanceRange{MLBWParameters};
+                       temperature::Real=0.0,
+                       table::Union{Nothing,FaddeevaTable}=nothing)
+    return cross_section_mlbw(E, range.parameters, range)
+end
+
+function cross_section(E::Real, range::ResonanceRange{ReichMooreParameters};
+                       temperature::Real=0.0,
+                       table::Union{Nothing,FaddeevaTable}=nothing)
+    return cross_section_rm(E, range.parameters, range)
+end
+
 function cross_section(E::Real, range::ResonanceRange;
                        temperature::Real=0.0,
                        table::Union{Nothing,FaddeevaTable}=nothing)
-    params = range.parameters
-    if params isa SLBWParameters
-        return cross_section_slbw(E, params, range;
-                                  temperature=temperature, table=table)
-    elseif params isa MLBWParameters
-        return cross_section_mlbw(E, params, range)
-    elseif params isa ReichMooreParameters
-        return cross_section_rm(E, params, range)
-    else
-        error("Unsupported resonance formalism: $(typeof(params))")
-    end
+    error("Unsupported resonance formalism: $(typeof(range.parameters))")
 end
