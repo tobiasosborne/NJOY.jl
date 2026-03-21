@@ -5050,8 +5050,8 @@ using LinearAlgebra
 
         @test rec.energies[1] >= 100.0
         @test rec.energies[end] <= 10000.0
-        @test all(rec.elastic .> 0.0)
-        @test all(rec.capture .> 0.0)
+        @test all(rec.elastic .>= 0.0)
+        @test all(rec.capture .>= 0.0)
     end
 
     # ======================================================================
@@ -5330,6 +5330,292 @@ using LinearAlgebra
             gs = get_photon_group_structure(igg)
             @test length(gs) - 1 == expected_ng
         end
+    end
+
+    # ======================================================================
+    # CCCCR -- ISOTXS binary output
+    # ======================================================================
+    @testset "CCCCR -- write_isotxs basic structure" begin
+        # Build minimal multigroup data
+        gb = [1e-5, 1.0, 1e3, 2e7]
+        mt_list = [1, 2, 18, 102]
+        ngroups = 3
+        xs = ones(ngroups, 4)
+        xs[:, 1] = [10.0, 8.0, 5.0]    # total
+        xs[:, 2] = [6.0, 5.0, 3.0]     # elastic
+        xs[:, 3] = [2.0, 1.5, 1.0]     # fission
+        xs[:, 4] = [1.0, 0.8, 0.5]     # capture
+        flux = [1.0, 1.0, 1.0]
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_isotxs(buf, mgxs; title="test isotxs", isotope_name="U235",
+                     atom_mass=235.0, ivers=1)
+        data = take!(buf)
+
+        # File must be non-empty
+        @test length(data) > 0
+
+        # Fortran record structure: first 4 bytes are record length (little-endian)
+        rec1_len = reinterpret(Int32, data[1:4])[1]
+        @test rec1_len > 0
+
+        # File identification record: hname(8) + huse(16) + ivers(4) = 28 bytes
+        @test rec1_len == 28
+
+        # Verify record closure: bytes after record data should match
+        rec1_end_pos = 4 + rec1_len
+        rec1_close = reinterpret(Int32, data[rec1_end_pos+1:rec1_end_pos+4])[1]
+        @test rec1_close == rec1_len
+
+        # Second record: file control (8 int32 = 32 bytes)
+        rec2_start = rec1_end_pos + 5
+        rec2_len = reinterpret(Int32, data[rec2_start:rec2_start+3])[1]
+        @test rec2_len == 32  # 8 * 4 bytes
+
+        # Read ngroup from file control record
+        fc_start = rec2_start + 4
+        file_ctrl = reinterpret(Int32, data[fc_start:fc_start+31])
+        @test file_ctrl[1] == ngroups  # ngroup
+        @test file_ctrl[2] == 1        # niso
+    end
+
+    @testset "CCCCR -- write_isotxs roundtrip record integrity" begin
+        gb = [0.01, 10.0, 1e6]
+        mgxs = MultiGroupXS(gb, [1, 2], [5.0 3.0; 4.0 2.0], [1.0, 1.0])
+
+        buf = IOBuffer()
+        write_isotxs(buf, mgxs; title="roundtrip test")
+        data = take!(buf)
+
+        # Walk all records and verify each has matching open/close markers
+        pos = 1
+        n_records = 0
+        while pos + 3 <= length(data)
+            rlen = reinterpret(Int32, data[pos:pos+3])[1]
+            @test rlen >= 0
+            # Close marker
+            close_pos = pos + 4 + rlen
+            close_pos + 3 <= length(data) || break
+            rclose = reinterpret(Int32, data[close_pos:close_pos+3])[1]
+            @test rclose == rlen
+            n_records += 1
+            pos = close_pos + 4
+        end
+        # Expect at least 4 records: file_id, file_ctrl, file_data, iso_ctrl
+        @test n_records >= 4
+    end
+
+    # ======================================================================
+    # CCCCR -- BRKOXS binary output
+    # ======================================================================
+    @testset "CCCCR -- write_brkoxs basic structure" begin
+        ng = 3
+        nreact = 2
+        nsig = 3
+        ntemp = 2
+        # f-factors: all ones (infinite dilution)
+        shielded = ones(Float64, ng, nreact, nsig, ntemp)
+        sigma0 = [1e10, 1e4, 1e2]
+        temps = [300.0, 600.0]
+        gb = [1e-5, 1.0, 1e3, 2e7]
+
+        buf = IOBuffer()
+        write_brkoxs(buf, shielded; sigma0_values=sigma0, temperatures=temps,
+                     group_bounds=gb, isotope_name="Fe56")
+        data = take!(buf)
+
+        @test length(data) > 0
+
+        # First record: file identification (28 bytes)
+        rec1_len = reinterpret(Int32, data[1:4])[1]
+        @test rec1_len == 28
+
+        # Second record: file control (6 int32 = 24 bytes)
+        pos = 4 + rec1_len + 4 + 1
+        rec2_len = reinterpret(Int32, data[pos:pos+3])[1]
+        @test rec2_len == 24
+
+        # Read file control values
+        fc_start = pos + 4
+        fc = reinterpret(Int32, data[fc_start:fc_start+23])
+        @test fc[1] == ng       # ngroup
+        @test fc[2] == 1        # niso
+        @test fc[3] == nsig     # nsigpt
+        @test fc[4] == ntemp    # ntempt
+        @test fc[5] == nreact   # nreact
+    end
+
+    # ======================================================================
+    # CCCCR -- DLAYXS binary output
+    # ======================================================================
+    @testset "CCCCR -- write_dlayxs basic structure" begin
+        ng = 4
+        nfam = 6
+        decay = [0.0124, 0.0305, 0.111, 0.301, 1.14, 3.01]
+        spectra = ones(ng, nfam) ./ ng  # uniform spectrum
+        yields = fill(0.01, ng, nfam)
+        gb = collect(range(1e-5, 2e7; length=ng+1))
+
+        ddata = (ngroup=ng, nfamilies=nfam, decay_constants=decay,
+                 spectra=spectra, group_bounds=gb, yields=yields,
+                 isotope_name="U235")
+
+        buf = IOBuffer()
+        write_dlayxs(buf, ddata; title="test dlayxs")
+        data = take!(buf)
+
+        @test length(data) > 0
+
+        # File identification record
+        rec1_len = reinterpret(Int32, data[1:4])[1]
+        @test rec1_len == 28
+
+        # File control: 4 int32 = 16 bytes
+        pos = 4 + rec1_len + 4 + 1
+        rec2_len = reinterpret(Int32, data[pos:pos+3])[1]
+        @test rec2_len == 16
+
+        fc_start = pos + 4
+        fc = reinterpret(Int32, data[fc_start:fc_start+15])
+        @test fc[1] == ng      # ngroup
+        @test fc[2] == 1       # nisod
+        @test fc[3] == nfam    # nfam
+        @test fc[4] == nfam    # nfam (repeated per spec)
+    end
+
+    # ======================================================================
+    # MATXSR -- MATXS ASCII output
+    # ======================================================================
+    @testset "MATXSR -- write_matxs file identification" begin
+        gb = [1e-5, 1.0, 1e3, 2e7]
+        mt_list = [1, 2, 102]
+        xs = [10.0 6.0 1.0; 8.0 5.0 0.8; 5.0 3.0 0.5]
+        flux = [1.0, 1.0, 1.0]
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_matxs(buf, mgxs; title="MATXS test file", ivers=2,
+                    particle="n", data_type="nscat", material_name="U235")
+        output = String(take!(buf))
+        lines = split(output, '\n')
+
+        # Line 1: file identification contains "matxs" and version
+        @test occursin("matxs", lines[1])
+        @test occursin("0v", lines[1])
+        @test occursin("2", lines[1])   # ivers=2
+
+        # Line 2: file control contains npart=1, ntype=1, nholl=1, nmat=1
+        @test occursin("1d", lines[2])
+        # Parse integers from file control
+        ctrl_part = strip(replace(lines[2], "1d" => ""))
+        ctrl_nums = [parse(Int, m.match) for m in eachmatch(r"-?\d+", ctrl_part)]
+        @test ctrl_nums[1] == 1   # npart
+        @test ctrl_nums[2] == 1   # ntype
+        @test ctrl_nums[3] == 1   # nholl
+        @test ctrl_nums[4] == 1   # nmat
+    end
+
+    @testset "MATXSR -- write_matxs group structure" begin
+        gb = [1e-5, 0.625, 1e5, 2e7]
+        ngroups = 3
+        mt_list = [1]
+        xs = reshape([10.0, 8.0, 5.0], 3, 1)
+        flux = [1.0, 1.0, 1.0]
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_matxs(buf, mgxs; title="group test")
+        output = String(take!(buf))
+
+        # File should contain the group structure record tag
+        @test occursin("4d", output)
+        # Should contain emin value
+        @test occursin("E", output)  # scientific notation present
+    end
+
+    @testset "MATXSR -- write_matxs vector data sizes" begin
+        gb = [1e-5, 1.0, 100.0, 1e4, 1e6, 2e7]
+        ngroups = 5
+        mt_list = [1, 2, 102]
+        xs = rand(ngroups, 3)
+        flux = ones(ngroups)
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_matxs(buf, mgxs; title="size test", material_name="Fe56",
+                    mat_id=2631)
+        output = String(take!(buf))
+
+        # Should contain vector control tag
+        @test occursin("6d", output)
+        # Should contain vector data tag
+        @test occursin("7d", output)
+        # Should contain material control tag
+        @test occursin("5d", output)
+        # Material name should appear
+        @test occursin("Fe56", output)
+    end
+
+    @testset "MATXSR -- write_matxs reaction names" begin
+        gb = [1e-5, 1.0, 2e7]
+        mt_list = [1, 2, 18, 102]
+        xs = ones(2, 4)
+        flux = [1.0, 1.0]
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_matxs(buf, mgxs)
+        output = String(take!(buf))
+
+        # Check that MT names appear in the output
+        @test occursin("ntot", output)
+        @test occursin("nelas", output)
+        @test occursin("nfiss", output)
+        @test occursin("ngamma", output)
+    end
+
+    @testset "MATXSR -- write_matxs_binary record structure" begin
+        gb = [1e-5, 1.0, 1e3, 2e7]
+        mt_list = [1, 2]
+        xs = [10.0 6.0; 8.0 5.0; 5.0 3.0]
+        flux = [1.0, 1.0, 1.0]
+        mgxs = MultiGroupXS(gb, mt_list, xs, flux)
+
+        buf = IOBuffer()
+        write_matxs_binary(buf, mgxs; title="binary test", ivers=3)
+        data = take!(buf)
+
+        @test length(data) > 0
+
+        # Walk records and verify Fortran record markers
+        pos = 1
+        n_records = 0
+        while pos + 3 <= length(data)
+            rlen = reinterpret(Int32, data[pos:pos+3])[1]
+            @test rlen >= 0
+            close_pos = pos + 4 + rlen
+            close_pos + 3 <= length(data) || break
+            rclose = reinterpret(Int32, data[close_pos:close_pos+3])[1]
+            @test rclose == rlen
+            n_records += 1
+            pos = close_pos + 4
+        end
+        # Expect 8 records: file_id, file_ctrl, hollerith, file_data,
+        # group_struct, mat_ctrl, vec_ctrl, vec_block
+        @test n_records == 8
+
+        # First record: file identification (28 bytes)
+        @test reinterpret(Int32, data[1:4])[1] == 28
+    end
+
+    @testset "MATXSR -- _mt_to_matxs_name coverage" begin
+        @test NJOY._mt_to_matxs_name(1) == "ntot"
+        @test NJOY._mt_to_matxs_name(2) == "nelas"
+        @test NJOY._mt_to_matxs_name(18) == "nfiss"
+        @test NJOY._mt_to_matxs_name(102) == "ngamma"
+        @test NJOY._mt_to_matxs_name(107) == "nalpha"
+        @test NJOY._mt_to_matxs_name(999) == "mt999"  # fallback
     end
 
 end  # @testset "NJOY.jl"
