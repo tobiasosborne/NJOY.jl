@@ -141,6 +141,36 @@ end
 
 # ---- Coherent elastic / Bragg edges (sigcoh(), thermr.f90:947-1207) ----
 
+"""
+    structure_factor(lat, l1, l2, l3) -> Float64
+
+Crystal structure factor for lattice type `lat`, matching Fortran `form()`.
+- lat=1: graphite (hexagonal with basis)
+- lat=2: beryllium (HCP)
+- lat=3: beryllium oxide
+"""
+function structure_factor(lat::Int, l1::Int, l2::Int, l3::Int)
+    pi_v = PhysicsConstants.pi
+    if lat == 1
+        # graphite
+        if isodd(l3)
+            return sin(pi_v * (l1 - l2) / 3)^2
+        else
+            return (6 + 10 * cos(2 * pi_v * (l1 - l2) / 3)) / 4
+        end
+    elseif lat == 2
+        # beryllium
+        return 1 + cos(2 * pi_v * (2 * l1 + 4 * l2 + 3 * l3) / 6)
+    elseif lat == 3
+        # beryllium oxide
+        beo1, beo2, beo3 = 7.54, 4.24, 11.31
+        return (1 + cos(2 * pi_v * (2 * l1 + 4 * l2 + 3 * l3) / 6)) *
+               (beo1 + beo2 + beo3 * cos(3 * pi_v * l3 / 4))
+    else
+        error("structure_factor: unsupported lattice type lat=$lat")
+    end
+end
+
 "Coherent elastic XS [barn]: sigma(E) = scon/E * sum_{edges below E} f_i."
 function bragg_edges(E::Real, bragg::BraggData)
     E <= 0 && return 0.0; tf = 0.0
@@ -153,13 +183,17 @@ end
 bragg_edge_energies(b::BraggData) = [b.tau_sq[i]/b.econ for i in 1:b.n_edges]
 
 """
-    build_bragg_data(; a, c, sigma_coh, A_mass, natom=1, debye_waller, emax=5.0)
+    build_bragg_data(; a, c, sigma_coh, A_mass, natom=1, debye_waller, emax=5.0, lat=1)
 
-Build Bragg data for hexagonal lattice. a,c in [cm], sigma_coh [barn].
+Build Bragg data for lattice type `lat`. a,c in [cm], sigma_coh [barn].
+Lattice types: 1=graphite, 2=beryllium, 3=beryllium oxide.
+The crystal structure factor (Fortran `form()`) determines which reciprocal
+lattice vectors actually contribute to Bragg scattering.
 """
 function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
                            A_mass::Real, natom::Int=1,
-                           debye_waller::Real, emax::Real=5.0)
+                           debye_waller::Real, emax::Real=5.0,
+                           lat::Int=1)
     pi_v = PhysicsConstants.pi
     amne = PhysicsConstants.amassn * PhysicsConstants.amu
     econ = PhysicsConstants.ev * 8 * amne / PhysicsConstants.hbar^2
@@ -183,7 +217,8 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
                 for sgn in (1,-1); l2s=sgn*l2
                     tsq = (c1*(l1^2+l2s^2+l1*l2s)+l3^2*c2)*twopis
                     (tsq<=0||tsq>ulim) && continue
-                    wt = exp(-tsq*t2*wint)*w1*w2*w3/sqrt(tsq)
+                    f_sf = structure_factor(lat, l1, l2s, l3)
+                    wt = exp(-tsq*t2*wint)*w1*w2*w3*f_sf/sqrt(tsq)
                     found = false
                     for k in eachindex(tsl)
                         if abs(tsq-tsl[k]) < 0.05*tsl[k]

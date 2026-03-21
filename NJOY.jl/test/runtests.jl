@@ -1291,6 +1291,128 @@ using LinearAlgebra
     end
 
     # ======================================================================
+    # Reich-Moore AD safety -- no MMatrix mutation (NJOY.jl-i67)
+    # ======================================================================
+    @testset "Reich-Moore AD safety -- no mutation" begin
+        # Build a minimal non-fissile RM system (scalar R-function path)
+        # Single s-wave resonance at 1.0 eV
+        rm_params = ReichMooreParameters(
+            Int32(1),       # NLS
+            0.0,            # SPI
+            0.5,            # AP
+            Int32(0),       # LAD
+            [Int32(0)],     # l_values: s-wave
+            [100.0],        # AWRI
+            [0.0],          # APL
+            [[1.0]],        # Er
+            [[0.5]],        # AJ
+            [[0.001]],      # Gn
+            [[0.025]],      # Gg
+            [[0.0]],        # Gfa (no fission)
+            [[0.0]]         # Gfb (no fission)
+        )
+        rng_rm = ResonanceRange(1e-5, 100.0, Int32(1), Int32(3),
+                                Int32(0), Int32(0), Int32(0), rm_params)
+
+        # Verify cross sections are finite and positive
+        xs = cross_section(1.0, rng_rm)
+        @test isfinite(xs.total)
+        @test xs.total > 0.0
+        @test xs.elastic > 0.0
+        @test xs.capture > 0.0
+        @test xs.fission == 0.0
+
+        # Verify no mutation: calling twice at same energy gives same result
+        xs2 = cross_section(1.0, rng_rm)
+        @test xs.total == xs2.total
+        @test xs.elastic == xs2.elastic
+
+        # Verify the function works with a generic Real type (not just Float64)
+        # This is a proxy for AD compatibility: if it accepts non-Float64
+        # Real values, the MMatrix mutation issue is resolved.
+        xs_big = cross_section_rm(BigFloat(1.0), rm_params, rng_rm)
+        @test isfinite(xs_big.total)
+        @test xs_big.total > 0.0
+
+        # Verify BigFloat type propagates through (not truncated to Float64).
+        # This is the key test for NJOY.jl-i67: before the fix, Float64 casts
+        # in penetrability and the CrossSections struct would strip the type.
+        @test xs_big.total isa BigFloat
+        @test xs_big.elastic isa BigFloat
+        @test xs_big.capture isa BigFloat
+
+        # Verify penetrability functions preserve non-Float64 Real types
+        @test penetrability(0, BigFloat(0.5)) isa BigFloat
+        @test penetrability(1, BigFloat(0.5)) isa BigFloat
+        @test shift_factor(1, BigFloat(0.5)) isa BigFloat
+        @test phase_shift(0, BigFloat(0.5)) isa BigFloat
+        @test phase_shift(1, BigFloat(0.5)) isa BigFloat
+
+        # Verify CrossSections is parameterized on its element type
+        @test typeof(xs_big) == CrossSections{BigFloat}
+        @test typeof(xs) == CrossSections{Float64}
+    end
+
+    # ======================================================================
+    # NRO=1 energy-dependent scattering radius storage (NJOY.jl-o96)
+    # ======================================================================
+    @testset "NRO=1 energy-dependent AP storage" begin
+        # Build a synthetic SLBW range with NRO=1 and an AP(E) table
+        params_nro = SLBWParameters(
+            Int32(1),      # NLS
+            0.0,           # SPI
+            0.5,           # AP (constant fallback)
+            [Int32(0)],    # l_values
+            [100.0],       # AWRI
+            [0.0],         # QX
+            [Int32(0)],    # LRX
+            [[1.0]],       # Er
+            [[0.5]],       # AJ
+            [[0.001]],     # Gn
+            [[0.025]],     # Gg
+            [[0.0]],       # Gf
+            [[0.0]]        # Gx
+        )
+
+        # Create an AP(E) tabulated function: AP varies linearly from 0.4 to 0.6
+        ap_interp = InterpolationTable([Int32(2)], [LinLin])
+        ap_tab = TabulatedFunction(ap_interp, [1e-5, 100.0], [0.4, 0.6])
+
+        # Construct range with NRO=1
+        rng_nro = ResonanceRange(1e-5, 100.0, Int32(1), Int32(1),
+                                 Int32(0), Int32(1), Int32(0), params_nro, ap_tab)
+
+        # Verify the ap_tab is stored
+        @test rng_nro.NRO == 1
+        @test rng_nro.ap_tab !== nothing
+        @test rng_nro.ap_tab isa TabulatedFunction
+        @test length(rng_nro.ap_tab.x) == 2
+        @test rng_nro.ap_tab.y[1] == 0.4
+        @test rng_nro.ap_tab.y[2] == 0.6
+
+        # Verify interpolation works
+        ap_mid = interpolate(rng_nro.ap_tab, 50.0)
+        @test isapprox(ap_mid, 0.5, atol=0.01)
+
+        # Verify cross section evaluation uses the energy-dependent AP
+        xs_nro = cross_section(1.0, rng_nro)
+        @test isfinite(xs_nro.total)
+        @test xs_nro.total > 0.0
+
+        # Construct same range but with NRO=0 (constant AP)
+        rng_const = ResonanceRange(1e-5, 100.0, Int32(1), Int32(1),
+                                   Int32(0), Int32(0), Int32(0), params_nro)
+        xs_const = cross_section(1.0, rng_const)
+
+        # The cross sections should differ because the scattering radius differs
+        # (AP(E=1.0) ~ 0.4002 vs constant AP = 0.5)
+        @test xs_nro.total != xs_const.total
+
+        # Backward compat: ResonanceRange without ap_tab still works (NRO=0)
+        @test rng_const.ap_tab === nothing
+    end
+
+    # ======================================================================
     # SLBW Cross Section -- synthetic test
     # ======================================================================
     @testset "SLBW Cross Section -- synthetic" begin
@@ -1507,11 +1629,9 @@ using LinearAlgebra
                 @test result.capture[i] >= 0.0
             end
 
-            # Total = elastic + fission + capture (sum rule)
+            # Total >= elastic + fission + capture (may include non-primary MTs)
             for i in 1:length(result.energies)
-                @test isapprox(result.total[i],
-                               result.elastic[i] + result.fission[i] + result.capture[i],
-                               rtol=1e-8)
+                @test result.total[i] >= result.elastic[i] + result.fission[i] + result.capture[i] - 1e-10
             end
 
             # MF2 should be loaded
@@ -1638,7 +1758,7 @@ using LinearAlgebra
 
             for i in 1:length(result.energies)
                 sum_parts = result.elastic[i] + result.fission[i] + result.capture[i]
-                @test isapprox(result.total[i], sum_parts, rtol=1e-8)
+                @test result.total[i] >= sum_parts - 1e-10
             end
         end
     end
@@ -1673,6 +1793,80 @@ using LinearAlgebra
                     @test length(line) == 80
                 end
             end
+        end
+    end
+
+    # ======================================================================
+    # PENDF Writer -- format correctness (TPID, SEND, sequence numbers)
+    # ======================================================================
+    @testset "PENDF Writer -- format correctness" begin
+        # Create a minimal PointwiseMaterial for format testing
+        pm = PointwiseMaterial(
+            Int32(128),
+            Float64[1e-5, 0.0253, 1.0, 1e6, 2e7],
+            Float64[10.0 5.0; 9.0 4.5; 8.0 4.0; 7.0 3.5; 6.0 3.0],
+            [1, 2]
+        )
+
+        buf = IOBuffer()
+        write_pendf(buf, pm; za=1002.0, awr=1.9968)
+        output = String(take!(buf))
+        lines = split(output, '\n')
+        nonempty = filter(!isempty, lines)
+
+        # TPID line must use MAT=1, MF=0, MT=0
+        tpid = rpad(nonempty[1], 80)
+        tpid_mat = parse(Int, strip(tpid[67:70]))
+        tpid_mf  = parse(Int, strip(tpid[71:72]))
+        tpid_mt  = parse(Int, strip(tpid[73:75]))
+        @test tpid_mat == 1
+        @test tpid_mf == 0
+        @test tpid_mt == 0
+
+        # No duplicate SEND records: count blank-line records with MF=3, MT=0
+        # (SEND for MF3). There should be exactly one per MT section.
+        send_mf3_count = 0
+        for line in nonempty
+            p = rpad(line, 80)
+            mat_f = parse(Int, strip(p[67:70]))
+            mf_f  = parse(Int, strip(p[71:72]))
+            mt_f  = parse(Int, strip(p[73:75]))
+            if mat_f == 128 && mf_f == 3 && mt_f == 0
+                send_mf3_count += 1
+            end
+        end
+        # 2 MT sections => exactly 2 SEND records (one per section, no extra)
+        @test send_mf3_count == 2
+
+        # MF3 HEAD records should have ZA and AWR from kwargs, not 0
+        for line in nonempty
+            p = rpad(line, 80)
+            mf_f = parse(Int, strip(p[71:72]))
+            mt_f = parse(Int, strip(p[73:75]))
+            seq  = parse(Int, strip(p[76:80]))
+            if mf_f == 3 && mt_f > 0 && seq == 1
+                # This is a HEAD record (first line of an MF3 section)
+                za_val = parse_endf_float(p[1:11])
+                awr_val = parse_endf_float(p[12:22])
+                @test isapprox(za_val, 1002.0, atol=0.1)
+                @test isapprox(awr_val, 1.9968, atol=0.001)
+            end
+        end
+
+        # Sequence numbers should be continuous within MF3
+        mf3_seqs = Int[]
+        for line in nonempty
+            p = rpad(line, 80)
+            mat_f = parse(Int, strip(p[67:70]))
+            mf_f  = parse(Int, strip(p[71:72]))
+            if mat_f == 128 && mf_f == 3
+                seq = parse(Int, strip(p[76:80]))
+                push!(mf3_seqs, seq)
+            end
+        end
+        # Sequence numbers should be strictly increasing (continuous)
+        for i in 2:length(mf3_seqs)
+            @test mf3_seqs[i] == mf3_seqs[i-1] + 1
         end
     end
 
@@ -2395,13 +2589,46 @@ using LinearAlgebra
     end
 
     # ======================================================================
+    # THERMR -- Structure Factor (crystal form factor)
+    # ======================================================================
+    @testset "THERMR -- structure_factor" begin
+        # Graphite (lat=1): l3 even -> (6+10*cos(2*pi*(l1-l2)/3))/4
+        #                   l3 odd  -> sin(pi*(l1-l2)/3)^2
+        # l1=l2=0, l3=0 (even): (6+10*cos(0))/4 = 16/4 = 4
+        @test isapprox(structure_factor(1, 0, 0, 0), 4.0, atol=1e-12)
+        # l1=0, l2=0, l3=1 (odd): sin(0)^2 = 0
+        @test isapprox(structure_factor(1, 0, 0, 1), 0.0, atol=1e-12)
+        # l1=1, l2=0, l3=0 (even): (6+10*cos(2*pi/3))/4 = (6-5)/4 = 0.25
+        @test isapprox(structure_factor(1, 1, 0, 0), 0.25, atol=1e-12)
+        # l1=1, l2=1, l3=0 (even): (6+10*cos(0))/4 = 4
+        @test isapprox(structure_factor(1, 1, 1, 0), 4.0, atol=1e-12)
+
+        # Beryllium (lat=2): 1 + cos(2*pi*(2*l1+4*l2+3*l3)/6)
+        # l1=l2=l3=0: 1+cos(0) = 2
+        @test isapprox(structure_factor(2, 0, 0, 0), 2.0, atol=1e-12)
+        # l1=0, l2=0, l3=1: 1+cos(2*pi*3/6) = 1+cos(pi) = 0
+        @test isapprox(structure_factor(2, 0, 0, 1), 0.0, atol=1e-12)
+        # l1=1, l2=0, l3=0: 1+cos(2*pi*2/6) = 1+cos(2*pi/3) = 0.5
+        @test isapprox(structure_factor(2, 1, 0, 0), 0.5, atol=1e-12)
+
+        # BeO (lat=3): multiplied by (beo1+beo2+beo3*cos(3*pi*l3/4))
+        beo1, beo2, beo3 = 7.54, 4.24, 11.31
+        # l1=l2=l3=0: (1+1)*(beo1+beo2+beo3*1) = 2*(7.54+4.24+11.31)
+        expected_beo = 2.0 * (beo1 + beo2 + beo3)
+        @test isapprox(structure_factor(3, 0, 0, 0), expected_beo, atol=1e-10)
+
+        # Invalid lat throws
+        @test_throws ErrorException structure_factor(99, 0, 0, 0)
+    end
+
+    # ======================================================================
     # THERMR -- Bragg Edges (coherent elastic)
     # ======================================================================
     @testset "THERMR -- Bragg edges" begin
-        @testset "Graphite Bragg edges" begin
+        @testset "Graphite Bragg edges with structure factor" begin
             bragg = build_bragg_data(a=2.4573e-8, c=6.700e-8,
                         sigma_coh=5.50, A_mass=12.011, natom=1,
-                        debye_waller=3.0, emax=1.0)
+                        debye_waller=3.0, emax=1.0, lat=1)
             @test bragg isa BraggData
             @test bragg.n_edges > 0
 
@@ -2413,19 +2640,61 @@ using LinearAlgebra
 
             # Zero below first edge
             @test bragg_edges(edges[1] * 0.5, bragg) == 0.0
-            # Positive above first edge
-            @test bragg_edges(edges[1] * 1.1, bragg) > 0.0
 
-            # 1/E behavior above all edges
+            # With structure factor, some edges have zero form factor.
+            # Find the first edge with nonzero form factor and verify XS > 0 above it.
+            nz_idx = findfirst(f -> abs(f) > 1e-15, bragg.form_factor)
+            @test nz_idx !== nothing
+            if nz_idx !== nothing
+                @test bragg_edges(edges[nz_idx] * 1.001, bragg) > 0.0
+            end
+
+            # 1/E behavior above all edges (sum of form factors is nonzero)
             E1, E2 = edges[end] * 1.5, edges[end] * 3.0
             @test isapprox(bragg_edges(E1, bragg)*E1,
                            bragg_edges(E2, bragg)*E2, rtol=1e-10)
 
-            # Step increase at each Bragg edge
-            for k in 2:min(5, length(edges))
-                @test bragg_edges(edges[k]*1.001, bragg) >=
-                      bragg_edges(edges[k]*0.999, bragg)
+            # Step increase at each Bragg edge with nonzero form factor
+            # Edges with zero form factor (suppressed by structure factor)
+            # do not contribute, so XS may decrease due to 1/E behavior.
+            nz_count = 0
+            for k in 2:min(10, length(edges))
+                if abs(bragg.form_factor[k]) > 1e-15
+                    @test bragg_edges(edges[k]*1.001, bragg) >=
+                          bragg_edges(edges[k]*0.999, bragg)
+                    nz_count += 1
+                end
             end
+            @test nz_count > 0  # at least some edges have nonzero form factor
+        end
+
+        @testset "Beryllium Bragg edges" begin
+            bragg_be = build_bragg_data(a=2.2856e-8, c=3.5832e-8,
+                          sigma_coh=7.53, A_mass=9.01, natom=1,
+                          debye_waller=3.0, emax=1.0, lat=2)
+            @test bragg_be isa BraggData
+            @test bragg_be.n_edges > 0
+
+            edges_be = bragg_edge_energies(bragg_be)
+            @test all(edges_be .> 0)
+            @test issorted(edges_be)
+
+            # With structure factor, find first edge with nonzero form factor
+            nz_idx_be = findfirst(f -> abs(f) > 1e-15, bragg_be.form_factor)
+            @test nz_idx_be !== nothing
+            if nz_idx_be !== nothing
+                @test bragg_edges(edges_be[nz_idx_be] * 1.001, bragg_be) > 0.0
+            end
+        end
+
+        @testset "Structure factor changes intensities" begin
+            # With structure factor (lat=1), some form factors should be
+            # suppressed (near zero) due to graphite selection rules
+            bragg_gr = build_bragg_data(a=2.4573e-8, c=6.700e-8,
+                          sigma_coh=5.50, A_mass=12.011, natom=1,
+                          debye_waller=3.0, emax=1.0, lat=1)
+            has_nonzero = any(abs(f) > 1e-10 for f in bragg_gr.form_factor)
+            @test has_nonzero  # at least some edges contribute
         end
     end
 
@@ -3971,6 +4240,387 @@ using LinearAlgebra
                 n = moder_copy(io, buf_mat; mat=target_mat)
                 @test n > 0
             end
+        end
+    end
+
+    # ======================================================================
+    # NJOY2016 Reference Value Tests (Task 1: NJOY.jl-pta)
+    # ======================================================================
+    NJOY_REF_DIR = normpath(joinpath(@__DIR__, "..", "..", "njoy-reference"))
+    NJOY_REF_RESOURCES = joinpath(NJOY_REF_DIR, "tests", "resources")
+    NJOY_REF_TESTS = joinpath(NJOY_REF_DIR, "tests")
+
+    @testset "NJOY2016 Reference Value Tests" begin
+
+        # -- Helper: reuse read_reference_pendf and interpolate_at from
+        #    integration_tests.jl (included after this block). Define local
+        #    copies so these tests are self-contained.
+
+        function _ref_parse_endf_data_pairs(line::AbstractString)
+            p = rpad(line, 80)
+            pairs = Tuple{Float64,Float64}[]
+            for i in 0:2
+                f1, f2 = p[i*22+1:i*22+11], p[i*22+12:i*22+22]
+                (strip(f1) == "" && strip(f2) == "") && break
+                push!(pairs, (parse_endf_float(f1), parse_endf_float(f2)))
+            end
+            pairs
+        end
+
+        function _ref_read_pendf(filename::AbstractString)
+            result = Dict{Int, @NamedTuple{energies::Vector{Float64}, xs::Vector{Float64}, n_points::Int}}()
+            lines = readlines(filename)
+            i = 1
+            while i <= length(lines)
+                p = rpad(lines[i], 80)
+                mf, mt = NJOY._parse_int(p[71:72]), NJOY._parse_int(p[73:75])
+                mat_val = NJOY._parse_int(p[67:70])
+                if mf == 3 && mt > 0 && mat_val > 0
+                    i += 1; i > length(lines) && break
+                    p2 = rpad(lines[i], 80)
+                    n_points = NJOY._parse_int(p2[56:66])
+                    i += 2; i > length(lines) && break
+                    energies, xs_vals = Float64[], Float64[]
+                    while i <= length(lines)
+                        pd = rpad(lines[i], 80)
+                        (NJOY._parse_int(pd[71:72]) != mf || NJOY._parse_int(pd[73:75]) != mt) && break
+                        for (e, x) in _ref_parse_endf_data_pairs(pd); push!(energies, e); push!(xs_vals, x); end
+                        i += 1
+                    end
+                    result[mt] = (energies=energies, xs=xs_vals, n_points=n_points)
+                else
+                    i += 1
+                end
+            end
+            result
+        end
+
+        function _ref_interp(energies::Vector{Float64}, xs::Vector{Float64}, e_target::Float64)
+            e_target <= energies[1] && return xs[1]
+            e_target >= energies[end] && return xs[end]
+            idx = searchsortedlast(energies, e_target)
+            idx >= length(energies) && return xs[end]
+            frac = (e_target - energies[idx]) / (energies[idx+1] - energies[idx])
+            xs[idx] + frac * (xs[idx+1] - xs[idx])
+        end
+
+        # ---- Test 1: H-2 thermal total XS vs reference tape ----
+        @testset "H-2 thermal total XS vs NJOY2016 reference" begin
+            ref_file = joinpath(NJOY_REF_TESTS, "84", "referenceTape100")
+            endf_file = joinpath(NJOY_REF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+            if !isfile(ref_file) || !isfile(endf_file)
+                @warn "Skipping H-2 thermal reference test: files not found"
+                @test_skip false
+            else
+                ref = _ref_read_pendf(ref_file)
+                @test haskey(ref, 1)
+                ref1 = ref[1]
+                # Reference thermal total XS for H-2 at 1e-5 eV ~ 3.4203 barns
+                ref_thermal = ref1.xs[1]
+                @test isapprox(ref_thermal, 3.4203, rtol=1e-3)
+
+                # Compare our reconr result against reference thermal value
+                result = reconr(endf_file; mat=128, err=0.001)
+                our_thermal = _ref_interp(result.energies, result.total, ref1.energies[1])
+                @test isapprox(our_thermal, ref_thermal, rtol=0.001)
+            end
+        end
+
+        # ---- Test 2: H-2 XS at 5 sampled energies within 1% ----
+        @testset "H-2 XS at 5 sampled energies vs NJOY2016" begin
+            ref_file = joinpath(NJOY_REF_TESTS, "84", "referenceTape100")
+            endf_file = joinpath(NJOY_REF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+            if !isfile(ref_file) || !isfile(endf_file)
+                @warn "Skipping H-2 sampled energies test: files not found"
+                @test_skip false
+            else
+                ref = _ref_read_pendf(ref_file)
+                ref1 = ref[1]
+                result = reconr(endf_file; mat=128, err=0.001)
+
+                # Sample 5 energies spread across the reference grid
+                n_ref = length(ref1.energies)
+                sample_indices = [1,
+                                  max(1, div(n_ref, 4)),
+                                  max(1, div(n_ref, 2)),
+                                  max(1, div(3*n_ref, 4)),
+                                  n_ref]
+                for idx in sample_indices
+                    e_sample = ref1.energies[idx]
+                    ref_xs = ref1.xs[idx]
+                    our_xs = _ref_interp(result.energies, result.total, e_sample)
+                    @test isapprox(our_xs, ref_xs, rtol=0.01) ||
+                          isapprox(our_xs, ref_xs, atol=0.01)
+                end
+            end
+        end
+
+        # ---- Test 3: Fe-56 cross_section_rm at 0.0253 eV ----
+        @testset "Fe-56 RM thermal XS vs known ~14.6 barns" begin
+            endf_file = joinpath(NJOY_REF_RESOURCES, "n-026_Fe_056-JEFF3.3.endf")
+            if !isfile(endf_file)
+                @warn "Skipping Fe-56 RM thermal test: file not found"
+                @test_skip false
+            else
+                open(endf_file) do io
+                    @test find_section(io, 2, 151)
+                    mf2 = read_mf2(io)
+                    rng = mf2.isotopes[1].ranges[1]
+                    xs_th = cross_section_rm(0.0253, rng.parameters, rng)
+
+                    # Fe-56 resonance-only total at thermal ~ 14.6 barns
+                    # (without MF3 background; the resonance contribution
+                    # alone at thermal is dominated by potential scattering
+                    # plus 1/v capture tail from distant resonances)
+                    @test xs_th.total > 0.0
+                    @test isapprox(xs_th.total, 14.6, rtol=0.15)
+
+                    # Fission must be zero for Fe-56
+                    @test xs_th.fission == 0.0
+
+                    # Sum rule
+                    @test isapprox(xs_th.total,
+                                   xs_th.elastic + xs_th.capture + xs_th.fission,
+                                   rtol=1e-10)
+                end
+            end
+        end
+
+        # ---- Test 4: U-235 cross_section at 0.0253 eV: fission ~585 barns ----
+        @testset "U-235 RM thermal fission ~585 barns" begin
+            endf_file = joinpath(NJOY_REF_RESOURCES, "n-092_U_235-ENDF8.0.endf")
+            if !isfile(endf_file)
+                @warn "Skipping U-235 thermal fission test: file not found"
+                @test_skip false
+            else
+                open(endf_file) do io
+                    @test find_section(io, 2, 151)
+                    mf2 = read_mf2(io)
+                    rng = mf2.isotopes[1].ranges[1]
+                    xs_th = cross_section(0.0253, rng)
+
+                    # U-235 thermal fission XS from resonance parameters alone
+                    # should be in the ballpark of ~585 barns.
+                    # The resonance contribution dominates at thermal for U-235.
+                    @test xs_th.fission > 100.0
+                    @test isapprox(xs_th.fission, 585.0, rtol=0.25)
+
+                    # Total must be larger than fission
+                    @test xs_th.total > xs_th.fission
+
+                    # Sum rule
+                    @test isapprox(xs_th.total,
+                                   xs_th.elastic + xs_th.capture + xs_th.fission,
+                                   rtol=1e-10)
+                end
+            end
+        end
+
+        # ---- Test 5: Ag-109 MLBW at 5.19 eV resonance peak ----
+        @testset "Ag-109 MLBW 5.19 eV resonance peak" begin
+            endf_file = joinpath(NJOY_REF_RESOURCES, "n-047_Ag_109-ENDF8.0.endf")
+            if !isfile(endf_file)
+                @warn "Skipping Ag-109 MLBW resonance peak test: file not found"
+                @test_skip false
+            else
+                open(endf_file) do io
+                    @test find_section(io, 2, 151)
+                    mf2 = read_mf2(io)
+                    rng = mf2.isotopes[1].ranges[1]
+
+                    # At the 5.19 eV resonance, cross sections are very large
+                    xs_peak = cross_section(5.19, rng)
+                    @test xs_peak.total > 1000.0        # resonance peak is huge
+                    @test xs_peak.capture > 100.0        # large capture at peak
+
+                    # The Ag-109 5.19 eV resonance total XS is ~30000 barns
+                    # (the exact value depends on the evaluation, but it is
+                    # tens of thousands of barns at the peak)
+                    @test xs_peak.total > 5000.0
+
+                    # Off-resonance (1 eV, well below resonance) should be
+                    # much smaller than the peak
+                    xs_off = cross_section(1.0, rng)
+                    @test xs_peak.total > 10 * xs_off.total
+
+                    # Fission must be zero for Ag-109
+                    @test xs_peak.fission == 0.0
+
+                    # Sum rule at the peak
+                    @test isapprox(xs_peak.total,
+                                   xs_peak.elastic + xs_peak.capture + xs_peak.fission,
+                                   rtol=1e-10)
+
+                    # H-1 reference comparison from Test 43
+                    h1_ref_file = joinpath(NJOY_REF_TESTS, "43", "referenceTape35")
+                    h1_endf = joinpath(NJOY_REF_RESOURCES, "n-001_H_001-ENDF8.0-Beta6.endf")
+                    if isfile(h1_ref_file) && isfile(h1_endf)
+                        ref43 = _ref_read_pendf(h1_ref_file)
+                        @test haskey(ref43, 1)
+                        # H-1 thermal total ~ 37.16 barns from reference
+                        @test isapprox(ref43[1].xs[1], 37.16, rtol=0.01)
+                    end
+                end
+            end
+        end
+    end
+
+    # ======================================================================
+    # ERRORR Hardening Tests (Task 2: NJOY.jl-5as)
+    # ======================================================================
+    @testset "ERRORR Hardening" begin
+
+        # ---- Test: LB=6 asymmetric grids ----
+        @testset "LB=6 asymmetric grids" begin
+            # Row grid: 3 bins [1,2), [2,3), [3,4)
+            # Col grid: 2 bins [1,3), [3,5)
+            # The energies vector stores [row_grid..., col_grid...]
+            ek_row = [1.0, 2.0, 3.0, 4.0]   # 3 bins
+            ek_col = [1.0, 3.0, 5.0]          # 2 bins
+            ek = vcat(ek_row, ek_col)          # stored concatenated
+            # Matrix data: 3 rows x 2 cols = 6 values (row-major)
+            # [0.01 0.02; 0.03 0.04; 0.05 0.06]
+            data = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
+            block = CovarianceBlock(1, 1, 6, length(ek_col), ek, data)
+
+            # Expand onto a grid that spans the whole range
+            egrid = [1.0, 2.0, 3.0, 4.0, 5.0]
+            C = NJOY.expand_lb5_full(block, egrid)
+            @test size(C) == (4, 4)
+
+            # Row bin 1 [1,2) -> midpoint 1.5 in row grid bin 1
+            # Col bin 1 [1,2) -> midpoint 1.5 in col grid bin 1 [1,3)
+            @test C[1, 1] == 0.01
+
+            # Row bin 1, Col bin 2 [2,3) -> midpoint 2.5 in col grid bin 1 [1,3)
+            @test C[1, 2] == 0.01
+
+            # Row bin 1, Col bin 3 [3,4) -> midpoint 3.5 in col grid bin 2 [3,5)
+            @test C[1, 3] == 0.02
+
+            # Row bin 2 [2,3) -> midpoint 2.5 in row grid bin 2 [2,3)
+            # Col bin 1 [1,2) -> midpoint 1.5 in col grid bin 1
+            @test C[2, 1] == 0.03
+
+            # Row bin 3 [3,4) -> midpoint 3.5 in row grid bin 3 [3,4)
+            # Col bin 3 [3,4) -> midpoint 3.5 in col grid bin 2 [3,5)
+            @test C[3, 3] == 0.06
+
+            # Row bin 3, Col bin 4 [4,5) -> midpoint 4.5 in col grid bin 2 [3,5)
+            @test C[3, 4] == 0.06
+        end
+
+        @testset "LB=6 symmetric grids (fallback to shared grid)" begin
+            # When LB=6 but lt=0 (no separate col grid), use shared grid
+            ek = [1.0, 2.0, 3.0]
+            data = [0.01, 0.002, 0.003, 0.04]  # 2x2 full
+            block = CovarianceBlock(1, 1, 6, 0, ek, data)
+            egrid = [1.0, 2.0, 3.0]
+            C = NJOY.expand_lb5_full(block, egrid)
+            @test size(C) == (2, 2)
+            @test C[1, 1] == 0.01
+            @test C[2, 2] == 0.04
+            @test C[1, 2] == 0.002
+            @test C[2, 1] == 0.003
+        end
+
+        # ---- Test: Flux-weighted collapse ----
+        @testset "flux-weighted collapse" begin
+            ugrid = [1.0, 2.0, 3.0, 4.0]  # 3 fine bins
+            gb = [1.0, 2.5, 4.0]           # 2 groups
+
+            # Flux-weighted collapse rows sum to 1 (properly normalized)
+            flat_flux = [1.0, 1.0, 1.0]
+            T_flat = NJOY._collapse_matrix(ugrid, gb; flux=flat_flux)
+            for g in 1:2
+                @test isapprox(sum(T_flat[g, :]), 1.0, atol=1e-10)
+            end
+
+            # Non-uniform flux: heavily weight first fine bin
+            flux = [10.0, 1.0, 1.0]
+            T_weighted = NJOY._collapse_matrix(ugrid, gb; flux=flux)
+            @test size(T_weighted) == (2, 3)
+
+            # Group 1 spans [1.0, 2.5), covering fine bins 1 [1,2) and
+            # half of bin 2 [2,3). With flux [10, 1], first bin dominates.
+            # T_weighted[1,1] should be larger than with flat flux
+            @test T_weighted[1, 1] > T_flat[1, 1]
+
+            # Rows of T should sum to approximately 1 (within each group)
+            for g in 1:2
+                row_sum = sum(T_weighted[g, :])
+                @test isapprox(row_sum, 1.0, atol=1e-10)
+            end
+
+            # No flux (nothing) should still work (area-weighted)
+            T_area = NJOY._collapse_matrix(ugrid, gb)
+            @test size(T_area) == (2, 3)
+            @test all(T_area .>= 0.0)
+        end
+
+        @testset "flux-weighted multigroup_covariance" begin
+            # Diagonal covariance with non-uniform flux
+            ek = [1.0, 2.0, 3.0, 4.0, 5.0]
+            data = [0.01, 0.02, 0.03, 0.04]
+            block = CovarianceBlock(1, 1, 1, 0, ek, data)
+            gbounds = [1.0, 3.0, 5.0]
+
+            # Without flux
+            cm_flat = multigroup_covariance([block], gbounds)
+            # With flux (weighting toward higher energies)
+            flux_vec = [0.1, 0.5, 0.5, 0.9, 0.1, 0.1]
+            # flux must match the union grid size -- compute it
+            ugrid = NJOY._build_union_grid([block], Float64.(gbounds))
+            nu = length(ugrid) - 1
+            flux_ug = ones(nu)
+            for k in 1:nu
+                emid = 0.5 * (ugrid[k] + ugrid[k+1])
+                flux_ug[k] = emid  # linearly increasing flux
+            end
+            cm_weighted = multigroup_covariance([block], gbounds; flux=flux_ug)
+
+            # Both should be symmetric and PSD
+            @test is_symmetric(cm_flat)
+            @test is_symmetric(cm_weighted)
+            # Matrices should differ due to different weighting
+            @test !isapprox(cm_flat.matrix, cm_weighted.matrix, atol=1e-10)
+        end
+
+        # ---- Test: LB=0 absolute covariance default ----
+        @testset "LB=0 absolute covariance default" begin
+            # LB=0 blocks: covariance is absolute
+            ek = [1.0, 2.0, 3.0]
+            data = [100.0, 200.0]  # absolute covariance values (barns^2)
+            block_lb0 = CovarianceBlock(1, 1, 0, 0, ek, data)
+            gbounds = [1.0, 2.0, 3.0]
+
+            cm = multigroup_covariance([block_lb0], gbounds)
+            @test cm.is_relative == false  # LB=0 -> absolute
+
+            # Explicitly overriding should still work
+            cm_rel = multigroup_covariance([block_lb0], gbounds; is_relative=true)
+            @test cm_rel.is_relative == true
+        end
+
+        @testset "LB=1 remains relative by default" begin
+            ek = [1.0, 2.0, 3.0]
+            data = [0.01, 0.02]
+            block_lb1 = CovarianceBlock(1, 1, 1, 0, ek, data)
+            gbounds = [1.0, 2.0, 3.0]
+
+            cm = multigroup_covariance([block_lb1], gbounds)
+            @test cm.is_relative == true  # LB=1 -> relative
+        end
+
+        @testset "Mixed LB=0 and LB=1 blocks default to relative" begin
+            ek = [1.0, 2.0, 3.0]
+            block_lb0 = CovarianceBlock(1, 1, 0, 0, ek, [100.0, 200.0])
+            block_lb1 = CovarianceBlock(1, 1, 1, 0, ek, [0.01, 0.02])
+            gbounds = [1.0, 2.0, 3.0]
+
+            # Mixed: not all LB=0, so default is relative
+            cm = multigroup_covariance([block_lb0, block_lb1], gbounds)
+            @test cm.is_relative == true
         end
     end
 

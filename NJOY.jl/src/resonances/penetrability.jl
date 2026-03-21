@@ -26,7 +26,6 @@ Uses upward recursion for l >= 5.
 - l=4: P_4 = rho^9 / (11025 + 1575*rho^2 + 135*rho^4 + 10*rho^6 + rho^8)
 """
 function penetrability(l::Integer, rho::Real)
-    rho = Float64(rho)
     r2 = rho * rho
 
     if l == 0
@@ -80,7 +79,6 @@ Uses upward recursion for l >= 5.
               (11025 + 1575*rho^2 + 135*rho^4 + 10*rho^6 + rho^8)
 """
 function shift_factor(l::Integer, rho::Real)
-    rho = Float64(rho)
     r2 = rho * rho
 
     if l == 0
@@ -131,7 +129,6 @@ matching the Fortran behavior (reconr.f90 facphi uses `(phi/rho).lt.test`
 without abs(), so negative phi/rho also triggers the cutoff).
 """
 function phase_shift(l::Integer, rho::Real)
-    rho = Float64(rho)
     r2 = rho * rho
     test = 1.0e-6
 
@@ -173,7 +170,7 @@ function phase_shift(l::Integer, rho::Real)
         P_prev = penetrability(l - 1, rho)
         S_prev = shift_factor(l - 1, rho)
         phi_prev = phase_shift(l - 1, rho)
-        phi = phi_prev + atan(P_prev / (Float64(l) - S_prev))
+        phi = phi_prev + atan(P_prev / (l - S_prev))
         # Matches Fortran facphi: (phi/rho).lt.test (no abs)
         if rho != 0.0 && phi / rho < test
             phi = 0.0

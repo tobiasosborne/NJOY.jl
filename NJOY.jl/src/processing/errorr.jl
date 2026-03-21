@@ -60,16 +60,38 @@ end
 
 "Expand LB=5/6 full rectangular covariance."
 function expand_lb5_full(block::CovarianceBlock, egrid::AbstractVector{<:Real})
-    ne = length(egrid) - 1; ek = block.energies; nk = length(ek) - 1
+    ne = length(egrid) - 1
     C = zeros(Float64, ne, ne)
-    for i in 1:ne
-        ki = _find_bin(0.5*(egrid[i]+egrid[i+1]), ek); ki == 0 && continue
-        for j in 1:ne
-            kj = _find_bin(0.5*(egrid[j]+egrid[j+1]), ek); kj == 0 && continue
-            idx = (ki-1)*nk + kj
-            1 <= idx <= length(block.data) && (C[i,j] = block.data[idx])
+    if block.lb == 6 && block.lt > 0
+        # LB=6 asymmetric: energies stores [row_grid..., col_grid...]
+        # row grid has NE energies (block header ne), col grid has LT energies
+        nek = length(block.energies) - block.lt  # NE (row grid count)
+        nel = block.lt                            # NE' (col grid count)
+        ek_row = block.energies[1:nek]
+        ek_col = block.energies[nek+1:nek+nel]
+        nk_row = nek - 1
+        nk_col = nel - 1
+        for i in 1:ne
+            ki = _find_bin(0.5*(egrid[i]+egrid[i+1]), ek_row); ki == 0 && continue
+            for j in 1:ne
+                kj = _find_bin(0.5*(egrid[j]+egrid[j+1]), ek_col); kj == 0 && continue
+                idx = (ki-1)*nk_col + kj
+                1 <= idx <= length(block.data) && (C[i,j] = block.data[idx])
+            end
         end
-    end; C
+    else
+        # LB=5 full or LB=6 with identical grids: single shared energy grid
+        ek = block.energies; nk = length(ek) - 1
+        for i in 1:ne
+            ki = _find_bin(0.5*(egrid[i]+egrid[i+1]), ek); ki == 0 && continue
+            for j in 1:ne
+                kj = _find_bin(0.5*(egrid[j]+egrid[j+1]), ek); kj == 0 && continue
+                idx = (ki-1)*nk + kj
+                1 <= idx <= length(block.data) && (C[i,j] = block.data[idx])
+            end
+        end
+    end
+    C
 end
 
 """Dispatch on LB flag to expand a CovarianceBlock into a matrix on `egrid`."""
@@ -81,14 +103,29 @@ function expand_covariance_block(block::CovarianceBlock, egrid::AbstractVector{<
     error("Unsupported LB=$(block.lb). Supported: 0,1,2,5,6.")
 end
 
-"""Collapse NI-type CovarianceBlocks into a multigroup covariance matrix."""
+"""Collapse NI-type CovarianceBlocks into a multigroup covariance matrix.
+
+When `is_relative` is not explicitly provided, it is inferred from the LB flags:
+LB=0 indicates absolute covariance, so if all blocks have LB=0 the result is
+marked absolute. Otherwise the result is marked relative (the common case for
+LB=1..6). An optional `flux` vector (one value per fine-grid bin) enables
+flux-weighted collapse matching the Fortran ERRORR module."""
 function multigroup_covariance(blocks::AbstractVector{CovarianceBlock},
                                 group_bounds::AbstractVector{<:Real};
-                                is_relative::Bool=true)
+                                is_relative::Union{Bool,Nothing}=nothing,
+                                flux::Union{Nothing,AbstractVector{<:Real}}=nothing)
     isempty(blocks) && error("no covariance blocks provided")
     ng = length(group_bounds) - 1
     mt1, mt2 = blocks[1].mt1, blocks[1].mt2
     gb = collect(Float64, group_bounds)
+
+    # Determine is_relative from LB flags when not explicitly provided.
+    # LB=0 is absolute covariance per the ENDF manual; all other LB values
+    # are relative.
+    if is_relative === nothing
+        is_relative = !all(b -> b.lb == 0, blocks)
+    end
+
     # Check total fine grid size to avoid OOM
     total_e = sum(length(b.energies) for b in blocks) + ng + 1
     if total_e > 10000
@@ -100,7 +137,7 @@ function multigroup_covariance(blocks::AbstractVector{CovarianceBlock},
         nu = length(ugrid) - 1
         C_fine = zeros(Float64, nu, nu)
         for block in blocks; C_fine .+= expand_covariance_block(block, ugrid); end
-        T = _collapse_matrix(ugrid, gb)
+        T = _collapse_matrix(ugrid, gb; flux=flux)
         C_group = T * C_fine * T'
     end
     C_group = 0.5 * (C_group + C_group')
@@ -226,14 +263,36 @@ function _build_union_grid(blocks::AbstractVector{CovarianceBlock}, gb::Abstract
     sort!(collect(pts))
 end
 
-function _collapse_matrix(ugrid::AbstractVector{<:Real}, gb::AbstractVector{<:Real})
+function _collapse_matrix(ugrid::AbstractVector{<:Real}, gb::AbstractVector{<:Real};
+                          flux::Union{Nothing,AbstractVector{<:Real}}=nothing)
     ng = length(gb)-1; nu = length(ugrid)-1; T = zeros(Float64, ng, nu)
-    for k in 1:nu
-        u_lo, u_hi = ugrid[k], ugrid[k+1]; u_w = u_hi - u_lo; u_w <= 0 && continue
-        for g in 1:ng
-            ov = min(u_hi, gb[g+1]) - max(u_lo, gb[g]); ov > 0 && (T[g,k] = ov/u_w)
+    if flux !== nothing && length(flux) == nu
+        # Flux-weighted collapse (matching Fortran ERRORR)
+        # T[g,k] = flux[k] * overlap / (sum of flux*overlap in group g)
+        group_flux = zeros(Float64, ng)
+        for k in 1:nu
+            u_lo, u_hi = ugrid[k], ugrid[k+1]; u_w = u_hi - u_lo; u_w <= 0 && continue
+            for g in 1:ng
+                ov = min(u_hi, gb[g+1]) - max(u_lo, gb[g])
+                if ov > 0
+                    T[g,k] = flux[k] * ov / u_w
+                    group_flux[g] += flux[k] * ov / u_w
+                end
+            end
         end
-    end; T
+        for g in 1:ng
+            group_flux[g] > 0 && (T[g,:] ./= group_flux[g])
+        end
+    else
+        # Area-weighted collapse (flat flux assumption)
+        for k in 1:nu
+            u_lo, u_hi = ugrid[k], ugrid[k+1]; u_w = u_hi - u_lo; u_w <= 0 && continue
+            for g in 1:ng
+                ov = min(u_hi, gb[g+1]) - max(u_lo, gb[g]); ov > 0 && (T[g,k] = ov/u_w)
+            end
+        end
+    end
+    T
 end
 
 function _group_avg_simple(sigma_func, params, gb)

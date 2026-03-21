@@ -32,7 +32,9 @@ function write_pendf(io::IO, material::PointwiseMaterial;
                      endf_source::Union{IO, Nothing} = nothing,
                      temperature::Float64 = 0.0,
                      err::Float64 = 0.001,
-                     description::Vector{String} = String[])
+                     description::Vector{String} = String[],
+                     za::Float64 = 0.0,
+                     awr::Float64 = 0.0)
     mat = Int(material.mat)
     n_pts = length(material.energies)
     ns = Ref(1)  # line sequence counter
@@ -50,12 +52,14 @@ function write_pendf(io::IO, material::PointwiseMaterial;
         _write_minimal_mf2(io, mat, ns)
     end
 
-    # MF3 for each reaction
+    # MF3 for each reaction -- continuous sequence numbering across sections
+    ns[] = 1
     for (col, mt) in enumerate(material.mt_list)
         _write_mf3_from_matrix(io, mat, mt, material.energies,
-                               material.cross_sections, col, ns)
+                               material.cross_sections, col, ns;
+                               za=za, awr=awr)
     end
-    _write_fend(io, mat)
+    _write_fend(io, mat; ns=ns)
 
     # MEND + TEND
     _write_record_sep(io, 0, 0, 0)
@@ -114,17 +118,23 @@ end
 
 function _write_tpid_line(io::IO, text::AbstractString, mat::Int)
     t = rpad(text, 66)[1:66]
+    # TPID always uses MAT=1, MF=0, MT=0, NS=0 per NJOY convention
     @printf(io, "%s%4d%2d%3d%5d\n", t, 1, 0, 0, 0)
 end
 
-function _write_record_sep(io::IO, mat::Int, mf::Int, mt::Int)
+function _write_record_sep(io::IO, mat::Int, mf::Int, mt::Int;
+                           ns::Union{Ref{Int}, Nothing}=nothing)
     blanks = repeat(" ", 66)
-    @printf(io, "%s%4d%2d%3d%5d\n", blanks, mat, mf, mt, 99999)
+    seq = ns === nothing ? 99999 : ns[]
+    @printf(io, "%s%4d%2d%3d%5d\n", blanks, mat, mf, mt, seq)
+    if ns !== nothing
+        ns[] += 1
+    end
 end
 
-function _write_fend(io::IO, mat::Int)
-    _write_record_sep(io, mat, 3, 0)
-    _write_record_sep(io, mat, 0, 0)
+function _write_fend(io::IO, mat::Int; ns::Union{Ref{Int}, Nothing}=nothing)
+    # FEND only: each MT section writes its own SEND; no extra SEND here
+    _write_record_sep(io, mat, 0, 0; ns=ns)
 end
 
 function _write_cont_line(io::IO, c1, c2, l1, l2, n1, n2,
@@ -160,13 +170,13 @@ end
 function _write_mf3_from_matrix(io::IO, mat::Int, mt::Int,
                                  energies::Vector{Float64},
                                  xs::Matrix{Float64}, col::Int,
-                                 ns::Ref{Int})
+                                 ns::Ref{Int};
+                                 za::Float64=0.0, awr::Float64=0.0)
     n = length(energies)
     n >= 2 || return
-    ns[] = 1
 
-    # HEAD: ZA=0, AWR=0, 0, LR=99, 0, 0
-    _write_cont_line(io, 0.0, 0.0, 0, 99, 0, 0, mat, 3, mt, ns)
+    # HEAD: ZA, AWR, 0, LR=99, 0, 0 (matching reference tape format)
+    _write_cont_line(io, za, awr, 0, 99, 0, 0, mat, 3, mt, ns)
 
     # TAB1 header: QM=0, QI=0, 0, 0, NR=1, NP=n
     _write_cont_line(io, 0.0, 0.0, 0, 0, 1, n, mat, 3, mt, ns)
@@ -184,8 +194,8 @@ function _write_mf3_from_matrix(io::IO, mat::Int, mt::Int,
     end
     _write_data_values(io, data, mat, 3, mt, ns)
 
-    # SEND
-    _write_record_sep(io, mat, 3, 0)
+    # SEND with continuous sequence numbering
+    _write_record_sep(io, mat, 3, 0; ns=ns)
 end
 
 # ==========================================================================
@@ -334,11 +344,11 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
     energies = result.energies
     n = length(energies)
 
+    # Continuous sequence numbering across all MF3 sections
+    ns[] = 1
     for (mt, _) in reactions
         xs_data = _get_legacy_xs(result, Int(mt))
         xs_data === nothing && continue
-
-        ns[] = 1
 
         _write_cont_line(io, result.mf2.ZA, result.mf2.AWR, 0, 99, 0, 0,
                          Int(mat), 3, Int(mt), ns)
@@ -356,10 +366,12 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
         end
         _write_data_values(io, data, Int(mat), 3, Int(mt), ns)
 
-        _write_record_sep(io, Int(mat), 3, 0)
+        # SEND with continuous sequence numbering
+        _write_record_sep(io, Int(mat), 3, 0; ns=ns)
     end
 
-    _write_record_sep(io, Int(mat), 0, 0)
+    # FEND with continuous sequence numbering
+    _write_record_sep(io, Int(mat), 0, 0; ns=ns)
 end
 
 function _get_legacy_xs(result, mt::Int)

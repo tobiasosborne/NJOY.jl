@@ -44,8 +44,13 @@ function cross_section_mlbw(E::Real, params::MLBWParameters,
 
     # Channel radius
     ra = channel_radius(awri)
-    if NAPS == 1
-        ra = ap
+    if range.NRO == 0
+        if NAPS == 1
+            ra = ap
+        end
+    else
+        # Energy-dependent scattering radius (NRO != 0)
+        ap, ra = _apply_nro(ap, ra, E, range)
     end
 
     # Wavenumber at energy E

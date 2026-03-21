@@ -16,16 +16,19 @@ Abstract supertype for all ENDF resonance parameter formalisms.
 abstract type AbstractResonanceFormalism end
 
 """
-    CrossSections
+    CrossSections{T<:Real}
 
 Result container for computed cross sections at a single energy.
 All values in barns.
+
+Parameterized on `T` so that ForwardDiff dual numbers (or BigFloat, etc.)
+propagate through without being truncated to Float64.
 """
-struct CrossSections
-    total::Float64       # sigma_total
-    elastic::Float64     # sigma_elastic
-    fission::Float64     # sigma_fission
-    capture::Float64     # sigma_capture (radiative)
+struct CrossSections{T<:Real}
+    total::T       # sigma_total
+    elastic::T     # sigma_elastic
+    fission::T     # sigma_fission
+    capture::T     # sigma_capture (radiative)
 end
 
 CrossSections() = CrossSections(0.0, 0.0, 0.0, 0.0)
@@ -195,4 +198,17 @@ struct ResonanceRange{P<:AbstractResonanceFormalism}
     NRO::Int32                       # energy-dependent scatt. radius flag
     NAPS::Int32                      # scattering radius control
     parameters::P
+    ap_tab::Union{Nothing,TabulatedFunction}  # energy-dependent AP(E) when NRO!=0
+end
+
+# Convenience constructor without ap_tab (backward compatible)
+function ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, parameters::P) where {P<:AbstractResonanceFormalism}
+    ResonanceRange{P}(Float64(EL), Float64(EH), Int32(LRU), Int32(LRF),
+                      Int32(LFW), Int32(NRO), Int32(NAPS), parameters, nothing)
+end
+
+function ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, parameters::P,
+                        ap_tab::Union{Nothing,TabulatedFunction}) where {P<:AbstractResonanceFormalism}
+    ResonanceRange{P}(Float64(EL), Float64(EH), Int32(LRU), Int32(LRF),
+                      Int32(LFW), Int32(NRO), Int32(NAPS), parameters, ap_tab)
 end

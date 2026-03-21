@@ -136,7 +136,7 @@ export compute_kerma, verify_kerma_sum_rule
 export SABData, BraggData, ThermalResult
 export free_gas_xs, free_gas_kernel
 export read_thermal_data, sab_kernel, sab_xs
-export bragg_edges, bragg_edge_energies, build_bragg_data
+export bragg_edges, bragg_edge_energies, build_bragg_data, structure_factor
 export incoh_elastic_xs
 export compute_thermal_xs, compute_thermal
 export THERMR_EGRID

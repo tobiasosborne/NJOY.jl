@@ -92,13 +92,13 @@ function read_mf2(io::IO)
 
             elseif LRU == 1 && LRF <= 2
                 # SLBW (LRF=1) or MLBW (LRF=2) -- same reading format
-                params = _read_bw_params(io, LRF, NRO, NAPS)
-                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
+                params, ap_tab = _read_bw_params(io, LRF, NRO, NAPS)
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params, ap_tab))
 
             elseif LRU == 1 && LRF == 3
                 # Reich-Moore
-                params = _read_rm_params(io, NRO, NAPS)
-                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
+                params, ap_tab = _read_rm_params(io, NRO, NAPS)
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params, ap_tab))
 
             else
                 # Unsupported formalisms (Adler-Adler, URR, etc.)
@@ -130,9 +130,9 @@ Format (from ENDF-102 and NJOY's rdf2bw):
 """
 function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
     # Energy-dependent scattering radius (if NRO != 0)
+    ap_tab = nothing
     if NRO != 0
-        # Read TAB1 for AP(E) -- skip it for now but consume the lines
-        _tab1 = read_tab1(io)
+        ap_tab = TabulatedFunction(read_tab1(io))
     end
 
     # Parameters CONT: SPI, AP, 0, 0, NLS, 0
@@ -206,16 +206,17 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
     end
 
     if LRF == Int32(1)
-        return SLBWParameters(Int32(NLS), SPI, AP,
+        params = SLBWParameters(Int32(NLS), SPI, AP,
                               l_values, AWRI_all, QX_all, LRX_all,
                               Er_all, AJ_all,
                               Gn_all, Gg_all, Gf_all, Gx_all)
     else
-        return MLBWParameters(Int32(NLS), SPI, AP,
+        params = MLBWParameters(Int32(NLS), SPI, AP,
                               l_values, AWRI_all, QX_all, LRX_all,
                               Er_all, AJ_all,
                               Gn_all, Gg_all, Gf_all, Gx_all)
     end
+    return params, ap_tab
 end
 
 """
@@ -233,8 +234,9 @@ Note: For Reich-Moore, the 6 parameters per resonance are:
 """
 function _read_rm_params(io::IO, NRO::Int32, NAPS::Int32)
     # Energy-dependent scattering radius (if NRO != 0)
+    ap_tab = nothing
     if NRO != 0
-        _tab1 = read_tab1(io)
+        ap_tab = TabulatedFunction(read_tab1(io))
     end
 
     # Parameters CONT: SPI, AP, LAD, 0, NLS, NLSC
@@ -298,10 +300,11 @@ function _read_rm_params(io::IO, NRO::Int32, NAPS::Int32)
         push!(Gfb_all, Gfb)
     end
 
-    return ReichMooreParameters(Int32(NLS), SPI, AP, LAD,
+    params = ReichMooreParameters(Int32(NLS), SPI, AP, LAD,
                                 l_values, AWRI_all, APL_all,
                                 Er_all, AJ_all,
                                 Gn_all, Gg_all, Gfa_all, Gfb_all)
+    return params, ap_tab
 end
 
 """

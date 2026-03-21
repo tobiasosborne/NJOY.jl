@@ -31,15 +31,14 @@ Returns a CrossSections struct with total, elastic, fission, capture [barns].
 """
 function cross_section_rm(E::Real, params::ReichMooreParameters,
                           range::ResonanceRange)
-    E = Float64(E)
     cwaven = cwaven_constant()
     C = PhysicsConstants
     NAPS = range.NAPS
 
-    sig_total = 0.0
-    sig_elastic = 0.0
-    sig_fission = 0.0
-    sig_capture = 0.0
+    sig_total = zero(float(E))
+    sig_elastic = zero(float(E))
+    sig_fission = zero(float(E))
+    sig_capture = zero(float(E))
 
     spi = params.SPI
     ap = params.AP
@@ -50,8 +49,13 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
 
     # Channel radius
     ra = channel_radius(awri)
-    if NAPS == 1
-        ra = ap
+    if range.NRO == 0
+        if NAPS == 1
+            ra = ap
+        end
+    else
+        # Energy-dependent scattering radius (NRO != 0)
+        ap, ra = _apply_nro(ap, ra, E, range)
     end
 
     # Wavenumber at energy E
@@ -128,9 +132,12 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                     end
                 end
 
-                # Initialize R-matrix components
-                r = @MMatrix zeros(3, 3)
-                s = @MMatrix zeros(3, 3)
+                # Initialize R-matrix scalar accumulators (no mutation, AD-safe)
+                zE = zero(float(E))
+                r11 = zE; r12 = zE; r13 = zE
+                r22 = zE; r23 = zE; r33 = zE
+                s11 = zE; s12 = zE; s13 = zE
+                s22 = zE; s23 = zE; s33 = zE
 
                 # Accumulate R-matrix from resonances
                 has_fission = false
@@ -198,21 +205,21 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                     de2 = 0.5 * diff / den_val
                     gg4 = 0.25 * gg / den_val
 
-                    # Accumulate R-matrix (upper triangular)
-                    r[1, 1] += gg4 * a1 * a1
-                    s[1, 1] -= de2 * a1 * a1
+                    # Accumulate R-matrix (upper triangular, scalars)
+                    r11 += gg4 * a1 * a1
+                    s11 -= de2 * a1 * a1
 
                     if gfa != 0.0 || gfb != 0.0
-                        r[1, 2] += gg4 * a1 * a2
-                        s[1, 2] -= de2 * a1 * a2
-                        r[1, 3] += gg4 * a1 * a3
-                        s[1, 3] -= de2 * a1 * a3
-                        r[2, 2] += gg4 * a2 * a2
-                        s[2, 2] -= de2 * a2 * a2
-                        r[3, 3] += gg4 * a3 * a3
-                        s[3, 3] -= de2 * a3 * a3
-                        r[2, 3] += gg4 * a2 * a3
-                        s[2, 3] -= de2 * a2 * a3
+                        r12 += gg4 * a1 * a2
+                        s12 -= de2 * a1 * a2
+                        r13 += gg4 * a1 * a3
+                        s13 -= de2 * a1 * a3
+                        r22 += gg4 * a2 * a2
+                        s22 -= de2 * a2 * a2
+                        r33 += gg4 * a3 * a3
+                        s33 -= de2 * a3 * a3
+                        r23 += gg4 * a2 * a3
+                        s23 -= de2 * a2 * a3
                         has_fission = true
                     end
                 end
@@ -229,23 +236,11 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                     termf = 0.0
 
                     if has_fission
-                        # R-matrix path: make symmetric matrix and invert
-                        r[1, 1] += 1.0
-                        r[2, 2] += 1.0
-                        r[3, 3] += 1.0
-                        r[2, 1] = r[1, 2]
-                        s[2, 1] = s[1, 2]
-                        r[3, 1] = r[1, 3]
-                        s[3, 1] = s[1, 3]
-                        r[3, 2] = r[2, 3]
-                        s[3, 2] = s[2, 3]
-
-                        # Invert complex matrix (R + iS) -> (Ri + iSi)
-                        # Use Julia's built-in complex matrix inverse
-                        cmat = SMatrix{3,3,ComplexF64}(
-                            complex(r[1,1], s[1,1]), complex(r[2,1], s[2,1]), complex(r[3,1], s[3,1]),
-                            complex(r[1,2], s[1,2]), complex(r[2,2], s[2,2]), complex(r[3,2], s[3,2]),
-                            complex(r[1,3], s[1,3]), complex(r[2,3], s[2,3]), complex(r[3,3], s[3,3])
+                        # R-matrix path: add identity and build symmetric SMatrix
+                        cmat = SMatrix{3,3}(
+                            complex(r11 + 1.0, s11), complex(r12, s12),      complex(r13, s13),
+                            complex(r12, s12),       complex(r22 + 1.0, s22), complex(r23, s23),
+                            complex(r13, s13),       complex(r23, s23),      complex(r33 + 1.0, s33)
                         )
                         cinv = inv(cmat)
 
@@ -267,9 +262,9 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                         termn = gj * ((1.0 - u11r)^2 + u11i^2)
                     else
                         # R-function path (scalar, no fission)
-                        dd = r[1, 1]
+                        dd = r11
                         rr = 1.0 + dd
-                        ss = s[1, 1]
+                        ss = s11
                         amag = rr^2 + ss^2
 
                         rri = rr / amag

@@ -47,6 +47,33 @@ function channel_radius(awri::Float64)
     return _RC1 * aw^_THIRD + _RC2
 end
 
+"""
+    _apply_nro(ap, ra, E, range) -> (ap, ra)
+
+Apply energy-dependent scattering radius logic when NRO != 0.
+Follows NJOY2016 reconr.f90 lines 2895-2918 exactly:
+  NRO!=0, NAPS==0: ap = AP(E)
+  NRO!=0, NAPS==1: ap = AP(E), ra = AP(E)
+  NRO!=0, NAPS>=2: ra = ap (constant), ap = AP(E)
+"""
+function _apply_nro(ap, ra, E, range::ResonanceRange)
+    if range.NRO != 0 && range.ap_tab !== nothing
+        ape = interpolate(range.ap_tab, E)
+        naps = range.NAPS
+        if naps == 0
+            ap = ape
+        elseif naps == 1
+            ap = ape
+            ra = ape
+        else
+            # NAPS >= 2: keep ra = ap (constant from params), set ap = ape
+            ra = ap
+            ap = ape
+        end
+    end
+    return ap, ra
+end
+
 # ============================================================================
 # SLBW cross section (csslbw)
 # ============================================================================
@@ -87,8 +114,13 @@ function cross_section_slbw(E::Real, params::SLBWParameters,
 
     # Channel radius
     ra = channel_radius(awri)
-    if NAPS == 1
-        ra = ap
+    if range.NRO == 0
+        if NAPS == 1
+            ra = ap
+        end
+    else
+        # Energy-dependent scattering radius (NRO != 0)
+        ap, ra = _apply_nro(ap, ra, E, range)
     end
 
     # Wavenumber and related quantities at energy E

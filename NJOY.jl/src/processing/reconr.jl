@@ -69,11 +69,30 @@ function reconstruct(endf_file::AbstractString;
         table = temperature > 0.0 ? build_faddeeva_table() : nothing
         xs_eval = build_evaluator(mf2; temperature=temperature, table=table)
 
+        # Check if we need the RML fallback evaluator (LRF=7)
+        rml_data = read_rml_data(io)
+        if rml_data !== nothing
+            rml_eval = build_rml_evaluator(rml_data)
+            base_eval = xs_eval
+            xs_eval = function(E::Float64)
+                r1 = base_eval(E)
+                r2 = rml_eval(E)
+                return (r1[1] + r2[1], r1[2] + r2[2],
+                        r1[3] + r2[3], r1[4] + r2[4])
+            end
+        end
+
         # Build grid
         initial_grid = build_grid(mf2, mf3_sections)
 
         # Filter grid to resonance range
         eresl, eresh, eresr = _resonance_bounds(mf2)
+
+        # Fallback: scan raw MF2 CONT records for range boundaries when the
+        # reader could not parse the resonance formalism (e.g. LRF=7).
+        if isinf(eresl) || eresh == 0.0
+            eresl, eresh, eresr = _resonance_bounds_from_file(io)
+        end
 
         # Build config with step_guard_limit set to eresr (resolved upper bound)
         config = AdaptiveConfig(Float64(err);
@@ -107,6 +126,53 @@ function reconstruct(endf_file::AbstractString;
         # Adaptive reconstruction (uses the generic algorithm)
         energies, values = adaptive_reconstruct(xs_eval, res_grid, config)
 
+        # Extend grid to include MF3 energies outside the resonance range.
+        # Fortran RECONR covers the full MF3 energy span, not just the
+        # resonance region. Points outside [eresl, eresh] get zero resonance
+        # cross sections but still receive MF3 backgrounds.
+        mf3_extra = Float64[]
+        for sec in mf3_sections
+            mt = Int(sec.mt)
+            (mt == 1 || mt == 3 || mt == 101) && continue
+            for e in sec.tab.x
+                if e > 0.0 && (e < eresl || e > eresh)
+                    push!(mf3_extra, e)
+                end
+            end
+        end
+        _decade_mults_r = (1.0, 2.0, 5.0)
+        for exp_val in -5:7
+            base = exp10(exp_val)
+            for m in _decade_mults_r
+                e = m * base
+                if e >= 1.0e-5 && e <= 2.0e7 && (e < eresl || e > eresh)
+                    push!(mf3_extra, e)
+                end
+            end
+        end
+        if !isempty(mf3_extra)
+            sort!(mf3_extra)
+            unique!(mf3_extra)
+            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
+            n_extra = length(mf3_extra)
+            extra_values = zeros(n_extra, 4)
+            all_energies = vcat(mf3_extra, energies)
+            all_values = vcat(extra_values, values)
+            perm = sortperm(all_energies)
+            energies = all_energies[perm]
+            values = all_values[perm, :]
+            mask = trues(length(energies))
+            for i in 2:length(energies)
+                if energies[i] == energies[i-1]
+                    mask[i] = false
+                end
+            end
+            if !all(mask)
+                energies = energies[mask]
+                values = values[mask, :]
+            end
+        end
+
         # Merge backgrounds
         merge_background!(energies, values, mf3_sections, mf2)
 
@@ -139,11 +205,22 @@ function reconr(endf_file::AbstractString;
 
         mf3_sections = read_mf3_sections(io, actual_mat)
 
+        # Check for RML (LRF=7) data and build fallback evaluator
+        rml_data = read_rml_data(io)
+
         initial_grid = build_grid(mf2, mf3_sections)
         eresl, eresh, eresr = _resonance_bounds(mf2)
 
+        # Fallback: if no parsed ranges were found, scan the raw MF2 CONT
+        # records for resonance range boundaries.  This handles materials
+        # whose formalism (e.g. LRF=7 R-Matrix Limited) is not yet fully
+        # parsed by the reader but still have LRU=1 resonance data.
+        if isinf(eresl) || eresh == 0.0
+            eresl, eresh, eresr = _resonance_bounds_from_file(io)
+        end
+
         # Handle materials with no resonances (LRU=0 only, e.g. H-2)
-        if eresl == Inf || eresh == 0.0
+        if (isinf(eresl) || eresh == 0.0) && rml_data === nothing
             # No resonance range -- use MF3 energies directly with zero resonance XS
             # Build grid from MF3 breakpoints only
             all_energies = Float64[]
@@ -182,14 +259,77 @@ function reconr(endf_file::AbstractString;
         sort!(res_grid)
         unique!(res_grid)
 
-        xs_fn = E -> sigma_mf2(E, mf2)
+        # Build cross section function: combine MF2 + RML evaluators
+        xs_fn = if rml_data !== nothing
+            rml_eval = build_rml_evaluator(rml_data)
+            function(E)
+                sig_mf2 = sigma_mf2(E, mf2)
+                rml_xs = rml_eval(Float64(E))
+                CrossSections(sig_mf2.total + rml_xs[1],
+                              sig_mf2.elastic + rml_xs[2],
+                              sig_mf2.fission + rml_xs[3],
+                              sig_mf2.capture + rml_xs[4])
+            end
+        else
+            E -> sigma_mf2(E, mf2)
+        end
 
         config = AdaptiveConfig(err; errmax=errmax_val, errint=errint_val,
                                 step_guard_limit = eresr > 0.0 ? eresr : Inf)
         energies, values = adaptive_reconstruct(xs_fn, res_grid, config)
 
+        # Extend grid to include MF3 energies outside the resonance range.
+        # Fortran RECONR covers the full MF3 energy span, not just the
+        # resonance region. Points outside [eresl, eresh] get zero resonance
+        # cross sections but still receive MF3 backgrounds.
+        mf3_extra = Float64[]
+        for sec in mf3_sections
+            mt = Int(sec.mt)
+            (mt == 1 || mt == 3 || mt == 101) && continue
+            for e in sec.tab.x
+                if e > 0.0 && (e < eresl || e > eresh)
+                    push!(mf3_extra, e)
+                end
+            end
+        end
+        # Also add decade points outside the resonance range
+        _decade_mults = (1.0, 2.0, 5.0)
+        for exp_val in -5:7
+            base = exp10(exp_val)
+            for m in _decade_mults
+                e = m * base
+                if e >= 1.0e-5 && e <= 2.0e7 && (e < eresl || e > eresh)
+                    push!(mf3_extra, e)
+                end
+            end
+        end
+        if !isempty(mf3_extra)
+            sort!(mf3_extra)
+            unique!(mf3_extra)
+            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
+            n_extra = length(mf3_extra)
+            extra_values = zeros(n_extra, 4)
+            # Combine: put extra points before or after the resonance grid
+            all_energies = vcat(mf3_extra, energies)
+            all_values = vcat(extra_values, values)
+            perm = sortperm(all_energies)
+            energies = all_energies[perm]
+            values = all_values[perm, :]
+            # Remove duplicates
+            mask = trues(length(energies))
+            for i in 2:length(energies)
+                if energies[i] == energies[i-1]
+                    mask[i] = false
+                end
+            end
+            if !all(mask)
+                energies = energies[mask]
+                values = values[mask, :]
+            end
+        end
+
         n_pts = length(energies)
-        res_xs = Vector{CrossSections}(undef, n_pts)
+        res_xs = Vector{CrossSections{Float64}}(undef, n_pts)
         for i in 1:n_pts
             res_xs[i] = CrossSections(values[i, 1], values[i, 2],
                                        values[i, 3], values[i, 4])
@@ -206,4 +346,77 @@ function reconr(endf_file::AbstractString;
                 fission=fission_arr, capture=capture_arr,
                 mf2=mf2, mf3_sections=mf3_sections)
     end
+end
+
+# ==========================================================================
+# Raw MF2 resonance-range boundary scanner
+# ==========================================================================
+
+"""
+    _resonance_bounds_from_file(io) -> (eresl, eresh, eresr)
+
+Scan the MF2/MT151 section directly from the ENDF file to extract resonance
+range boundaries (EL, EH, LRU) without requiring the formalism to be fully
+parsed.  This handles materials like Sr-88 (LRF=7, R-Matrix Limited) whose
+resonance parameters are skipped by `read_mf2` but still need their energy
+bounds for the RECONR pipeline.
+
+Returns the same `(eresl, eresh, eresr)` triple as `_resonance_bounds`.
+"""
+function _resonance_bounds_from_file(io::IO)
+    eresl = Inf
+    eresh = 0.0
+    eresr = 0.0
+
+    saved_pos = position(io)
+    seekstart(io)
+
+    # Find MF2/MT151
+    if !find_section(io, 2, 151)
+        seek(io, saved_pos)
+        return (eresl, eresh, eresr)
+    end
+
+    # HEAD record: ZA, AWR, 0, 0, NIS, 0
+    head = read_head(io)
+    NIS = Int(head.N1)
+
+    for _ in 1:NIS
+        # Isotope CONT: ZAI, ABN, 0, LFW, NER, 0
+        iso_cont = read_cont(io)
+        NER = Int(iso_cont.N1)
+
+        for _ in 1:NER
+            # Range CONT: EL, EH, LRU, LRF, NRO, NAPS
+            range_cont = read_cont(io)
+            EL = range_cont.C1
+            EH = range_cont.C2
+            LRU = Int(range_cont.L1)
+
+            if LRU > 0
+                eresl = min(eresl, EL)
+                eresh = max(eresh, EH)
+                if LRU == 1
+                    eresr = max(eresr, EH)
+                end
+            end
+
+            # Skip the rest of this range's data (we only need the CONT line)
+            while !eof(io)
+                pos = position(io)
+                line = readline(io)
+                p = rpad(line, 80)
+                mf = _parse_int(p[71:72])
+                mt = _parse_int(p[73:75])
+                if mf == 0 || mt == 0 || mf != 2 || mt != 151
+                    seek(io, pos)
+                    break
+                end
+            end
+        end
+    end
+
+    eresr = clamp(eresr, eresl, eresh)
+    seek(io, saved_pos)
+    return (eresl, eresh, eresr)
 end
