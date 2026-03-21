@@ -5036,8 +5036,8 @@ using LinearAlgebra
     end
 
     @testset "RESXSR -- energy range filtering" begin
-        ne = 50
-        energies = collect(range(0.01, stop=1e7, length=ne))
+        ne = 500
+        energies = collect(range(10.0, stop=1e5, length=ne))
         xs = zeros(ne, 2)
         for i in 1:ne
             xs[i, 1] = 10.0 / sqrt(energies[i])
@@ -5045,13 +5045,14 @@ using LinearAlgebra
         end
         pendf = PointwiseMaterial(Int32(1), energies, xs, [2, 102])
 
-        # Restrict to narrow range
-        rec = extract_resxs(pendf; elow=100.0, ehigh=10000.0, eps=1e-6)
+        # Restrict to sub-range
+        rec = extract_resxs(pendf; elow=100.0, ehigh=50000.0, eps=1e-6)
 
         @test rec.energies[1] >= 100.0
-        @test rec.energies[end] <= 10000.0
-        @test all(rec.elastic .>= 0.0)
-        @test all(rec.capture .>= 0.0)
+        @test rec.energies[end] <= 50000.0
+        @test length(rec.energies) >= 2
+        @test all(rec.elastic .> 0.0)
+        @test all(rec.capture .> 0.0)
     end
 
     # ======================================================================
@@ -5616,6 +5617,986 @@ using LinearAlgebra
         @test NJOY._mt_to_matxs_name(102) == "ngamma"
         @test NJOY._mt_to_matxs_name(107) == "nalpha"
         @test NJOY._mt_to_matxs_name(999) == "mt999"  # fallback
+    end
+
+    # ======================================================================
+    # WIMSR -- WIMS-D/WIMS-E library format
+    # ======================================================================
+    @testset "WIMSR -- type construction and validation" begin
+        ngroups = 69
+        nfg = 14
+        nrg = 13
+        nnt = nfg + nrg
+
+        mat = WIMSMaterial(
+            WIMS_VERSION_D,           # version
+            9235,                     # ident
+            9235.0,                   # rid
+            235.044 * 1.00866491595,  # atomic_weight (amu)
+            92,                       # z_number
+            ngroups,                  # ngroups
+            nfg,                      # nfg
+            nrg,                      # nrg
+            0,                        # fission_flag (non-fissile for simplicity)
+            2,                        # ntemp
+            false,                    # has_resonance_tables
+            false,                    # has_fission_spectrum
+            nothing,                  # burnup
+            ones(nrg),               # lambdas
+            ones(nnt),               # potential_xs
+            ones(nnt),               # scatter_xs
+            ones(nnt),               # transport_xs
+            ones(nnt),               # absorption_xs
+            Float64[],               # nu_fission (empty, non-fissile)
+            Float64[],               # fission_xs (empty, non-fissile)
+            Float64[],               # nonthermal_matrix
+            [300.0, 600.0],          # temperatures
+            [ones(ngroups - nnt), ones(ngroups - nnt)], # thermal_transport
+            [ones(ngroups - nnt), ones(ngroups - nnt)], # thermal_absorption
+            [Float64[], Float64[]], # thermal_nu_fission
+            [Float64[], Float64[]], # thermal_fission
+            [Float64[], Float64[]], # thermal_matrices
+            WIMSResonanceTable[],    # resonance_tables
+            WIMSResonanceTable[],    # fission_resonance_tables
+            Float64[],               # fission_spectrum
+            Vector{WIMSP1Block}[]    # p1_data
+        )
+
+        @test NJOY.validate(mat) == true
+        @test mat.version == 4
+        @test mat.ngroups == 69
+        @test mat.nfg == 14
+        @test mat.nrg == 13
+        @test length(mat.lambdas) == 13
+        @test length(mat.temperatures) == 2
+    end
+
+    @testset "WIMSR -- write round-trip" begin
+        ngroups = 10
+        nfg = 4
+        nrg = 3
+        nnt = nfg + nrg
+
+        mat = WIMSMaterial(
+            WIMS_VERSION_D, 1001, 1001.0,
+            1.008 * 1.00866491595, 1, ngroups, nfg, nrg,
+            0, 1, false, false, nothing,
+            ones(nrg), zeros(nnt), zeros(nnt), zeros(nnt), zeros(nnt),
+            Float64[], Float64[], Float64[],
+            [300.0],
+            [zeros(ngroups - nnt)], [zeros(ngroups - nnt)],
+            [Float64[]], [Float64[]], [Float64[]],
+            WIMSResonanceTable[], WIMSResonanceTable[],
+            Float64[], Vector{WIMSP1Block}[]
+        )
+
+        buf = IOBuffer()
+        write_wims(buf, mat)
+        output = String(take!(buf))
+
+        # Check sentinel appears in WIMS-D output
+        @test occursin("999999999", output)
+        # Check material ident line
+        @test occursin("1001", output)
+        # Check temperature line
+        @test occursin("3.00000000E+02", output)
+    end
+
+    @testset "WIMSR -- validation catches errors" begin
+        # Wrong version
+        @test_throws ErrorException WIMSMaterial(
+            3, 1, 1.0, 1.0, 1, 10, 4, 3, 0, 1, false, false, nothing,
+            ones(3), ones(7), ones(7), ones(7), ones(7),
+            Float64[], Float64[], Float64[],
+            [300.0],
+            [zeros(3)], [zeros(3)],
+            [Float64[]], [Float64[]], [Float64[]],
+            WIMSResonanceTable[], WIMSResonanceTable[],
+            Float64[], Vector{WIMSP1Block}[]
+        ) |> NJOY.validate
+
+        # Lambda length mismatch
+        @test_throws ErrorException WIMSMaterial(
+            WIMS_VERSION_D, 1, 1.0, 1.0, 1, 10, 4, 3, 0, 1,
+            false, false, nothing,
+            ones(5),  # wrong: should be 3
+            ones(7), ones(7), ones(7), ones(7),
+            Float64[], Float64[], Float64[],
+            [300.0],
+            [zeros(3)], [zeros(3)],
+            [Float64[]], [Float64[]], [Float64[]],
+            WIMSResonanceTable[], WIMSResonanceTable[],
+            Float64[], Vector{WIMSP1Block}[]
+        ) |> NJOY.validate
+    end
+
+    @testset "WIMSR -- burnup chain" begin
+        bp = BurnupProduct(9236, 0.5)
+        @test bp.ident == 9236
+        @test bp.value == 0.5
+
+        burnup = WIMSBurnup(
+            BurnupProduct(9236, 1.0),     # capture product
+            BurnupProduct(0, 0.0),        # decay product (stable)
+            [BurnupProduct(5413, 0.06)],  # one fission product
+            200.0                         # MeV per fission
+        )
+        @test burnup.energy_per_fission == 200.0
+        @test length(burnup.fission_products) == 1
+    end
+
+    @testset "WIMSR -- resonance table" begin
+        rt = WIMSResonanceTable(
+            9235.0, 3, 2,
+            [300.0, 600.0, 900.0],
+            [1e10, 100.0],
+            ones(6)
+        )
+        @test NJOY.validate(rt) == true
+        @test rt.ntemps == 3
+        @test rt.nsigz == 2
+    end
+
+    # ======================================================================
+    # DTFR -- DTF-IV/ANISN format
+    # ======================================================================
+    @testset "DTFR -- layout construction" begin
+        lay = DTFLayout(5, 30, 46, 47, 76, 0, 0, 0, 0, DTFEdit[], 0, 0)
+        @test NJOY.validate(lay) == true
+        @test lay.nlmax == 5
+        @test lay.ngroups == 30
+    end
+
+    @testset "DTFR -- claw_layout" begin
+        lay = claw_layout(nlmax=3, ngroups=69)
+        @test NJOY.validate(lay) == true
+        @test lay.nlmax == 3
+        @test lay.ngroups == 69
+        @test lay.iptotl == 46
+        @test lay.ipingp == 47
+        @test lay.itabl == 46 + 69
+        @test length(lay.edits) == 8
+    end
+
+    @testset "DTFR -- edit validation" begin
+        e = DTFEdit("  els", 1, 2, 1)
+        @test NJOY.validate(e) == true
+        @test e.name == "  els"
+        @test e.mt == 2
+
+        bad_e = DTFEdit("test", 0, 2, 1)
+        @test_throws ErrorException NJOY.validate(bad_e)
+    end
+
+    @testset "DTFR -- material construction and validation" begin
+        ng = 10
+        itabl = 15
+        lay = DTFLayout(2, ng, 6, 7, itabl, 0, 0, 0, 0, DTFEdit[], 0, 0)
+
+        p0_data = zeros(ng, itabl)
+        for ig in 1:ng
+            p0_data[ig, 6] = 10.0 + ig  # total
+            p0_data[ig, 4] = 1.0 + ig   # absorption
+            p0_data[ig, 7] = 5.0        # in-group
+        end
+        p0 = DTFNeutronTable(0, p0_data)
+        p1 = DTFNeutronTable(1, zeros(ng, itabl))
+
+        mat = DTFMaterial(
+            "H-1   ", 125, 1, 300.0, lay,
+            [p0, p1], DTFPhotonTable[],
+            Float64[], Float64[], Float64[], Float64[]
+        )
+
+        @test NJOY.validate(mat) == true
+        @test total_xs(mat, 1) == 11.0
+        @test ingroup_xs(mat, 3) == 5.0
+    end
+
+    @testset "DTFR -- write internal format" begin
+        ng = 4
+        itabl = 8
+        lay = DTFLayout(1, ng, 4, 5, itabl, 0, 0, 0, 0, DTFEdit[], 0, 0)
+        tdata = rand(ng, itabl)
+        p0 = DTFNeutronTable(0, tdata)
+        mat = DTFMaterial(
+            "test  ", 100, 1, 300.0, lay,
+            [p0], DTFPhotonTable[],
+            Float64[], Float64[], Float64[], Float64[]
+        )
+
+        buf = IOBuffer()
+        write_dtf(buf, mat; format=:internal)
+        output = String(take!(buf))
+
+        @test occursin("il=", output)
+        @test occursin("mat=", output)
+        @test occursin("100", output)
+    end
+
+    @testset "DTFR -- write claw format" begin
+        ng = 30
+        lay = claw_layout(nlmax=2, ngroups=ng)
+        tdata = zeros(ng, lay.itabl)
+        for ig in 1:ng
+            tdata[ig, lay.iptotl] = 1.0
+            tdata[ig, lay.ipingp] = 0.5
+        end
+        p0 = DTFNeutronTable(0, tdata)
+        p1 = DTFNeutronTable(1, zeros(ng, lay.itabl))
+        mat = DTFMaterial(
+            "Fe-56 ", 2631, 1, 300.0, lay,
+            [p0, p1], DTFPhotonTable[],
+            Float64[], Float64[], Float64[], Float64[]
+        )
+
+        buf = IOBuffer()
+        write_dtf(buf, mat; format=:claw)
+        output = String(take!(buf))
+
+        @test occursin("edit xsec", output)
+        @test occursin("n-n table", output)
+        @test occursin("Fe", output)
+    end
+
+    @testset "DTFR -- layout validation errors" begin
+        # ipingp <= iptotl
+        @test_throws ErrorException NJOY.validate(
+            DTFLayout(1, 10, 5, 5, 10, 0, 0, 0, 0, DTFEdit[], 0, 0)
+        )
+        # itabl < ipingp
+        @test_throws ErrorException NJOY.validate(
+            DTFLayout(1, 10, 5, 7, 6, 0, 0, 0, 0, DTFEdit[], 0, 0)
+        )
+    end
+
+    @testset "DTFR -- photon table" begin
+        ng = 5
+        ngp = 3
+        lay = DTFLayout(1, ng, 4, 5, 10, 0, 0, 0, 0, DTFEdit[], 1, ngp)
+        p0 = DTFNeutronTable(0, zeros(ng, 10))
+        ph = DTFPhotonTable(0, rand(ng, ngp))
+        mat = DTFMaterial(
+            "test  ", 100, 1, 300.0, lay,
+            [p0], [ph],
+            Float64[], Float64[], Float64[], Float64[]
+        )
+        @test NJOY.validate(mat) == true
+        @test size(ph.data) == (5, 3)
+    end
+
+    # ======================================================================
+    # POWR -- EPRI-CELL / EPRI-CPM library format
+    # ======================================================================
+    @testset "POWR -- constants" begin
+        @test POWR_LIB_FAST == 1
+        @test POWR_LIB_THERMAL == 2
+        @test POWR_LIB_CPM == 3
+        @test POWR_NGNF == 185
+        @test POWR_NGND_FAST == 68
+    end
+
+    @testset "POWR -- EPRIFastIsotope construction and validation" begin
+        ngnd = 68
+        empty_scat = EPRIFastScatterMatrix(0, 0, 0, Float64[])
+        iso = EPRIFastIsotope(
+            92235, "U-235", "Watt spectrum",
+            ones(ngnd),           # absorption
+            ones(ngnd),           # fission
+            fill(2.5, ngnd),      # nu
+            zeros(ngnd),          # chi
+            empty_scat, empty_scat, empty_scat, empty_scat,
+            [1e10, 1e4, 1e2],    # sigma_zeros
+            [300.0, 600.0],      # temperatures
+            zeros(0, 0, 0),      # abs_ssf (empty)
+            zeros(0, 0, 0)       # fis_ssf (empty)
+        )
+        @test NJOY.validate(iso, ngnd) == true
+        @test iso.nid == 92235
+        @test length(iso.absorption) == 68
+        @test length(iso.sigma_zeros) == 3
+    end
+
+    @testset "POWR -- EPRIFastIsotope validation errors" begin
+        empty_scat = EPRIFastScatterMatrix(0, 0, 0, Float64[])
+        bad_iso = EPRIFastIsotope(
+            1001, "H-1", "",
+            ones(30),  # wrong length for ngnd=68
+            Float64[], Float64[], Float64[],
+            empty_scat, empty_scat, empty_scat, empty_scat,
+            Float64[], Float64[],
+            zeros(0,0,0), zeros(0,0,0)
+        )
+        @test_throws ErrorException NJOY.validate(bad_iso, 68)
+    end
+
+    @testset "POWR -- EPRIThermalIsotope" begin
+        ng = 36
+        iso = EPRIThermalIsotope(
+            1001, 300.0, "H-1       ",
+            true, 222, 0,
+            1.0,       # xi
+            0.0,       # alpha
+            0.667,     # mubar
+            0.0,       # nu
+            0.0,       # kappa_fission
+            0.0,       # kappa_capture
+            0.0,       # lambda
+            20.0,      # sigma_s
+            zeros(ng, ng)
+        )
+        @test NJOY.validate(iso) == true
+        @test iso.mat == 1001
+        @test iso.name == "H-1       "
+    end
+
+    @testset "POWR -- CPMNuclideSpec" begin
+        spec = CPMNuclideSpec(92235, 235.044, 1, true, 1, 3, 0, false)
+        @test NJOY.validate(spec) == true
+        @test spec.ident == 92235
+        @test spec.has_resonance == true
+
+        bad_spec = CPMNuclideSpec(0, 1.0, 0, false, 0, 1, 0, false)
+        @test_throws ErrorException NJOY.validate(bad_spec)
+
+        bad_nina = CPMNuclideSpec(1, 1.0, 0, false, 0, 1, 5, false)
+        @test_throws ErrorException NJOY.validate(bad_nina)
+    end
+
+    @testset "POWR -- CPMLibraryHeader" begin
+        ng = 69
+        specs = [
+            CPMNuclideSpec(1001, 1.008, 0, false, 0, 1, 0, false),
+            CPMNuclideSpec(92235, 235.044, 1, true, 1, 3, 0, true),
+        ]
+        header = CPMLibraryHeader(
+            1, 20260321, ng, 14, 13, 22, 2,
+            collect(range(1e-5, 20.0, length=ng+1)),
+            ones(ng),
+            zeros(22),
+            zeros(22),
+            specs
+        )
+        @test NJOY.validate(header) == true
+        @test header.ngroups == 69
+        @test header.nmat == 2
+        @test length(header.energy_bounds) == 70
+    end
+
+    @testset "POWR -- CPMLibrary" begin
+        ng = 10
+        nrg = 3
+        specs = [CPMNuclideSpec(1001, 1.008, 0, false, 0, 1, 0, false)]
+        header = CPMLibraryHeader(
+            1, 20260101, ng, 4, nrg, 5, 1,
+            collect(range(1e-5, 20.0, length=ng+1)),
+            ones(ng), zeros(5), zeros(5), specs
+        )
+        res_data = [[CPMResonanceData(0.9, 10.0, 0.0, 0.0) for _ in 1:nrg]]
+        lib = CPMLibrary(header, res_data, CPMBurnupIsotope[], 2)
+        @test NJOY.validate(lib) == true
+        @test lib.mode == 2
+    end
+
+    @testset "POWR -- POWROutput fast" begin
+        ngnd = 68
+        empty_scat = EPRIFastScatterMatrix(0, 0, 0, Float64[])
+        iso = EPRIFastIsotope(
+            1001, "H-1", "",
+            ones(ngnd), Float64[], Float64[], Float64[],
+            empty_scat, empty_scat, empty_scat, empty_scat,
+            Float64[], Float64[],
+            zeros(0,0,0), zeros(0,0,0)
+        )
+        output = POWROutput(POWR_LIB_FAST, [iso], EPRIThermalIsotope[], nothing)
+        @test NJOY.validate(output) == true
+    end
+
+    @testset "POWR -- write_powr_fast" begin
+        ngnd = 10
+        empty_scat = EPRIFastScatterMatrix(0, 0, 0, Float64[])
+        iso = EPRIFastIsotope(
+            1001, "H-1", "",
+            collect(1.0:ngnd), Float64[], Float64[], Float64[],
+            empty_scat, empty_scat, empty_scat, empty_scat,
+            Float64[], Float64[],
+            zeros(0,0,0), zeros(0,0,0)
+        )
+
+        buf = IOBuffer()
+        write_powr_fast(buf, [iso]; ngnd=ngnd)
+        output = String(take!(buf))
+
+        @test occursin("1001", output)
+        @test occursin("H-1", output)
+        # Should contain absorption values
+        @test occursin("1.00000E+01", output)
+    end
+
+    @testset "POWR -- write_powr_cpm" begin
+        ng = 10
+        nrg = 3
+        specs = [CPMNuclideSpec(1001, 1.008, 0, false, 0, 1, 0, false)]
+        header = CPMLibraryHeader(
+            1, 20260101, ng, 4, nrg, 5, 1,
+            collect(range(1e-5, 20.0, length=ng+1)),
+            ones(ng), zeros(5), zeros(5), specs
+        )
+        res_data = [[CPMResonanceData(0.9, 10.0, 0.0, 0.0) for _ in 1:nrg]]
+        lib = CPMLibrary(header, res_data, CPMBurnupIsotope[], 2)
+
+        buf = IOBuffer()
+        write_powr_cpm(buf, lib)
+        output = String(take!(buf))
+
+        @test occursin("pri", output)
+        @test occursin("1001", output)
+        # Should contain group structure
+        @test occursin("1.008", output)
+    end
+
+    @testset "POWR -- burnup chain" begin
+        bi = CPMBurnupIsotope(54135, 2.1e-5, [0.065, 0.012])
+        @test bi.ident == 54135
+        @test bi.decay_constant == 2.1e-5
+        @test length(bi.yields) == 2
+    end
+
+    @testset "POWR -- POWROutput validation errors" begin
+        # lib_type 4 is invalid
+        @test_throws ErrorException NJOY.validate(
+            POWROutput(4, EPRIFastIsotope[], EPRIThermalIsotope[], nothing)
+        )
+        # CPM with nothing
+        @test_throws ErrorException NJOY.validate(
+            POWROutput(POWR_LIB_CPM, EPRIFastIsotope[], EPRIThermalIsotope[], nothing)
+        )
+    end
+
+    # ======================================================================
+    # WIMSR -- write_wims from MultiGroupXS convenience overload
+    # ======================================================================
+    @testset "WIMSR -- write_wims from MultiGroupXS WIMS-D" begin
+        gb = collect(range(1e-5, 1e7, length=11))
+        xs = zeros(10, 3)
+        xs[:, 1] .= 20.0
+        xs[:, 2] .= 10.0
+        xs[:, 3] .= 1.0
+        mg = MultiGroupXS(gb, [1, 2, 102], xs, ones(10))
+        buf = IOBuffer()
+        write_wims(buf, mg; ident=92235, awr=235.044, nfg=3, nrg=2)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("92235", output)
+        @test occursin("999999999", output)
+        lines = split(output, '\n')
+        @test length(lines) > 5
+    end
+
+    @testset "WIMSR -- write_wims from MultiGroupXS WIMS-E" begin
+        gb = collect(range(1e-5, 1e7, length=6))
+        xs = zeros(5, 2)
+        xs[:, 1] .= 15.0
+        xs[:, 2] .= 8.0
+        mg = MultiGroupXS(gb, [1, 2], xs, ones(5))
+        buf = IOBuffer()
+        write_wims(buf, mg; version=WIMS_VERSION_E, ident=5010,
+                   nfg=2, nrg=1)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("5010", output)
+    end
+
+    @testset "WIMSR -- write_wims from MultiGroupXS field widths" begin
+        gb = collect(range(1.0, 100.0, length=6))
+        xs = zeros(5, 2)
+        xs[:, 1] .= 15.0
+        xs[:, 2] .= 8.0
+        mg = MultiGroupXS(gb, [1, 2], xs, ones(5))
+        buf = IOBuffer()
+        write_wims(buf, mg; nfg=2, nrg=1)
+        output = String(take!(buf))
+        data_lines = filter(l -> occursin("E", l) && !occursin("999", l),
+                           split(output, '\n'))
+        for line in data_lines
+            if !isempty(strip(line))
+                @test length(line) % 15 == 0 || length(line) <= 15 * 5
+            end
+        end
+    end
+
+    # ======================================================================
+    # DTFR -- write_dtf from MultiGroupXS convenience overload
+    # ======================================================================
+    @testset "DTFR -- write_dtf from MultiGroupXS internal" begin
+        gb = collect(range(1e-5, 1e7, length=8))
+        xs = zeros(7, 3)
+        xs[:, 1] .= 25.0
+        xs[:, 2] .= 12.0
+        xs[:, 3] .= 0.5
+        mg = MultiGroupXS(gb, [1, 2, 18], xs, ones(7))
+        buf = IOBuffer()
+        write_dtf(buf, mg; mat_id=9228, name="U-235 ", temperature=300.0)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("9228", output)
+        @test occursin("il=", output)
+        lines = split(output, '\n')
+        @test length(lines) > 3
+    end
+
+    @testset "DTFR -- write_dtf from MultiGroupXS table positions" begin
+        gb = collect(range(1.0, 100.0, length=4))
+        xs = zeros(3, 2)
+        xs[:, 1] .= 30.0
+        xs[:, 2] .= 15.0
+        mg = MultiGroupXS(gb, [1, 2], xs, ones(3))
+        buf = IOBuffer()
+        write_dtf(buf, mg; iptotl=4, ipingp=5)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("E", output) || occursin("e", output)
+    end
+
+    # ======================================================================
+    # POWR -- write_epri_cell / write_epri_cpm from MultiGroupXS
+    # ======================================================================
+    @testset "POWR -- write_epri_cell from MultiGroupXS" begin
+        gb = collect(range(1e-5, 1e7, length=11))
+        xs = zeros(10, 3)
+        xs[:, 1] .= 20.0
+        xs[:, 2] .= 10.0
+        xs[:, 3] .= 1.0
+        mg = MultiGroupXS(gb, [1, 2, 102], xs, ones(10))
+        buf = IOBuffer()
+        write_epri_cell(buf, mg; nid=92235, description="U-235")
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("92235", output)
+    end
+
+    @testset "POWR -- write_epri_cell fissile material" begin
+        gb = collect(range(1e-5, 1e7, length=6))
+        xs = zeros(5, 4)
+        xs[:, 1] .= 30.0
+        xs[:, 2] .= 12.0
+        xs[:, 3] .= 2.0
+        xs[:, 4] .= 5.0
+        mg = MultiGroupXS(gb, [1, 2, 102, 18], xs, ones(5))
+        buf = IOBuffer()
+        write_epri_cell(buf, mg; nid=94239, description="Pu-239")
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("94239", output)
+    end
+
+    @testset "POWR -- write_epri_cpm from MultiGroupXS" begin
+        gb = collect(range(1e-5, 1e7, length=11))
+        xs = zeros(10, 3)
+        xs[:, 1] .= 20.0
+        xs[:, 2] .= 10.0
+        xs[:, 3] .= 1.0
+        mg = MultiGroupXS(gb, [1, 2, 102], xs, ones(10))
+        buf = IOBuffer()
+        write_epri_cpm(buf, mg; nlib=1, ident=92235, nfg=3, nrg=2)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("pri", output)
+        @test occursin("92235", output)
+        lines = split(output, '\n')
+        @test length(lines) > 5
+    end
+
+    @testset "POWR -- write_epri_cpm with fission" begin
+        gb = collect(range(1e-5, 1e7, length=8))
+        xs = zeros(7, 4)
+        xs[:, 1] .= 25.0
+        xs[:, 2] .= 10.0
+        xs[:, 3] .= 1.0
+        xs[:, 4] .= 3.0
+        mg = MultiGroupXS(gb, [1, 2, 102, 18], xs, ones(7))
+        buf = IOBuffer()
+        write_epri_cpm(buf, mg; nlib=2, ident=94239, awr=239.052,
+                       nfg=3, nrg=2)
+        output = String(take!(buf))
+        @test !isempty(output)
+        @test occursin("94239", output)
+    end
+
+    # ======================================================================
+    # CCCCR-B -- Type-safe ISOTXS writer (Proposer-B)
+    # ======================================================================
+
+    @testset "CCCCR-B -- Hollerith8 construction" begin
+        h = Hollerith8("ISOTXS")
+        @test String(h) == "ISOTXS  "
+        @test length(String(h)) == 8
+        h2 = Hollerith8()
+        @test String(h2) == "        "
+        # Long string truncation
+        h3 = Hollerith8("TooLongName")
+        @test length(String(h3)) == 8
+        @test String(h3) == "TooLongN"
+    end
+
+    @testset "CCCCR-B -- ISOTXSFileControlB validation" begin
+        # Valid construction
+        fc = ISOTXSFileControlB(10, 1, 0, 9, 3, 0, 1, 1)
+        @test fc.ngroup == 10
+        @test fc.niso == 1
+        @test fc.maxord == 3
+        @test fc.nsblok == 1
+        # Invalid: ngroup <= 0
+        @test_throws ArgumentError ISOTXSFileControlB(0, 1, 0, 0, 0, 0, 0, 1)
+        # Invalid: niso <= 0
+        @test_throws ArgumentError ISOTXSFileControlB(10, 0, 0, 0, 0, 0, 0, 1)
+        # Invalid: nsblok <= 0
+        @test_throws ArgumentError ISOTXSFileControlB(10, 1, 0, 0, 0, 0, 0, 0)
+        # Invalid: negative maxup
+        @test_throws ArgumentError ISOTXSFileControlB(10, 1, -1, 0, 0, 0, 0, 1)
+    end
+
+    @testset "CCCCR-B -- PrincipalXSB validation" begin
+        # Valid: all same length
+        pxs = PrincipalXSB(Float32[1.0, 2.0], Float32[3.0, 4.0],
+                           Float32[0.5, 0.6], Float32[], Float32[], Float32[])
+        @test length(pxs.transport) == 2
+        @test length(pxs.ngamma) == 2
+        @test isempty(pxs.fission)
+        # Invalid: mismatched lengths
+        @test_throws ArgumentError PrincipalXSB(
+            Float32[1.0, 2.0], Float32[3.0], Float32[0.5, 0.6],
+            Float32[], Float32[], Float32[])
+    end
+
+    @testset "CCCCR-B -- ISOTXSFileB validation" begin
+        # Energy bounds not descending
+        fid = ISOTXSFileIdB("test", 0)
+        fc = ISOTXSFileControlB(3, 1, 0, 2, 0, 0, 0, 1)
+        ctrl = IsotopeControlB(
+            Hollerith8("U235"), Hollerith8(), Hollerith8("endf"),
+            Float32(235.0), Float32(0), Float32(0), Float32(300),
+            Float32(0), Float32(0),
+            Int32(0), Int32(0), Int32(0), Int32(0), Int32(0),
+            Int32(0), Int32(0), Int32(0), Int32(0), Int32(0), Int32(0))
+        pxs = PrincipalXSB(Float32[], Float32[],
+                           Float32[0.1, 0.2, 0.3],
+                           Float32[], Float32[], Float32[])
+        iso = IsotopeDataB(ctrl, pxs, ScatterSubBlockB[])
+        # emax not descending -> error
+        @test_throws ArgumentError ISOTXSFileB(fid, fc, Hollerith8[],
+            Float32[1.0, 5.0, 3.0], Float32(0.01),
+            Float32[1e6, 1e5, 1e4], [iso])
+        # Wrong isotope count -> error
+        @test_throws ArgumentError ISOTXSFileB(fid, fc, Hollerith8[],
+            Float32[10.0, 5.0, 1.0], Float32(0.01),
+            Float32[1e6, 1e5, 1e4], IsotopeDataB[])
+        # Non-positive velocity -> error
+        @test_throws ArgumentError ISOTXSFileB(fid, fc, Hollerith8[],
+            Float32[10.0, 5.0, 1.0], Float32(0.01),
+            Float32[1e6, -1.0, 1e4], [iso])
+    end
+
+    @testset "CCCCR-B -- write_isotxs_b binary output" begin
+        ng = 4
+        gb = collect(range(1e-5, 2e7, length=ng+1))
+        xs = zeros(ng, 3)
+        xs[:, 1] .= 20.0    # total
+        xs[:, 2] .= 10.0    # elastic
+        xs[:, 3] .= 1.0     # capture
+        mg = MultiGroupXS(gb, [1, 2, 102], xs, ones(ng))
+
+        isotxs = build_isotxs_b(mg; name="U235", amass=235.04)
+        @test isotxs.file_ctrl.ngroup == ng
+        @test isotxs.file_ctrl.niso == 1
+        @test length(isotxs.emax) == ng
+        @test length(isotxs.vel) == ng
+        @test isotxs.emax[1] > isotxs.emax[end]
+        @test all(v -> v > 0, isotxs.vel)
+
+        # Write and verify binary record structure
+        buf = IOBuffer()
+        write_isotxs_b(buf, isotxs)
+        data = take!(buf)
+        @test length(data) > 0
+
+        # Verify Fortran record markers
+        iob = IOBuffer(data)
+        # Record 1: file id
+        rec_len = read(iob, Int32)
+        @test rec_len == 3*8 + 4  # 3 Hollerith8 + 1 Int32
+        skip(iob, rec_len)
+        @test read(iob, Int32) == rec_len  # trailing marker
+
+        # Record 2: file control (8 Int32)
+        rec_len2 = read(iob, Int32)
+        @test rec_len2 == 8 * 4
+        skip(iob, rec_len2)
+        @test read(iob, Int32) == rec_len2
+    end
+
+    @testset "CCCCR-B -- build_isotxs_b from MultiGroupXS" begin
+        ng = 6
+        gb = collect(range(1e-5, 2e7, length=ng+1))
+        xs = zeros(ng, 4)
+        xs[:, 1] .= 25.0    # total
+        xs[:, 2] .= 12.0    # elastic
+        xs[:, 3] .= 0.5     # capture
+        xs[:, 4] .= 2.0     # fission
+        mg = MultiGroupXS(gb, [1, 2, 102, 18], xs, ones(ng))
+
+        isotxs = build_isotxs_b(mg; name="Pu239", amass=239.05, ivers=1)
+        @test isotxs.file_id.ivers == 1
+        @test String(isotxs.file_id.hname) == "ISOTXS  "
+
+        # Isotope data checks
+        iso = isotxs.isotopes[1]
+        @test iso.control.ifis == 1   # fission present
+        @test iso.control.ialf == 1   # capture present
+        @test length(iso.principal.fission) == ng
+        @test length(iso.principal.nubar) == ng
+        @test length(iso.principal.ngamma) == ng
+
+        # Scattering block present (elastic)
+        @test length(iso.scatter) == 1
+        @test iso.scatter[1].lord == 1
+        @test length(iso.scatter[1].data) == ng
+
+        # Write succeeds
+        buf = IOBuffer()
+        write_isotxs_b(buf, isotxs)
+        @test position(buf) > 0
+    end
+
+    @testset "CCCCR-B -- write_isotxs_b multiple read-back" begin
+        ng = 3
+        gb = collect(range(1e-5, 1e7, length=ng+1))
+        xs = zeros(ng, 2)
+        xs[:, 1] .= 15.0
+        xs[:, 2] .= 8.0
+        mg = MultiGroupXS(gb, [1, 2], xs, ones(ng))
+
+        isotxs = build_isotxs_b(mg)
+        buf1 = IOBuffer()
+        write_isotxs_b(buf1, isotxs)
+        data1 = take!(buf1)
+
+        # Write again -- deterministic output
+        buf2 = IOBuffer()
+        write_isotxs_b(buf2, isotxs)
+        data2 = take!(buf2)
+        @test data1 == data2
+    end
+
+    # ======================================================================
+    # MATXSR-B -- Type-safe MATXS writer (Proposer-B)
+    # ======================================================================
+
+    @testset "MATXSR-B -- MATXSParticleB validation" begin
+        p = MATXSParticleB("n", 30)
+        @test p.ngrp == 30
+        @test strip(p.name) == "n"
+        @test_throws ArgumentError MATXSParticleB("n", 0)
+        @test_throws ArgumentError MATXSParticleB("n", -1)
+    end
+
+    @testset "MATXSR-B -- MATXSDataTypeB validation" begin
+        dt = MATXSDataTypeB("nscat", 1, 1)
+        @test dt.jinp == 1
+        @test dt.joutp == 1
+        @test_throws ArgumentError MATXSDataTypeB("nscat", -1, 1)
+        @test_throws ArgumentError MATXSDataTypeB("nscat", 1, 0)
+    end
+
+    @testset "MATXSR-B -- MATXSVectorB validation" begin
+        v = MATXSVectorB("nelas", 1, 5, Float32[1.0, 2.0, 3.0, 4.0, 5.0])
+        @test v.nfg == 1
+        @test v.nlg == 5
+        @test length(v.data) == 5
+        # Wrong data length
+        @test_throws ArgumentError MATXSVectorB("nelas", 1, 5, Float32[1.0, 2.0])
+        # nfg > nlg
+        @test_throws ArgumentError MATXSVectorB("nelas", 5, 3, Float32[1.0])
+    end
+
+    @testset "MATXSR-B -- MATXSMaterialB validation" begin
+        sub = MATXSSubmaterialB(Float32(300.0), Float32(1e10), Int32(1),
+                                MATXSVectorB[], MATXSMatrixBlockB[])
+        mat = MATXSMaterialB("U235", 235.0, [sub])
+        @test strip(mat.name) == "U235"
+        @test mat.amass > 0
+        # Non-positive amass
+        @test_throws ArgumentError MATXSMaterialB("U235", 0.0, [sub])
+        @test_throws ArgumentError MATXSMaterialB("U235", -1.0, [sub])
+    end
+
+    @testset "MATXSR-B -- MATXSFileB validation" begin
+        p = MATXSParticleB("n", 3)
+        dt = MATXSDataTypeB("nscat", 1, 1)
+        sub = MATXSSubmaterialB(Float32(300), Float32(1e10), Int32(1),
+                                MATXSVectorB[], MATXSMatrixBlockB[])
+        mat = MATXSMaterialB("test", 1.0, [sub])
+        gb = Float32[20.0, 10.0, 1.0, 0.01]
+
+        # Valid construction
+        f = MATXSFileB("user", "", 0, ["test set"], [p], [dt], [mat], [gb], 5000)
+        @test length(f.particles) == 1
+        @test length(f.data_types) == 1
+        @test length(f.materials) == 1
+
+        # Wrong group_bounds count
+        @test_throws ArgumentError MATXSFileB("", "", 0, ["x"],
+            [p], [dt], [mat], Vector{Float32}[], 5000)
+
+        # Wrong group_bounds length
+        @test_throws ArgumentError MATXSFileB("", "", 0, ["x"],
+            [p], [dt], [mat], [Float32[1.0, 2.0]], 5000)
+
+        # Invalid data type particle reference
+        dt_bad = MATXSDataTypeB("bad", 5, 1)
+        @test_throws ArgumentError MATXSFileB("", "", 0, ["x"],
+            [p], [dt_bad], [mat], [gb], 5000)
+
+        # maxw <= 0
+        @test_throws ArgumentError MATXSFileB("", "", 0, ["x"],
+            [p], [dt], [mat], [gb], 0)
+    end
+
+    @testset "MATXSR-B -- write_matxs_b binary output" begin
+        ng = 4
+        gb = collect(range(1e-5, 2e7, length=ng+1))
+        xs = zeros(ng, 3)
+        xs[:, 1] .= 20.0
+        xs[:, 2] .= 10.0
+        xs[:, 3] .= 1.0
+        mg = MultiGroupXS(gb, [1, 2, 102], xs, ones(ng))
+
+        matxs = build_matxs_b(mg; mat_name="U235", amass=235.04)
+        @test length(matxs.particles) == 1
+        @test matxs.particles[1].ngrp == ng
+        @test length(matxs.materials) == 1
+        @test length(matxs.group_bounds) == 1
+        @test length(matxs.group_bounds[1]) == ng + 1
+
+        buf = IOBuffer()
+        write_matxs_b(buf, matxs)
+        data = take!(buf)
+        @test length(data) > 0
+
+        # Verify record structure: read first record (file id)
+        iob = IOBuffer(data)
+        rec_len = read(iob, Int32)
+        @test rec_len == 3*8 + 4  # hname + huse1 + huse2 + ivers
+        skip(iob, rec_len)
+        @test read(iob, Int32) == rec_len
+
+        # Record 2: file control (6 Int32)
+        rec_len2 = read(iob, Int32)
+        @test rec_len2 == 6 * 4
+        skip(iob, rec_len2)
+        @test read(iob, Int32) == rec_len2
+    end
+
+    @testset "MATXSR-B -- build_matxs_b from MultiGroupXS" begin
+        ng = 5
+        gb = collect(range(1e-5, 1e7, length=ng+1))
+        xs = zeros(ng, 4)
+        xs[:, 1] .= 25.0
+        xs[:, 2] .= 12.0
+        xs[:, 3] .= 0.5
+        xs[:, 4] .= 2.0
+        mg = MultiGroupXS(gb, [1, 2, 102, 18], xs, ones(ng))
+
+        matxs = build_matxs_b(mg; mat_name="Pu239", amass=239.05)
+
+        # Check vectors were created for all MTs
+        sub = matxs.materials[1].submaterials[1]
+        vec_names = [strip(v.name) for v in sub.vectors]
+        @test "ntot" in vec_names
+        @test "nelas" in vec_names
+        @test "ngamm" in vec_names
+        @test "nfiss" in vec_names
+
+        # Check elastic scattering matrix
+        @test length(sub.matrices) == 1
+        @test strip(sub.matrices[1].name) == "nelas"
+        @test sub.matrices[1].lord == 1
+
+        # Write succeeds
+        buf = IOBuffer()
+        write_matxs_b(buf, matxs)
+        @test position(buf) > 0
+    end
+
+    @testset "MATXSR-B -- write_matxs_b deterministic" begin
+        ng = 3
+        gb = collect(range(1e-5, 1e7, length=ng+1))
+        xs = zeros(ng, 2)
+        xs[:, 1] .= 15.0
+        xs[:, 2] .= 8.0
+        mg = MultiGroupXS(gb, [1, 2], xs, ones(ng))
+
+        matxs = build_matxs_b(mg)
+        buf1 = IOBuffer()
+        write_matxs_b(buf1, matxs)
+        data1 = take!(buf1)
+
+        buf2 = IOBuffer()
+        write_matxs_b(buf2, matxs)
+        data2 = take!(buf2)
+        @test data1 == data2
+    end
+
+    @testset "MATXSR-B -- MATXSMatrixBlockB validation" begin
+        # Valid construction
+        blk = MATXSMatrixBlockB("nelas", Int32(1), Int32(0),
+            Int32[1, 1, 1], Int32[1, 2, 3],
+            Float32[1.0, 2.0, 3.0], Float32[], Float32[])
+        @test blk.lord == 1
+        @test blk.jconst == 0
+        # Invalid: lord <= 0
+        @test_throws ArgumentError MATXSMatrixBlockB("nelas", Int32(0), Int32(0),
+            Int32[1], Int32[1], Float32[1.0], Float32[], Float32[])
+        # Invalid: jband/ijj length mismatch
+        @test_throws ArgumentError MATXSMatrixBlockB("nelas", Int32(1), Int32(0),
+            Int32[1, 2], Int32[1], Float32[1.0], Float32[], Float32[])
+    end
+
+    @testset "MATXSR-B -- constant sub-block support" begin
+        ng = 3
+        jband = Int32[1, 1, 1]
+        ijj = Int32[1, 2, 3]
+        sdata = Float32[5.0, 6.0, 7.0]
+        spec = Float32[0.3, 0.5, 0.2]
+        prod = Float32[10.0, 10.0, 10.0]
+        blk = MATXSMatrixBlockB("nfiss", Int32(1), Int32(2),
+            jband, ijj, sdata, spec, prod)
+
+        sub = MATXSSubmaterialB(Float32(300), Float32(1e10), Int32(1),
+                                MATXSVectorB[], [blk])
+        mat = MATXSMaterialB("test", 1.0, [sub])
+        p = MATXSParticleB("n", ng)
+        dt = MATXSDataTypeB("nscat", 1, 1)
+        gb = Float32[20.0, 10.0, 1.0, 0.01]
+
+        f = MATXSFileB("", "", 0, ["test"], [p], [dt], [mat], [gb], 5000)
+        buf = IOBuffer()
+        write_matxs_b(buf, f)
+        data = take!(buf)
+        @test length(data) > 0
+
+        # Should have constant sub-block record (jconst=2 > 0)
+        # Count records: id + ctrl + holl + filedata + group + matctrl
+        #   + mtxctrl + mtxdata + constblk = 9 records minimum
+        n_markers = 0
+        iob = IOBuffer(data)
+        while !eof(iob)
+            rlen = read(iob, Int32)
+            skip(iob, rlen)
+            read(iob, Int32)
+            n_markers += 1
+        end
+        @test n_markers >= 8  # at least 8 records with constant block
     end
 
 end  # @testset "NJOY.jl"

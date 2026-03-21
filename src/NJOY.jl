@@ -87,6 +87,23 @@ include("formats/ace_neutron.jl")
 include("formats/ace_builder.jl")
 include("formats/ace_writer.jl")
 
+# Output formats (CCCCR -- CCCC standard interface files)
+include("formats/ccccr.jl")
+include("formats/ccccr_b.jl")
+
+# Output formats (MATXSR -- MATXS interface format)
+include("formats/matxsr.jl")
+include("formats/matxsr_b.jl")
+
+# Output formats (WIMSR -- WIMS-D/WIMS-E library format)
+include("formats/wimsr.jl")
+
+# Output formats (DTFR -- DTF-IV/ANISN format)
+include("formats/dtfr.jl")
+
+# Output formats (POWR -- EPRI-CELL/EPRI-CPM library format)
+include("formats/powr.jl")
+
 # Public API -- constants
 export PhysicsConstants, CODATA2014
 
@@ -236,5 +253,41 @@ export esz_energies, esz_total, esz_elastic
 export format_zaid, parse_zaid, temp_to_mev, mev_to_temp
 export write_ace, write_ace_table, build_ace, build_ace_from_pendf, build_xss
 export write_ace_directory, ace_nes, ace_ntr
+
+# Public API -- CCCCR (CCCC standard interface files)
+export write_isotxs, write_brkoxs, write_dlayxs
+
+# Public API -- CCCCR-B (type-safe ISOTXS writer)
+export Hollerith8, ISOTXSFileIdB, ISOTXSFileControlB
+export IsotopeControlB, PrincipalXSB, ScatterSubBlockB
+export IsotopeDataB, ISOTXSFileB
+export write_isotxs_b, build_isotxs_b
+
+# Public API -- MATXSR (MATXS interface format)
+export write_matxs, write_matxs_binary
+
+# Public API -- MATXSR-B (type-safe MATXS writer)
+export MATXSParticleB, MATXSDataTypeB, MATXSVectorB
+export MATXSMatrixBlockB, MATXSSubmaterialB, MATXSMaterialB, MATXSFileB
+export write_matxs_b, build_matxs_b
+
+# Public API -- WIMSR (WIMS-D/WIMS-E library format)
+export WIMSMaterial, WIMSBurnup, BurnupProduct, WIMSResonanceTable, WIMSP1Block
+export WIMS_VERSION_D, WIMS_VERSION_E, WIMS_DEFAULT_NGROUPS
+export write_wims
+
+# Public API -- DTFR (DTF-IV/ANISN format)
+export DTFMaterial, DTFLayout, DTFNeutronTable, DTFPhotonTable, DTFEdit
+export claw_layout, write_dtf
+export total_xs, ingroup_xs
+
+# Public API -- POWR (EPRI-CELL/EPRI-CPM library format)
+export EPRIFastIsotope, EPRIFastScatterMatrix
+export EPRIThermalIsotope
+export CPMLibrary, CPMLibraryHeader, CPMNuclideSpec, CPMResonanceData, CPMBurnupIsotope
+export POWROutput, POWR_LIB_FAST, POWR_LIB_THERMAL, POWR_LIB_CPM
+export POWR_NGNF, POWR_NGND_FAST, POWR_NGMIN, POWR_NGMAX
+export write_powr, write_powr_fast, write_powr_cpm
+export write_epri_cell, write_epri_cpm
 
 end # module NJOY
