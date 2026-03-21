@@ -3098,4 +3098,401 @@ using NJOY
         @test jxs_v[JXS_END] == length(xss_v) + 1
     end
 
+    # ======================================================================
+    # GROUPR -- Group structures
+    # ======================================================================
+    @testset "GROUPR -- Group structure validation" begin
+        # LANL 30: 31 bounds, 30 groups
+        @test length(LANL_30) == 31
+        @test num_groups(LANL_30) == 30
+        validate_group_bounds(LANL_30)  # should not throw
+        @test LANL_30[1] == 1.39e-4
+        @test LANL_30[end] == 1.70e7
+
+        # WIMS 69: 70 bounds, 69 groups
+        @test length(WIMS_69) == 70
+        @test num_groups(WIMS_69) == 69
+        validate_group_bounds(WIMS_69)
+        @test WIMS_69[1] == 1.0e-5
+        @test WIMS_69[end] == 1.0e7
+
+        # VITAMIN-J 175: 176 bounds, 175 groups
+        @test length(VITAMINJ_175) == 176
+        @test num_groups(VITAMINJ_175) == 175
+        validate_group_bounds(VITAMINJ_175)
+        @test VITAMINJ_175[1] == 1.0e-5
+        @test VITAMINJ_175[end] == 1.9640e7
+
+        # Verify the e175 insertion at position 166
+        @test VITAMINJ_175[166] == 1.284e7
+
+        # Strictly ascending check
+        for i in 1:175
+            @test VITAMINJ_175[i] < VITAMINJ_175[i+1]
+        end
+
+        # Additional structures
+        @test length(SANDII_620) == 621
+        @test num_groups(SANDII_620) == 620
+        validate_group_bounds(SANDII_620)
+
+        @test length(XMAS_172) == 173
+        @test num_groups(XMAS_172) == 172
+        validate_group_bounds(XMAS_172)
+
+        @test length(ECCO_33) == 34
+        @test num_groups(ECCO_33) == 33
+        validate_group_bounds(ECCO_33)
+
+        # Lookup by ign number
+        @test get_group_structure(3) === LANL_30
+        @test get_group_structure(9) === WIMS_69
+        @test get_group_structure(17) === VITAMINJ_175
+        @test get_group_structure(12) === SANDII_620
+        @test get_group_structure(18) === XMAS_172
+        @test get_group_structure(19) === ECCO_33
+        @test get_group_structure(IGN_LANL30) === LANL_30
+
+        # Validation rejects bad bounds
+        @test_throws ArgumentError validate_group_bounds([1.0])
+        @test_throws ArgumentError validate_group_bounds([2.0, 1.0])
+        @test_throws ArgumentError validate_group_bounds([0.0, 1.0])
+    end
+
+    @testset "GROUPR -- find_group" begin
+        bounds = (1.0, 10.0, 100.0, 1000.0)  # 3 groups
+        @test find_group(bounds, 0.5) == 0    # below
+        @test find_group(bounds, 1000.0) == 0 # at upper edge (exclusive)
+        @test find_group(bounds, 1.0) == 1    # at lower edge (inclusive)
+        @test find_group(bounds, 5.0) == 1
+        @test find_group(bounds, 10.0) == 2
+        @test find_group(bounds, 50.0) == 2
+        @test find_group(bounds, 100.0) == 3
+        @test find_group(bounds, 500.0) == 3
+    end
+
+    # ======================================================================
+    # GROUPR -- Integration and averaging
+    # ======================================================================
+    @testset "GROUPR -- group_integrate constant function" begin
+        # Constant function sigma=5.0 over [1, 100]
+        # Integral over [a,b] = 5*(b-a)
+        energies = [1.0, 10.0, 50.0, 100.0]
+        values   = [5.0, 5.0,  5.0,  5.0]
+        bounds   = [1.0, 10.0, 100.0]  # 2 groups
+
+        result = group_integrate(energies, values, bounds)
+        @test length(result) == 2
+        @test isapprox(result[1], 5.0 * 9.0,  rtol=1e-12)   # 5*(10-1)
+        @test isapprox(result[2], 5.0 * 90.0, rtol=1e-12)   # 5*(100-10)
+    end
+
+    @testset "GROUPR -- group_integrate linear function" begin
+        # Linear function: sigma(E) = 2*E on [0.5, 10.0]
+        # Integral over [a,b] = b^2 - a^2
+        energies = [0.5, 2.0, 5.0, 10.0]
+        values   = [1.0, 4.0, 10.0, 20.0]
+        bounds   = [0.5, 5.0, 10.0]
+
+        result = group_integrate(energies, values, bounds)
+        @test isapprox(result[1], 5.0^2 - 0.5^2, rtol=1e-10)  # 24.75
+        @test isapprox(result[2], 10.0^2 - 5.0^2, rtol=1e-10) # 75.0
+    end
+
+    @testset "GROUPR -- group_integrate partial overlap" begin
+        # Data covers [1, 10], groups extend beyond
+        energies = [1.0, 5.0, 10.0]
+        values   = [2.0, 2.0, 2.0]
+        bounds   = [0.1, 1.0, 5.0, 10.0, 20.0]  # 4 groups
+
+        result = group_integrate(energies, values, bounds)
+        @test result[1] == 0.0           # no data below 1.0
+        @test isapprox(result[2], 8.0)   # 2*(5-1)
+        @test isapprox(result[3], 10.0)  # 2*(10-5)
+        @test result[4] == 0.0           # no data above 10.0
+    end
+
+    @testset "GROUPR -- group_integrate with NTuple bounds" begin
+        energies = [1.0, 2.0, 3.0]
+        values   = [4.0, 4.0, 4.0]
+        bounds   = (1.0, 2.0, 3.0)
+
+        result = group_integrate(energies, values, bounds)
+        @test isapprox(result[1], 4.0)
+        @test isapprox(result[2], 4.0)
+    end
+
+    @testset "GROUPR -- group_average constant XS with 1/E weight" begin
+        # For constant sigma, the group average should be exactly sigma
+        # regardless of the weight function.
+        # sigma_g = int(sigma * w) / int(w) = sigma * int(w) / int(w) = sigma
+        energies = collect(range(1.0, 100.0, length=200))
+        xs = fill(3.14, 200)
+        bounds = [1.0, 10.0, 50.0, 100.0]
+
+        mgxs = group_average(energies, xs, 1, bounds; weight_fn=weight_inv_e)
+        @test length(mgxs.flux) == 3
+        for g in 1:3
+            @test isapprox(mgxs.xs[g, 1], 3.14, rtol=1e-6)
+        end
+    end
+
+    @testset "GROUPR -- group_average 1/v XS with flat weight" begin
+        # sigma(E) = 1/sqrt(E) (1/v cross section)
+        # With flat weight: sigma_g = int(E^{-1/2} dE) / int(dE)
+        #                           = 2(sqrt(b)-sqrt(a)) / (b-a)
+        energies = collect(range(1.0, 100.0, length=5000))
+        xs = [1.0 / sqrt(E) for E in energies]
+        bounds = [1.0, 25.0, 100.0]
+
+        mgxs = group_average(energies, xs, 2, bounds; weight_fn=weight_flat)
+
+        # Group 1: [1, 25]: 2*(5-1)/24 = 8/24 = 1/3
+        @test isapprox(mgxs.xs[1, 1], 2.0 * (5.0 - 1.0) / 24.0, rtol=5e-4)
+
+        # Group 2: [25, 100]: 2*(10-5)/75 = 10/75 = 2/15
+        @test isapprox(mgxs.xs[2, 1], 2.0 * (10.0 - 5.0) / 75.0, rtol=5e-4)
+    end
+
+    @testset "GROUPR -- group_average multi-reaction" begin
+        energies = collect(range(1.0, 10.0, length=100))
+        # Two reactions: constant 2.0 and constant 5.0
+        xs_mat = hcat(fill(2.0, 100), fill(5.0, 100))
+        bounds = [1.0, 5.0, 10.0]
+
+        mgxs = group_average(energies, xs_mat, [2, 102], bounds)
+        @test mgxs.mt_list == [2, 102]
+        @test size(mgxs.xs) == (2, 2)
+        for g in 1:2
+            @test isapprox(mgxs.xs[g, 1], 2.0, rtol=1e-6)
+            @test isapprox(mgxs.xs[g, 2], 5.0, rtol=1e-6)
+        end
+    end
+
+    @testset "GROUPR -- group_average_shielded infinite dilution" begin
+        # At sigma0 -> infinity, shielded average should match unshielded
+        energies = collect(range(1.0, 100.0, length=200))
+        total_xs = fill(10.0, 200)
+        reaction_xs = reshape(fill(3.0, 200), :, 1)
+        bounds = [1.0, 50.0, 100.0]
+
+        mgxs_inf = group_average_shielded(energies, total_xs, reaction_xs,
+                                          [2], bounds, 1.0e10)
+        mgxs_std = group_average(energies, reaction_xs, [2], bounds)
+
+        for g in 1:2
+            @test isapprox(mgxs_inf.xs[g, 1], mgxs_std.xs[g, 1], rtol=1e-4)
+        end
+    end
+
+    @testset "GROUPR -- group_average_shielded finite sigma0" begin
+        # With finite sigma0, the shielded XS of a constant should still
+        # be constant (shielding factor cancels in numerator/denominator)
+        energies = collect(range(1.0, 100.0, length=200))
+        total_xs = fill(10.0, 200)
+        reaction_xs = reshape(fill(10.0, 200), :, 1)  # same as total
+        bounds = [1.0, 50.0, 100.0]
+
+        mgxs = group_average_shielded(energies, total_xs, reaction_xs,
+                                      [1], bounds, 100.0)
+        for g in 1:2
+            @test isapprox(mgxs.xs[g, 1], 10.0, rtol=1e-4)
+        end
+    end
+
+    @testset "GROUPR -- weight functions" begin
+        @test weight_flat(42.0) == 1.0
+        @test weight_inv_e(4.0) == 0.25
+        @test weight_inv_e(1.0) == 1.0
+
+        # Maxwell-fission: continuous and positive
+        kT = 0.0253
+        @test weight_maxwell_fission(1e-4; kT=kT) > 0
+        @test weight_maxwell_fission(1.0; kT=kT) > 0
+        @test weight_maxwell_fission(1e6; kT=kT) > 0
+
+        # Continuity at transition points
+        Ec = kT * 20.0
+        Ef = 820.3e3
+        w_below_Ec = weight_maxwell_fission(Ec * 0.999; kT=kT)
+        w_above_Ec = weight_maxwell_fission(Ec * 1.001; kT=kT)
+        @test isapprox(w_below_Ec, w_above_Ec, rtol=0.01)
+
+        w_below_Ef = weight_maxwell_fission(Ef * 0.999; kT=kT)
+        w_above_Ef = weight_maxwell_fission(Ef * 1.001; kT=kT)
+        @test isapprox(w_below_Ef, w_above_Ef, rtol=0.01)
+    end
+
+    @testset "GROUPR -- analytical integral verification" begin
+        # Verify group_integrate matches direct trapezoidal for lin-lin
+        # On [1, 5] with f(E) = E^2 approximated piecewise-linear on fine grid
+        # The trapezoidal rule IS exact for piecewise-linear, so the
+        # panel_integral (lin-lin) result should match numerical integration.
+        n = 10000
+        energies = collect(range(1.0, 5.0, length=n))
+        values = energies .^ 2  # quadratic -- tests accuracy of linearization
+        bounds = [1.0, 3.0, 5.0]
+
+        result = group_integrate(energies, values, bounds)
+        # Exact: int_1^3 E^2 dE = 27/3 - 1/3 = 26/3
+        # Exact: int_3^5 E^2 dE = 125/3 - 27/3 = 98/3
+        @test isapprox(result[1], 26.0 / 3.0, rtol=1e-6)
+        @test isapprox(result[2], 98.0 / 3.0, rtol=1e-6)
+    end
+
+    # ======================================================================
+    # GROUPR -- Weight functions (weight_functions.jl)
+    # ======================================================================
+    @testset "GROUPR -- weight_functions.jl basic" begin
+        # constant_weight
+        @test constant_weight(42.0) == 1.0
+        @test constant_weight(1e-5) == 1.0
+
+        # inv_e_weight
+        @test inv_e_weight(4.0) == 0.25
+        @test inv_e_weight(1.0) == 1.0
+        @test inv_e_weight(0.01) == 100.0
+
+        # Backward-compat aliases still work
+        @test weight_flat(1.0) == constant_weight(1.0)
+        @test weight_inv_e(5.0) == inv_e_weight(5.0)
+    end
+
+    @testset "GROUPR -- 1/E integral = ln(E_high/E_low)" begin
+        # Verify that integrating 1/E over [E_low, E_high] gives ln(E_high/E_low)
+        E_low, E_high = 1.0, 1000.0
+        n = 50000
+        energies = collect(range(E_low, E_high, length=n))
+        wvals = [inv_e_weight(E) for E in energies]
+        bounds = [E_low, E_high]
+
+        result = group_integrate(energies, wvals, bounds)
+        exact = log(E_high / E_low)
+        @test isapprox(result[1], exact, rtol=1e-5)
+    end
+
+    @testset "GROUPR -- maxwell_inv_e_fission" begin
+        # Positivity across all regions
+        for E in [1e-5, 0.01, 0.0253, 1.0, 100.0, 1e5, 1e6, 1e7]
+            @test maxwell_inv_e_fission(E) > 0
+        end
+
+        # In the 1/E region (well above thermal, below fission), it equals 1/E
+        E_mid = 100.0
+        @test isapprox(maxwell_inv_e_fission(E_mid), 1.0 / E_mid, rtol=1e-10)
+
+        # Continuity at Eb breakpoint
+        Eb = 0.0253
+        w_lo = maxwell_inv_e_fission(Eb * (1.0 - 1e-8))
+        w_hi = maxwell_inv_e_fission(Eb * (1.0 + 1e-8))
+        @test isapprox(w_lo, w_hi, rtol=1e-4)
+
+        # Continuity at Ec breakpoint
+        Ec = 820.3e3
+        w_lo2 = maxwell_inv_e_fission(Ec * (1.0 - 1e-8))
+        w_hi2 = maxwell_inv_e_fission(Ec * (1.0 + 1e-8))
+        @test isapprox(w_lo2, w_hi2, rtol=1e-4)
+    end
+
+    @testset "GROUPR -- get_weight_function dispatch" begin
+        w2 = get_weight_function(2)
+        @test w2(5.0) == 1.0
+
+        w3 = get_weight_function(3)
+        @test w3(4.0) == 0.25
+
+        w4 = get_weight_function(4)
+        @test w4(100.0) > 0
+
+        w6 = get_weight_function(6)
+        @test w6(0.01) > 0
+
+        w11 = get_weight_function(11)
+        @test w11(1.0) > 0
+
+        @test_throws ArgumentError get_weight_function(99)
+    end
+
+    @testset "GROUPR -- vitamin_e_weight" begin
+        # Positivity across all regions
+        for E in [1e-3, 0.1, 1.0, 1e3, 1e6, 5e6, 1.1e7, 1.3e7, 1.5e7, 1.8e7]
+            @test vitamin_e_weight(E) > 0
+        end
+
+        # In the 1/E region (between 0.414 and 2.12e6)
+        E_mid = 1000.0
+        @test isapprox(vitamin_e_weight(E_mid), 1.0 / E_mid, rtol=1e-10)
+    end
+
+    @testset "GROUPR -- thermal_fission_fusion" begin
+        # Positivity
+        for E in [1e-3, 0.01, 0.1, 1.0, 1e5, 1e6, 1e7]
+            @test thermal_fission_fusion(E) > 0
+        end
+    end
+
+    @testset "GROUPR -- group_average constant sigma any weight" begin
+        # For constant sigma, group average = sigma regardless of weight.
+        # Test with all built-in weight functions.
+        energies = collect(range(1.0, 1e6, length=500))
+        sigma_val = 7.77
+        xs = fill(sigma_val, 500)
+        bounds = [1.0, 100.0, 1e4, 1e6]
+
+        for iwt in [2, 3, 4, 6, 11]
+            wf = get_weight_function(iwt)
+            mgxs = group_average(energies, xs, 1, bounds; weight_fn=wf)
+            for g in 1:3
+                @test isapprox(mgxs.xs[g, 1], sigma_val, rtol=1e-3)
+            end
+        end
+    end
+
+    @testset "GROUPR -- 1/v XS with 1/E weight analytical" begin
+        # sigma(E) = C/sqrt(E) (1/v), weight = 1/E
+        # sigma_g = int(C/sqrt(E) * 1/E dE) / int(1/E dE)
+        #         = C * int(E^{-3/2} dE) / ln(E_hi/E_lo)
+        #         = C * [-2/sqrt(E)]_{E_lo}^{E_hi} / ln(E_hi/E_lo)
+        #         = C * 2*(1/sqrt(E_lo) - 1/sqrt(E_hi)) / ln(E_hi/E_lo)
+        C = 10.0
+        E_lo, E_hi = 1.0, 100.0
+        n = 20000
+        energies = collect(range(E_lo, E_hi, length=n))
+        xs = [C / sqrt(E) for E in energies]
+        bounds = [E_lo, E_hi]
+
+        mgxs = group_average(energies, xs, 1, bounds; weight_fn=inv_e_weight)
+        exact = C * 2.0 * (1.0 / sqrt(E_lo) - 1.0 / sqrt(E_hi)) / log(E_hi / E_lo)
+        @test isapprox(mgxs.xs[1, 1], exact, rtol=5e-4)
+    end
+
+    @testset "GROUPR -- self-shielded vs infinite dilute convergence" begin
+        # As sigma0 -> infinity, shielded result should converge to unshielded
+        energies = collect(range(1.0, 1000.0, length=500))
+        total_xs = [10.0 + 5.0 * sin(E / 100.0) for E in energies]
+        reaction_xs = reshape([3.0 + 2.0 * cos(E / 50.0) for E in energies], :, 1)
+        bounds = [1.0, 100.0, 500.0, 1000.0]
+
+        mgxs_unshielded = group_average(energies, reaction_xs, [2], bounds;
+                                        weight_fn=inv_e_weight)
+
+        # Progressively larger sigma0 should approach unshielded
+        prev_err = Inf
+        for sigma0 in [1e2, 1e4, 1e6, 1e8]
+            mgxs_sh = group_average_shielded(energies, total_xs, reaction_xs,
+                                             [2], bounds, sigma0;
+                                             weight_fn=inv_e_weight)
+            err = maximum(abs.(mgxs_sh.xs[:, 1] .- mgxs_unshielded.xs[:, 1]))
+            @test err < prev_err  # convergence
+            prev_err = err
+        end
+        # At sigma0=1e8, should be very close
+        mgxs_large = group_average_shielded(energies, total_xs, reaction_xs,
+                                            [2], bounds, 1e8;
+                                            weight_fn=inv_e_weight)
+        for g in 1:3
+            @test isapprox(mgxs_large.xs[g, 1], mgxs_unshielded.xs[g, 1], rtol=1e-3)
+        end
+    end
+
 end  # @testset "NJOY.jl"

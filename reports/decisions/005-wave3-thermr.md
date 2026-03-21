@@ -17,4 +17,9 @@ Both converged on the same structure (292 lines each):
 3. Both free gas and S(α,β) use the same kernel interface
 4. All pure functions, AD-compatible
 
-## Pending: Reviewer verdict
+## Reviewer Verdict: CONDITIONAL PASS
+
+Free gas model: PASS. S(α,β): PASS with caveats (bilinear vs quadratic interp, missing cliq extrapolation).
+Bragg edges: FAIL — missing crystal structure factor form(). Logged as NJOY.jl-ebd.
+AD: Float64 casts strip dual numbers. Logged as NJOY.jl-8es.
+See reports/REVIEW_WAVE3_THERMR.md.

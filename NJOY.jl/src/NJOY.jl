@@ -50,6 +50,11 @@ include("processing/thermr.jl")
 include("processing/unresr.jl")
 include("processing/purr.jl")
 
+# Processing modules (GROUPR -- group-averaged cross sections)
+include("processing/group_structures.jl")
+include("processing/weight_functions.jl")
+include("processing/groupr.jl")
+
 # Output formats (ACER -- ACE format for MCNP)
 include("formats/ace_types.jl")
 include("formats/ace_writer.jl")
@@ -133,6 +138,18 @@ export ProbabilityTable
 export chi2_sample, wigner_spacing
 export generate_ladder, generate_ptable, bondarenko_from_ptable
 export CHI2_QUANTILES
+
+# Public API -- GROUPR (group-averaged cross sections)
+export LANL_30, WIMS_69, VITAMINJ_175, SANDII_620, XMAS_172, ECCO_33
+export GroupStructureId, IGN_LANL30, IGN_WIMS69, IGN_SANDII620
+export IGN_VITAMINJ, IGN_XMAS172, IGN_ECCO33
+export get_group_structure, num_groups, validate_group_bounds, find_group
+export MultiGroupXS
+export constant_weight, inv_e_weight, maxwell_inv_e_fission
+export vitamin_e_weight, thermal_fission_fusion, tabulated_weight
+export get_weight_function
+export weight_flat, weight_inv_e, weight_maxwell_fission
+export group_integrate, group_average, group_average_shielded
 
 # Public API -- ACER (ACE format for MCNP)
 export ACEHeader, ACENeutronTable, ACETable
