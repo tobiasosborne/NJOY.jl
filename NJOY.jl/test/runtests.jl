@@ -1951,4 +1951,497 @@ using NJOY
         end
     end
 
+    # ======================================================================
+    # HEATR -- KERMA Coefficients and Damage Energy
+    # ======================================================================
+    @testset "HEATR elastic heating" begin
+        # Analytical formula: h(E) = 2*E*A / (1+A)^2
+        # For isotropic CM elastic scattering, the average energy
+        # deposited in the target equals this expression exactly.
+
+        # H-1: A=1 => h = E/2
+        @test elastic_heating(1.0, 1.0) == 0.5
+        @test elastic_heating(1e6, 1.0) == 0.5e6
+
+        # Heavy target: A=238 => h = 2*E*238/(239)^2 ~ small fraction
+        A = 238.0
+        E = 1e6
+        expected = 2.0 * E * A / (1.0 + A)^2
+        @test isapprox(elastic_heating(E, A), expected, rtol=1e-14)
+
+        # C-12: A=12
+        A = 12.0
+        for E in [0.0253, 1.0, 1e4, 1e6]
+            h = elastic_heating(E, A)
+            @test isapprox(h, 2.0 * E * A / (1.0 + A)^2, rtol=1e-14)
+            # Heating must be positive and less than E
+            if E > 0
+                @test h > 0.0
+                @test h < E
+            end
+        end
+
+        # Symmetry: elastic_heating(E, A) should scale linearly with E
+        A = 56.0  # Fe
+        @test isapprox(elastic_heating(2.0, A) / elastic_heating(1.0, A), 2.0, rtol=1e-14)
+
+        # Anisotropic scattering: forward scattering (mu_bar>0) deposits less
+        # energy, backward scattering (mu_bar<0) deposits more.
+        A = 12.0
+        E = 1.0e6
+        h_fwd = elastic_heating_aniso(E, A, 0.5)
+        h_bwd = elastic_heating_aniso(E, A, -0.5)
+        @test h_bwd > h_fwd  # backward scattering deposits more energy
+    end
+
+    @testset "HEATR capture heating (H-1)" begin
+        # For H-1 (A=1, Z=1), radiative capture: n + p -> d + gamma
+        # Q = 2.224566 MeV (deuteron binding energy)
+        A = 1.0
+        Q = 2.224566e6  # eV
+
+        # capture_heating(E, Q, A) = E*A/(A+1) + Q (local deposition, E_gamma=0)
+        E = 0.0253
+        h = capture_heating(E, Q, A)
+        # With local deposition: h = E*A/(A+1) + Q
+        @test isapprox(h, E * A / (A + 1.0) + Q, rtol=1e-14)
+
+        # With gamma energy subtracted:
+        E_gamma_test = Q - 100.0  # pretend gamma carries Q-100 eV
+        h_bal = capture_heating(E, Q, A; E_gamma=E_gamma_test)
+        # h = E*A/(A+1) + Q - E_gamma
+        @test isapprox(h_bal, E * A / (A + 1.0) + Q - E_gamma_test, rtol=1e-14)
+
+        # Capture recoil energy should be positive and small
+        E_recoil = capture_recoil(E, Q, A)
+        @test E_recoil > 0.0
+        @test E_recoil < Q  # recoil much less than Q value
+    end
+
+    @testset "HEATR Lindhard damage function" begin
+        # The Lindhard partition function gives damage energy from recoil.
+        # For very high energy recoils, electronic stopping dominates
+        # and damage fraction -> 0. For low energy, nuclear stopping
+        # dominates and damage fraction -> 1 (minus displacement threshold).
+
+        # Pre-compute for Fe in Fe lattice (Z=26, A=56)
+        Z = 26.0
+        A = 56.0
+        lp = lindhard_params(Z, A, Z, A)
+        @test lp.el_inv > 0.0
+        @test lp.fl > 0.0
+
+        # Below displacement threshold: no damage
+        @test lindhard_damage(10.0, lp; E_d=25.0) == 0.0
+
+        # At moderate energy: damage is a fraction of recoil energy
+        dam = lindhard_damage(1e4, lp; E_d=25.0)
+        @test dam > 0.0
+        @test dam < 1e4
+
+        # Damage fraction decreases with increasing energy
+        # (electronic stopping becomes more important)
+        frac_low = lindhard_damage(100.0, lp; E_d=25.0) / 100.0
+        frac_high = lindhard_damage(1e6, lp; E_d=25.0) / 1e6
+        @test frac_low > frac_high
+
+        # Zero recoil atom charge: no damage
+        lp_zero = lindhard_params(0.0, A, Z, A)
+        @test lindhard_damage(1e6, lp_zero) == 0.0
+
+        # Convenience 5-arg form
+        dam5 = lindhard_damage(1e4, Z, A, Z, A; E_d=25.0)
+        @test isapprox(dam5, dam, rtol=1e-14)
+
+        # Default displacement energies
+        @test displacement_energy(26) == 40.0  # Fe
+        @test displacement_energy(13) == 27.0  # Al
+        @test displacement_energy(6)  == 31.0  # C
+        @test displacement_energy(99) == 25.0  # fallback
+    end
+
+    @testset "HEATR inelastic heating" begin
+        # Inelastic scattering: h = E + Q - E_secondary
+        A = 55.845
+        Q = -0.847e6  # eV (first excited state)
+        E = 2.0e6
+
+        h = inelastic_heating(E, Q, A)
+        @test isapprox(h, E + Q, rtol=1e-14)  # E_secondary=0 default
+
+        # With secondary energy subtracted
+        E_sec = 1.5e6
+        h2 = inelastic_heating(E, Q, A; E_secondary=E_sec)
+        @test isapprox(h2, E + Q - E_sec, rtol=1e-14)
+    end
+
+    @testset "HEATR fission heating" begin
+        # Simple energy balance for fission
+        Q = 200.0e6  # typical fission Q ~ 200 MeV
+        E = 1.0e6    # 1 MeV incident
+        E_nu = 12.0e6  # neutrino energy
+        E_del = 10.0e6 # delayed components
+
+        h = fission_heating(E, Q; E_neutrino=E_nu, E_delayed=E_del)
+        @test isapprox(h, Q - E_nu - E_del, rtol=1e-14)
+
+        # FissionQComponents form
+        qc = FissionQComponents(
+            170.0e6,  # E_fragments
+             5.0e6,   # E_prompt_n
+             7.0e6,   # E_prompt_gamma
+             6.5e6,   # E_delayed_beta
+             6.3e6,   # E_delayed_gamma
+             0.01e6,  # E_delayed_n
+            12.0e6,   # E_neutrino
+            194.81e6, # E_pseudo_Q
+            206.81e6  # E_total
+        )
+        h_qc = fission_heating(E, qc)
+        # h = E_fragments + E_prompt_gamma
+        @test isapprox(h_qc, 170.0e6 + 7.0e6, rtol=1e-14)
+    end
+
+    @testset "HEATR nxn heating" begin
+        # (n,2n) reaction
+        A = 55.845
+        Q = -10.0e6  # negative Q
+        E = 14.0e6
+        h = nxn_heating(E, Q, A, 2)
+        @test isapprox(h, E + Q, rtol=1e-14)  # E_secondary=0
+
+        h2 = nxn_heating(E, Q, A, 2; E_secondary=3.0e6)
+        @test isapprox(h2, E + Q - 2 * 3.0e6, rtol=1e-14)
+    end
+
+    @testset "HEATR compute_kerma integration" begin
+        # Build a simple PointwiseMaterial with elastic + capture
+        energies = [1e-5, 0.0253, 1.0, 1e3, 1e6]
+        ne = length(energies)
+        # 2 reactions: MT2 (elastic), MT102 (capture)
+        xs = zeros(ne, 2)
+        xs[:, 1] .= 20.0   # elastic cross section = 20 b
+        xs[:, 2] .= [1000.0, 100.0, 10.0, 1.0, 0.1]  # 1/v capture
+
+        pendf = PointwiseMaterial(Int32(125), energies, xs, [2, 102])
+
+        Q_vals = Dict{Int,Float64}(102 => 2.224566e6)
+        result = compute_kerma(pendf; awr=1.0, Z=1, Q_values=Q_vals)
+
+        # Result should have correct size
+        @test length(result.energies) == ne
+        @test length(result.total_kerma) == ne
+
+        # Total = elastic + capture + fission + inelastic
+        for ie in 1:ne
+            parts = result.elastic_kerma[ie] + result.capture_kerma[ie] +
+                    result.fission_kerma[ie] + result.inelastic_kerma[ie]
+            @test isapprox(result.total_kerma[ie], parts, rtol=1e-12)
+        end
+
+        # Elastic partial should match analytical formula * sigma
+        for ie in 1:ne
+            E = energies[ie]
+            h_expected = elastic_heating(E, 1.0) * xs[ie, 1]
+            @test isapprox(result.elastic_kerma[ie], h_expected, rtol=1e-12)
+        end
+
+        # Capture partial: h = (E*A/(A+1) + Q) * sigma  (local gamma deposition)
+        for ie in 1:ne
+            E = energies[ie]
+            Q_cap = 2.224566e6
+            h_expected = capture_heating(E, Q_cap, 1.0) * xs[ie, 2]
+            @test isapprox(result.capture_kerma[ie], h_expected, rtol=1e-12)
+        end
+
+        # Verify sum rule helper
+        @test verify_kerma_sum_rule(result)
+
+        # Damage should be non-negative
+        for ie in 1:ne
+            @test result.damage_energy[ie] >= 0.0
+        end
+    end
+
+    # ======================================================================
+    # THERMR -- Thermal Scattering Cross Sections
+    # ======================================================================
+    @testset "THERMR -- Free Gas" begin
+        C = NJOY.PhysicsConstants
+
+        # ------------------------------------------------------------------
+        # Test 1: High-energy limit  sigma -> sigma_b / A
+        # For E >> kT, the free gas XS approaches the billiard-ball limit.
+        # ------------------------------------------------------------------
+        @testset "High-energy limit (E >> kT)" begin
+            A = 12.0       # Carbon-like
+            T = 293.6      # Room temperature [K]
+            sigma_b = 5.551 # barn (typical bound XS)
+            kT = C.bk * T
+
+            # At E = 1000*kT the result should be very close to sigma_b/A
+            E_high = 1000.0 * kT
+            xs_high = free_gas_xs(E_high, A, T; sigma_b=sigma_b)
+            @test isapprox(xs_high, sigma_b / A, rtol=1e-4)
+
+            # At E = 10000*kT even closer
+            E_vhigh = 10000.0 * kT
+            xs_vhigh = free_gas_xs(E_vhigh, A, T; sigma_b=sigma_b)
+            @test isapprox(xs_vhigh, sigma_b / A, rtol=1e-4)
+        end
+
+        # ------------------------------------------------------------------
+        # Test 2: Low-energy limit  sigma -> sigma_b*sqrt(pi)/(2*x) / A
+        # where x = sqrt(A*E/(kT)).  This is the 1/v behavior.
+        # ------------------------------------------------------------------
+        @testset "Low-energy 1/v limit (E << kT)" begin
+            A = 1.0        # Hydrogen
+            T = 293.6
+            sigma_b = 81.98 # barn (H-1 bound XS)
+            kT = C.bk * T
+
+            # For E << kT, the correct leading term is:
+            #   sigma ~ sigma_b/A * 2/(x*sqrt(pi)), x = sqrt(A*E/kT)
+            for E in [1e-7, 1e-6, 1e-5]
+                x = sqrt(A * E / kT)
+                expected = sigma_b / A * 2.0 / (x * sqrt(C.pi))
+                xs = free_gas_xs(E, A, T; sigma_b=sigma_b)
+                @test isapprox(xs, expected, rtol=1e-2)
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Test 3: Cross section is always positive
+        # ------------------------------------------------------------------
+        @testset "Positivity" begin
+            for A in [1.0, 12.0, 56.0, 238.0]
+                for T in [100.0, 300.0, 600.0, 1200.0]
+                    for E in [1e-5, 0.0253, 0.1, 1.0, 10.0]
+                        @test free_gas_xs(E, A, T) > 0.0
+                    end
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Test 4: Monotonicity -- for a free gas, XS decreases with energy
+        # at low energies (1/v) and approaches constant at high energies.
+        # The function should be monotonically decreasing.
+        # ------------------------------------------------------------------
+        @testset "Monotonicity" begin
+            A = 12.0
+            T = 300.0
+            energies = [1e-5, 1e-4, 1e-3, 0.01, 0.1, 1.0, 10.0]
+            xs_vals = [free_gas_xs(E, A, T) for E in energies]
+            for i in 2:length(xs_vals)
+                @test xs_vals[i] <= xs_vals[i-1]
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Test 5: Free gas kernel -- detailed balance
+        # P(E->E') / P(E'->E) = exp(-(E-E')/(kT))  (up to sqrt(E'/E) prefactor)
+        # More precisely, the kernel satisfies:
+        #   kernel(E,E',mu) / kernel(E',E,mu) = exp(-(E-E')/kT)
+        # when we account for the sqrt(E'/E) prefactor properly.
+        # ------------------------------------------------------------------
+        @testset "Kernel detailed balance" begin
+            A = 12.0
+            T = 300.0
+            kT = C.bk * T
+
+            # The free gas kernel k(E,E',mu) = sigma_b*sqrt(E'/E)/(2kT)*S(a,b)
+            # satisfies: k(E->E',mu)/k(E'->E,mu) = (E'/E)*exp(-(E'-E)/kT)
+            test_points = [
+                (0.0253, 0.030, 0.5),
+                (0.05, 0.03, 0.0),
+                (0.1, 0.08, -0.5),
+                (0.01, 0.015, 0.9),
+            ]
+
+            for (E, Ep, mu) in test_points
+                k_fwd = free_gas_kernel(E, Ep, mu, A, T)
+                k_rev = free_gas_kernel(Ep, E, mu, A, T)
+                if k_fwd > 0.0 && k_rev > 0.0
+                    ratio = k_fwd / k_rev
+                    expected_ratio = (Ep / E) * exp(-(Ep - E) / kT)
+                    @test isapprox(ratio, expected_ratio, rtol=1e-10)
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Test 6: Kernel is non-negative everywhere
+        # ------------------------------------------------------------------
+        @testset "Kernel non-negativity" begin
+            A = 1.0
+            T = 300.0
+            for E in [0.001, 0.0253, 0.1]
+                for Ep in [0.001, 0.0253, 0.1]
+                    for mu in [-1.0, -0.5, 0.0, 0.5, 1.0]
+                        @test free_gas_kernel(E, Ep, mu, A, T) >= 0.0
+                    end
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Test 7: Thermal energy grid
+        # ------------------------------------------------------------------
+        @testset "THERMR energy grid" begin
+            @test issorted(THERMR_EGRID)
+            @test THERMR_EGRID[1] > 0.0
+            @test THERMR_EGRID[end] == 10.0
+            @test length(THERMR_EGRID) == 118
+        end
+
+        # ------------------------------------------------------------------
+        # Test 8: compute_thermal_xs basic functionality
+        # ------------------------------------------------------------------
+        @testset "compute_thermal_xs" begin
+            A = 12.0
+            T = 300.0
+            sigma_b = 5.551
+
+            # Create a simple constant elastic XS above thermal range
+            cold_e = collect(range(1e-5, 20.0, length=200))
+            cold_xs = fill(sigma_b / A, 200)  # flat at billiard-ball limit
+
+            new_e, new_xs = compute_thermal_xs(cold_e, cold_xs, A, T;
+                                               sigma_b=sigma_b, emax=10.0)
+            @test issorted(new_e)
+            @test length(new_e) == length(new_xs)
+            @test all(new_xs .> 0.0)
+
+            # At low energy, thermal XS should be larger than cold (1/v rise)
+            low_idx = searchsortedfirst(new_e, 1e-4)
+            high_idx = searchsortedfirst(new_e, 5.0)
+            @test new_xs[low_idx] > new_xs[high_idx]
+        end
+    end
+
+    # ======================================================================
+    # THERMR -- S(alpha,beta) Model
+    # ======================================================================
+    @testset "THERMR -- S(alpha,beta)" begin
+        C = NJOY.PhysicsConstants
+
+        # Build a free-gas S_sym(a,b) table on a fine log-spaced grid
+        # ENDF symmetric convention: S_sym(a,|b|) = S(a,|b|)*exp(|b|/2)
+        # so log(S_sym) = -(a+b)^2/(4a) - 0.5*log(4pi*a) + b/2
+        @testset "SAB reproduces free gas" begin
+            A = 1.0; T = 300.0; kT = C.bk * T
+            # Dense log-spaced alpha grid covering the test-point alpha
+            ag = [exp(x) for x in range(log(0.01), log(50.0), length=200)]
+            bg = collect(range(0.0, 50.0, length=200))
+            na, nb = length(ag), length(bg)
+            st = zeros(na, nb)
+            for (ia, a) in enumerate(ag), (ib, b) in enumerate(bg)
+                st[ia, ib] = -(a + b)^2 / (4*a) - 0.5*log(4*C.pi*a) + b/2
+            end
+            data = read_thermal_data(ag, bg, st; sigma_b=1.0, awr=A, is_log=true)
+
+            # Choose E,Ep that give alpha,beta well within table range
+            # alpha = (E+Ep-2*mu*sqrt(E*Ep))/(A*kT), beta = (Ep-E)/kT
+            E, Ep, mu = 0.5, 0.6, 0.5
+            alpha_test = (E+Ep-2*mu*sqrt(E*Ep))/(A*kT)
+            beta_test = abs(Ep-E)/kT
+            # Verify alpha/beta in range
+            @test alpha_test > ag[1] && alpha_test < ag[end]
+            @test beta_test > bg[1] && beta_test < bg[end]
+
+            k_fg = free_gas_kernel(E, Ep, mu, A, T)
+            sb_match = 1.0 / ((A+1)/A)^2
+            k_sab = sab_kernel(E, Ep, mu, data, T; sigma_b_override=sb_match)
+            if k_fg > 1e-20 && k_sab > 1e-20
+                @test isapprox(k_sab, k_fg, rtol=0.05)
+            end
+        end
+
+        # Detailed balance: k(E->Ep)/k(Ep->E) = (Ep/E)*exp(-(Ep-E)/kT)
+        # The (Ep/E) factor comes from the sqrt(Ep/E) prefactor in the kernel.
+        @testset "SAB kernel detailed balance" begin
+            A = 1.0; T = 300.0; kT = C.bk * T
+            ag = [exp(x) for x in range(log(0.01), log(80.0), length=200)]
+            bg = collect(range(0.0, 80.0, length=200))
+            na, nb = length(ag), length(bg)
+            st = zeros(na, nb)
+            for (ia, a) in enumerate(ag), (ib, b) in enumerate(bg)
+                st[ia, ib] = -(a + b)^2 / (4*a) - 0.5*log(4*C.pi*a) + b/2
+            end
+            data = read_thermal_data(ag, bg, st; sigma_b=5.0, awr=A, is_log=true)
+            for (E, Ep, mu) in [(0.5, 0.6, 0.5), (1.0, 0.8, 0.0)]
+                kf = sab_kernel(E, Ep, mu, data, T)
+                kr = sab_kernel(Ep, E, mu, data, T)
+                if kf > 1e-30 && kr > 1e-30
+                    expected = (Ep/E) * exp(-(Ep - E) / kT)
+                    @test isapprox(kf / kr, expected, rtol=1e-10)
+                end
+            end
+        end
+
+        @testset "read_thermal_data" begin
+            alpha = [0.1, 1.0, 5.0]; beta = [0.0, 1.0, 3.0]
+            raw_s = [0.1 0.05 0.01; 0.08 0.04 0.005; 0.02 0.01 0.001]
+            data = read_thermal_data(alpha, beta, raw_s;
+                                     sigma_b=4.0, awr=1.0, is_log=false)
+            @test data isa SABData
+            @test length(data.alpha) == 3
+            @test data.sigma_b == 4.0
+            @test isapprox(data.sab[1,1], log(0.1), atol=1e-10)
+        end
+    end
+
+    # ======================================================================
+    # THERMR -- Bragg Edges (coherent elastic)
+    # ======================================================================
+    @testset "THERMR -- Bragg edges" begin
+        @testset "Graphite Bragg edges" begin
+            bragg = build_bragg_data(a=2.4573e-8, c=6.700e-8,
+                        sigma_coh=5.50, A_mass=12.011, natom=1,
+                        debye_waller=3.0, emax=1.0)
+            @test bragg isa BraggData
+            @test bragg.n_edges > 0
+
+            edges = bragg_edge_energies(bragg)
+            @test all(edges .> 0)
+            @test issorted(edges)
+            @test edges[1] > 1e-4
+            @test edges[1] < 0.01
+
+            # Zero below first edge
+            @test bragg_edges(edges[1] * 0.5, bragg) == 0.0
+            # Positive above first edge
+            @test bragg_edges(edges[1] * 1.1, bragg) > 0.0
+
+            # 1/E behavior above all edges
+            E1, E2 = edges[end] * 1.5, edges[end] * 3.0
+            @test isapprox(bragg_edges(E1, bragg)*E1,
+                           bragg_edges(E2, bragg)*E2, rtol=1e-10)
+
+            # Step increase at each Bragg edge
+            for k in 2:min(5, length(edges))
+                @test bragg_edges(edges[k]*1.001, bragg) >=
+                      bragg_edges(edges[k]*0.999, bragg)
+            end
+        end
+    end
+
+    # ======================================================================
+    # THERMR -- Incoherent Elastic
+    # ======================================================================
+    @testset "THERMR -- Incoherent elastic" begin
+        sigma_b, dwp = 80.0, 10.0
+
+        @test incoh_elastic_xs(0.0, sigma_b, dwp) == 0.0
+        @test isapprox(incoh_elastic_xs(100.0, sigma_b, dwp),
+                       sigma_b/2, rtol=1e-6)
+        es = [1e-4, 1e-3, 0.01, 0.1, 1.0, 10.0]
+        xv = [incoh_elastic_xs(E, sigma_b, dwp) for E in es]
+        for i in 2:length(xv); @test xv[i] >= xv[i-1]; end
+        E_s = 1e-6
+        @test isapprox(incoh_elastic_xs(E_s, sigma_b, dwp),
+                       sigma_b/2*4*E_s*dwp, rtol=1e-4)
+    end
+
 end  # @testset "NJOY.jl"

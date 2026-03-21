@@ -38,6 +38,12 @@ include("processing/pendf_writer.jl")
 include("processing/sigma1.jl")
 include("processing/broadr.jl")
 
+# Processing modules (HEATR -- KERMA coefficients and damage energy)
+include("processing/heatr.jl")
+
+# Processing modules (THERMR -- thermal scattering cross sections)
+include("processing/thermr.jl")
+
 # Public API -- constants
 export PhysicsConstants, CODATA2014
 
@@ -89,5 +95,22 @@ export write_pendf, write_pendf_file
 # Public API -- BROADR (Doppler broadening -- Proposal B)
 export f_func, f_all, h_func, h_all, h_taylor
 export sigma1_at, doppler_broaden, doppler_broaden_multi, thin_xs
+
+# Public API -- HEATR (KERMA coefficients and damage energy -- Proposal B)
+export KERMAResult, LindharParams, FissionQComponents
+export displacement_energy, lindhard_params, lindhard_damage
+export elastic_heating, elastic_heating_aniso, elastic_damage
+export capture_heating, capture_recoil, capture_damage
+export fission_heating, inelastic_heating, nxn_heating
+export compute_kerma, verify_kerma_sum_rule
+
+# Public API -- THERMR (thermal scattering cross sections)
+export SABData, BraggData, ThermalResult
+export free_gas_xs, free_gas_kernel
+export read_thermal_data, sab_kernel, sab_xs
+export bragg_edges, bragg_edge_energies, build_bragg_data
+export incoh_elastic_xs
+export compute_thermal_xs, compute_thermal
+export THERMR_EGRID
 
 end # module NJOY
