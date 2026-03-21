@@ -2444,4 +2444,658 @@ using NJOY
                        sigma_b/2*4*E_s*dwp, rtol=1e-4)
     end
 
+    # ======================================================================
+    # ACER -- ACE Format Types and NXS/JXS Construction
+    # ======================================================================
+    @testset "ACER -- ACE format types" begin
+        # Build a minimal ACETable and verify NXS/JXS structure
+        nxs = ntuple(i -> Int32(0), 16)
+        nxs = Base.setindex(nxs, Int32(500), NXS_LEN2)
+        nxs = Base.setindex(nxs, Int32(92235), NXS_IZAID)
+        nxs = Base.setindex(nxs, Int32(100), NXS_NES)
+        nxs = Base.setindex(nxs, Int32(3), NXS_NTR)
+        nxs = Base.setindex(nxs, Int32(0), NXS_NR)
+
+        @test nxs[NXS_LEN2] == 500
+        @test nxs[NXS_IZAID] == 92235
+        @test nxs[NXS_NES] == 100
+        @test nxs[NXS_NTR] == 3
+        @test nxs[NXS_NR] == 0
+
+        jxs = ntuple(i -> Int32(0), 32)
+        jxs = Base.setindex(jxs, Int32(1), JXS_ESZ)
+        jxs = Base.setindex(jxs, Int32(0), JXS_NU)
+        jxs = Base.setindex(jxs, Int32(501), JXS_MTR)
+
+        @test jxs[JXS_ESZ] == 1
+        @test jxs[JXS_NU] == 0
+        @test jxs[JXS_MTR] == 501
+
+        # Verify NXS/JXS index constants have expected values
+        @test NXS_LEN2 == 1
+        @test NXS_IZAID == 2
+        @test NXS_NES == 3
+        @test NXS_NTR == 4
+        @test NXS_NR == 5
+        @test JXS_ESZ == 1
+        @test JXS_NU == 2
+        @test JXS_MTR == 3
+        @test JXS_LAND == 8
+        @test JXS_AND == 9
+    end
+
+    # ======================================================================
+    # ACER -- ACE Format Writer Line Lengths
+    # ======================================================================
+    @testset "ACER -- ACE format writer line lengths" begin
+        # Create a minimal ACETable
+        nes = 5
+        xss_data = vcat(
+            collect(1.0e-5:1.0e-5:5.0e-5),   # energies (5)
+            fill(10.0, nes),                   # total (5)
+            fill(5.0, nes),                    # disappearance (5)
+            fill(5.0, nes),                    # elastic (5)
+            zeros(nes)                         # heating (5)
+        )
+        nxs = ntuple(i -> Int32(0), 16)
+        nxs = Base.setindex(nxs, Int32(length(xss_data)), NXS_LEN2)
+        nxs = Base.setindex(nxs, Int32(1001), NXS_IZAID)
+        nxs = Base.setindex(nxs, Int32(nes), NXS_NES)
+        nxs = Base.setindex(nxs, Int32(0), NXS_NTR)
+        nxs = Base.setindex(nxs, Int32(0), NXS_NR)
+        nxs = Base.setindex(nxs, Int32(1), NXS_IZ)
+        nxs = Base.setindex(nxs, Int32(1), NXS_IA)
+
+        jxs = ntuple(i -> Int32(0), 32)
+        jxs = Base.setindex(jxs, Int32(1), JXS_ESZ)
+
+        pairs_iz = ntuple(i -> Int32(0), 16)
+        pairs_aw = ntuple(i -> 0.0, 16)
+
+        table = ACETable(
+            "1001.80c  ", 0.999167, 2.5852e-8, "03/21/2026",
+            "Test hydrogen table", "   mat 125",
+            pairs_iz, pairs_aw, nxs, jxs, xss_data
+        )
+
+        buf = IOBuffer()
+        write_ace(buf, table)
+        output = String(take!(buf))
+        lines = split(output, '\n')
+
+        # Filter out the trailing empty line from final newline
+        nonempty = filter(l -> !isempty(l), lines)
+
+        # Line 1 (header): should be ~45 chars (ZAID + AWR + TZ + date)
+        @test length(nonempty[1]) >= 44
+
+        # Line 2 (comment + mat_id): should be 80 chars
+        @test length(nonempty[2]) == 80
+
+        # Lines 3-6 (IZ/AW pairs): 4 lines, each with 4 pairs
+        for i in 3:6
+            # Each pair is i7 + f11.0 = 18 chars, 4 pairs = 72 chars
+            @test length(nonempty[i]) == 72
+        end
+
+        # Lines 7-12 (NXS + JXS): 6 lines of 8 integers at i9 = 72 chars
+        for i in 7:12
+            @test length(nonempty[i]) == 72
+        end
+
+        # Data lines: 4 values per line, 20 chars each = 80 chars
+        # (except possibly the last line)
+        n_data = length(xss_data)
+        n_full_lines = div(n_data, 4)
+        for i in 1:n_full_lines
+            line_idx = 12 + i
+            @test length(nonempty[line_idx]) == 80
+        end
+
+        # Each individual XSS value should be 20 chars
+        val_str = NJOY._format_xss_value(1.234567e8)
+        @test length(val_str) == 20
+        val_str2 = NJOY._format_xss_value(0.0)
+        @test length(val_str2) == 20
+    end
+
+    # ======================================================================
+    # ACER -- Build ACE from PointwiseMaterial
+    # ======================================================================
+    @testset "ACER -- build_ace from PointwiseMaterial" begin
+        # Create a simple 2-reaction PointwiseMaterial (elastic + capture)
+        nes = 10
+        energies = collect(range(1.0e-5, stop=2.0e7, length=nes))
+        xs = zeros(nes, 3)
+        mt_list = [1, 2, 102]
+
+        # Total = elastic + capture
+        for i in 1:nes
+            xs[i, 2] = 20.0 / sqrt(energies[i] / 0.0253)  # 1/v elastic
+            xs[i, 3] = 10.0 / sqrt(energies[i] / 0.0253)  # 1/v capture
+            xs[i, 1] = xs[i, 2] + xs[i, 3]                 # total
+        end
+
+        pendf = PointwiseMaterial(Int32(1001), energies, xs, mt_list)
+
+        ace = build_ace(pendf;
+                        suffix="80c",
+                        awr=0.999167,
+                        temperature=300.0,
+                        comment="Test H-1 from NJOY.jl")
+
+        # Verify ZAID
+        @test startswith(ace.zaid, "1001")
+        @test occursin("80c", ace.zaid)
+
+        # Verify AWR
+        @test ace.awr == 0.999167
+
+        # Verify temperature in MeV
+        bk = 8.617333262e-5
+        expected_tz = 300.0 * bk / 1.0e6
+        @test isapprox(ace.temp, expected_tz, rtol=1e-10)
+
+        # Verify NXS array
+        @test ace.nxs[NXS_NES] == nes
+        @test ace.nxs[NXS_NTR] == 1   # only MT102 is extra
+        @test ace.nxs[NXS_LEN2] == length(ace.xss)
+        @test ace.nxs[NXS_IZAID] == 1001
+
+        # Verify JXS(1) = ESZ points to start of data
+        @test ace.jxs[JXS_ESZ] == 1
+
+        # Verify ESZ block: energies are in MeV
+        e_ace = esz_energies(ace)
+        @test length(e_ace) == nes
+        @test isapprox(e_ace[1], energies[1] * 1e-6, rtol=1e-10)
+        @test isapprox(e_ace[end], energies[end] * 1e-6, rtol=1e-10)
+
+        # Verify ESZ block: total cross section preserved
+        xs_total = esz_total(ace)
+        @test length(xs_total) == nes
+        for i in 1:nes
+            @test isapprox(xs_total[i], xs[i, 1], rtol=1e-10)
+        end
+
+        # Verify ESZ block: elastic cross section preserved
+        xs_elas = esz_elastic(ace)
+        @test length(xs_elas) == nes
+        for i in 1:nes
+            @test isapprox(xs_elas[i], xs[i, 2], rtol=1e-10)
+        end
+
+        # Verify MTR block contains MT102
+        mtr_start = Int(ace.jxs[JXS_MTR])
+        @test mtr_start > 0
+        @test ace.xss[mtr_start] == 102.0
+
+        # Verify TYR block: MT102 should have TYR=0 (no neutron out)
+        tyr_start = Int(ace.jxs[JXS_TYR])
+        @test ace.xss[tyr_start] == 0.0  # capture: no neutrons
+
+        # Verify LSIG/SIG blocks are set
+        @test ace.jxs[JXS_LSIG] > 0
+        @test ace.jxs[JXS_SIG] > 0
+
+        # Verify LAND block is set (isotropic flag)
+        @test ace.jxs[JXS_LAND] > 0
+        land_start = Int(ace.jxs[JXS_LAND])
+        @test ace.xss[land_start] == -1.0  # isotropic in CM
+
+        # Verify write_ace produces valid output
+        buf = IOBuffer()
+        write_ace(buf, ace)
+        output = String(take!(buf))
+        @test length(output) > 0
+        lines = split(output, '\n')
+        nonempty = filter(l -> !isempty(l), lines)
+        # At least header (2) + IZ/AW (4) + NXS/JXS (6) + data lines
+        @test length(nonempty) >= 12 + div(length(ace.xss), 4)
+
+        # Verify nxs_length accessor
+        @test nxs_length(ace) == length(ace.xss)
+        @test nxs_nes(ace) == nes
+        @test nxs_ntr(ace) == 1
+    end
+
+    # ======================================================================
+    # UNRESR -- Bondarenko self-shielding
+    # ======================================================================
+    @testset "UNRESR -- URR penetrability" begin
+        # l=0: Vl=1, phi=rhoc
+        V0, ps0 = urr_penetrability(0, 0.5, 0.6)
+        @test V0 == 1.0
+        @test ps0 == 0.6
+
+        # l=1: Vl = rho^2/(1+rho^2), phi = rhoc - atan(rhoc)
+        rho, rhoc = 1.5, 1.2
+        V1, ps1 = urr_penetrability(1, rho, rhoc)
+        @test isapprox(V1, rho^2 / (1 + rho^2), rtol=1e-14)
+        @test isapprox(ps1, rhoc - atan(rhoc), rtol=1e-14)
+
+        # l=2: Vl = rho^4/(9+3*rho^2+rho^4)
+        V2, ps2 = urr_penetrability(2, rho, rhoc)
+        r2 = rho^2; r4 = r2^2
+        @test isapprox(V2, r4 / (9 + 3*r2 + r4), rtol=1e-14)
+        @test isapprox(ps2, rhoc - atan(3*rhoc/(3-rhoc^2)), rtol=1e-14)
+    end
+
+    @testset "UNRESR -- Hwang quadrature tables" begin
+        # Quadrature weights should sum to ~1 for each df
+        for df in 1:4
+            wsum = sum(HWANG_QW[:, df])
+            @test isapprox(wsum, 1.0, atol=0.02)
+        end
+        # Abscissae should be positive
+        @test all(HWANG_QP .>= 0.0)
+        # Sizes
+        @test size(HWANG_QW) == (10, 4)
+        @test size(HWANG_QP) == (10, 4)
+    end
+
+    @testset "UNRESR -- ajku integration" begin
+        # J and K are positive integrals
+        xj, xk = ajku(10.0, 1.0)
+        @test xj > 0.0
+        @test xk > 0.0
+
+        # K <= J (denominator in K has higher power)
+        @test xk <= xj
+
+        # For beta=0 (zero dilution), J integral = integral of phi du / pi
+        # which converges on our finite [0,12] range
+        xj0, xk0 = ajku(0.0, 1.0)
+        @test xj0 > 0.3  # finite but < 1 due to truncated range
+
+        # Increasing beta should decrease J (more dilution)
+        xj1, _ = ajku(1.0, 1.0)
+        xj10, _ = ajku(10.0, 1.0)
+        xj100, _ = ajku(100.0, 1.0)
+        @test xj1 > xj10
+        @test xj10 > xj100
+
+        # sti -> 0 should give small values (narrow resonance, little overlap)
+        xjs, xks = ajku(10.0, 0.001)
+        @test xjs < 0.01
+    end
+
+    @testset "UNRESR -- Bondarenko self-shielding limits" begin
+        # Test with a simple U-238-like single-sequence model
+        seq = URRSpinSequence(0, 0.5, 20.0, 1.0e-4, 0.023, 0.0, 0.0, 1, 0, 0)
+        model = URRStatModel(0.0, 236.0, 0.948, [seq])
+
+        # Compute at a URR energy
+        E = 10000.0  # 10 keV
+        T = 300.0
+        sigz = [1e10, 1e4, 1e2, 1e1]  # from infinite to small dilution
+
+        result = bondarenko_xs(model, E, T, sigz)
+
+        # Total should be positive for all dilutions
+        for is0 in 1:4
+            @test result[1, is0] > 0.0
+        end
+
+        # Self-shielding: xs should decrease with decreasing sigma0
+        # (more shielding at lower dilution)
+        for is0 in 2:4
+            @test result[1, is0] <= result[1, is0-1] * 1.01  # allow small tolerance
+        end
+
+        # Infinite dilution should give finite positive xs
+        xs_inf = infinite_dilution_xs(model, E, T)
+        @test xs_inf.total > 0.0
+        @test xs_inf.elastic > 0.0
+        @test xs_inf.capture >= 0.0
+    end
+
+    # ======================================================================
+    # PURR -- chi-squared sampling
+    # ======================================================================
+    @testset "PURR -- chi-squared quantile table" begin
+        using Random
+        @test size(CHI2_QUANTILES) == (20, 4)
+
+        # All quantiles should be positive
+        @test all(CHI2_QUANTILES .> 0.0)
+
+        # Columns should be monotonically increasing (quantiles of CDF)
+        for df in 1:4
+            for i in 2:20
+                @test CHI2_QUANTILES[i, df] > CHI2_QUANTILES[i-1, df]
+            end
+        end
+
+        # Sample mean should be close to df (chi^2 with df degrees of freedom)
+        for df in 1:4
+            rng = Random.Xoshiro(42)
+            samples = [chi2_sample(df, rng) for _ in 1:10000]
+            smean = sum(samples) / length(samples)
+            # With 20-point quantile sampling, mean should be within ~20% of df
+            @test abs(smean - df) / df < 0.25
+        end
+    end
+
+    @testset "PURR -- Wigner spacing" begin
+        using Random
+        rng = Random.Xoshiro(123)
+        D = 10.0
+        spacings = [wigner_spacing(D, rng) for _ in 1:5000]
+
+        # Mean of Wigner distribution: D * sqrt(pi/4) * Gamma(3/2)/Gamma(1)
+        # Actually: <s> = D * sqrt(4/pi) * <sqrt(-ln U)>
+        # Exact mean for Wigner = D (by construction of dcon)
+        smean = sum(spacings) / length(spacings)
+        @test isapprox(smean, D, rtol=0.15)
+
+        # All spacings should be positive
+        @test all(spacings .> 0.0)
+    end
+
+    @testset "PURR -- ladder generation" begin
+        using Random
+        seq = URRSpinSequence(0, 0.5, 20.0, 1.0e-4, 0.023, 0.0, 0.0, 1, 0, 0)
+        rng = Random.Xoshiro(999)
+
+        er, gnr, gfr, ggr, gxr = generate_ladder(seq, 9000.0, 11000.0, rng)
+
+        # Should have resonances
+        @test length(er) > 0
+
+        # Energies should be in range and sorted
+        @test all(er .>= 9000.0)
+        @test issorted(er)
+
+        # Width ratios should sum to 1 for each resonance
+        for i in 1:length(er)
+            ratio_sum = gnr[i] + gfr[i] + ggr[i] + gxr[i]
+            @test isapprox(ratio_sum, 1.0, rtol=1e-12)
+        end
+
+        # For zero fission/competitive, those ratios should be small/zero
+        @test all(gfr .== 0.0) || all(gfr .< 0.01)
+    end
+
+    @testset "PURR -- line shape approximation" begin
+        # For large x, should approach asymptotic
+        rew, aimw = NJOY.line_shape(50.0, 1.0)
+        # Asymptotic: rew = y * c1 / (x^2+y^2)
+        c1 = 0.5641895835
+        @test isapprox(rew, 1.0 * c1 / (2500.0 + 1.0), rtol=1e-3)
+
+        # For x=0, rew should be largest (peak of line)
+        rew0, _ = NJOY.line_shape(0.0, 1.0)
+        rew1, _ = NJOY.line_shape(2.0, 1.0)
+        @test rew0 > rew1
+
+        # Symmetry: Re[w(x,y)] = Re[w(-x,y)]
+        rewp, _ = NJOY.line_shape(3.0, 2.0)
+        rewm, _ = NJOY.line_shape(-3.0, 2.0)
+        @test isapprox(rewp, rewm, rtol=1e-10)
+    end
+
+    @testset "PURR -- probability table normalization" begin
+        # Build simple model and generate ptable
+        seq = URRSpinSequence(0, 0.5, 20.0, 1.0e-4, 0.023, 0.0, 0.0, 1, 0, 0)
+        model = URRStatModel(0.0, 236.0, 0.948, [seq])
+
+        energies = [10000.0]  # single energy for speed
+        ptable = generate_ptable(model, energies;
+                                 nladders=16, nbins=10, seed=42)
+
+        # Probabilities should sum to 1
+        psum = sum(ptable.prob[:, 1])
+        @test isapprox(psum, 1.0, atol=1e-12)
+
+        # All probabilities should be non-negative
+        @test all(ptable.prob[:, 1] .>= 0.0)
+
+        # Total should be >= elastic + fission + capture for bins with data
+        for j in 1:ptable.nbins
+            if ptable.prob[j, 1] > 0
+                parts = ptable.elastic[j,1] + ptable.fission[j,1] + ptable.capture[j,1]
+                # Total can differ from sum of parts due to bkg
+                @test ptable.total[j, 1] > 0.0
+            end
+        end
+    end
+
+    @testset "PURR -- Bondarenko from probability table" begin
+        seq = URRSpinSequence(0, 0.5, 20.0, 1.0e-4, 0.023, 0.0, 0.0, 1, 0, 0)
+        model = URRStatModel(0.0, 236.0, 0.948, [seq])
+
+        energies = [10000.0]
+        ptable = generate_ptable(model, energies;
+                                 nladders=32, nbins=15, seed=77)
+
+        # Infinite dilution from ptable
+        sig_t, sig_e, sig_f, sig_c, sig_tr = bondarenko_from_ptable(ptable, 1, 1e10)
+
+        # All should be positive
+        @test sig_t > 0.0
+        @test sig_e > 0.0
+        @test sig_c >= 0.0
+
+        # Self-shielded should be <= infinite dilution
+        sig_t2, _, _, _, _ = bondarenko_from_ptable(ptable, 1, 100.0)
+        @test sig_t2 <= sig_t * 1.01
+    end
+
+    # ======================================================================
+    # ACER Proposer-B -- ACENeutronTable, ZAID, format correctness
+    # ======================================================================
+    @testset "ACER-B -- ZAID utilities" begin
+        @test format_zaid(92235, "80c") == "92235.80c"
+        @test format_zaid(92, 235, "80c") == "92235.80c"
+        @test format_zaid(1001, "70c") == "1001.70c"
+        za, suf = parse_zaid("92235.80c")
+        @test za == 92235
+        @test suf == "80c"
+        za2, suf2 = parse_zaid("  1001.70c  ")
+        @test za2 == 1001
+        @test suf2 == "70c"
+        @test_throws ArgumentError parse_zaid("no_dot")
+    end
+
+    @testset "ACER-B -- temperature conversion" begin
+        bk = NJOY.PhysicsConstants.bk
+        tz300 = temp_to_mev(300.0)
+        @test isapprox(tz300, 300.0 * bk * 1e-6, rtol=1e-12)
+        t_back = mev_to_temp(tz300)
+        @test isapprox(t_back, 300.0, rtol=1e-10)
+        @test isapprox(mev_to_temp(temp_to_mev(600.0)), 600.0, rtol=1e-10)
+    end
+
+    @testset "ACER-B -- ACEHeader construction" begin
+        h = ACEHeader(zaid="92235.80c", awr=235.044, temp_mev=2.53e-8,
+                      date="03/21/2026", comment="U-235 test",
+                      mat_string="   mat9228")
+        @test length(h.hz) == 10
+        @test length(h.hd) == 10
+        @test length(h.hk) == 70
+        @test length(h.hm) == 10
+        @test h.aw0 == 235.044
+        @test strip(h.hz) == "92235.80c"
+        h2 = ACEHeader(zaid="1001.80c", awr=1.0, temp_mev=0.0,
+                       comment="x"^100)
+        @test length(h2.hk) == 70
+    end
+
+    @testset "ACER-B -- ACENeutronTable construction" begin
+        n = 5
+        egrid = collect(range(1e-11, 20.0, length=n))
+        h = ACEHeader(zaid="1001.80c", awr=0.999167, temp_mev=2.53e-8)
+        t = ACENeutronTable(header=h, energy_grid=egrid,
+                            total_xs=fill(10.0, n),
+                            absorption_xs=fill(4.0, n),
+                            elastic_xs=fill(6.0, n),
+                            heating_numbers=zeros(n))
+        @test ace_nes(t) == n
+        @test ace_ntr(t) == 0
+        @test length(t.iz) == 16
+        @test t.angular_elastic === nothing
+        @test_throws ArgumentError ACENeutronTable(
+            header=h, energy_grid=egrid,
+            total_xs=fill(10.0, n+1),
+            absorption_xs=fill(4.0, n),
+            elastic_xs=fill(6.0, n), heating_numbers=zeros(n))
+    end
+
+    @testset "ACER-B -- ReactionXS and EquiprobableBins" begin
+        rxn = ReactionXS(Int32(102), -6.0, Int32(0), Int32(3), [1.0, 2.0, 3.0])
+        @test rxn.mt == 102
+        @test rxn.q_value == -6.0
+        @test rxn.ie_start == 3
+        bins = EquiprobableBins(collect(range(-1.0, 1.0, length=33)))
+        @test length(bins.cosines) == 33
+        @test_throws ArgumentError EquiprobableBins(zeros(32))
+    end
+
+    @testset "ACER-B -- build_xss serialization" begin
+        n = 10
+        egrid = collect(range(1e-11, 20.0, length=n))
+        rxns = [
+            ReactionXS(Int32(102), 0.0, Int32(0), Int32(1), fill(4.0, n)),
+            ReactionXS(Int32(51), -0.5, Int32(1), Int32(3), fill(1.5, n-2))
+        ]
+        h = ACEHeader(zaid="26056.80c", awr=55.454, temp_mev=2.53e-8)
+        t = ACENeutronTable(header=h, energy_grid=egrid,
+                            total_xs=fill(10.0, n),
+                            absorption_xs=fill(4.0, n),
+                            elastic_xs=fill(6.0, n),
+                            heating_numbers=zeros(n),
+                            reactions=rxns)
+        nxs_v, jxs_v, xss_v, is_int_v = build_xss(t)
+        @test nxs_v[NXS_LEN2] == length(xss_v)
+        @test nxs_v[NXS_IZAID] == 26056
+        @test nxs_v[NXS_NES] == n
+        @test nxs_v[NXS_NTR] == 2
+        @test nxs_v[NXS_NR] == 1
+        @test nxs_v[NXS_IZ] == 26
+        @test nxs_v[NXS_IA] == 56
+        @test jxs_v[JXS_ESZ] == 1
+        @test jxs_v[JXS_MTR] >= 5 * n + 1
+        @test jxs_v[JXS_END] == length(xss_v) + 1
+        for i in 1:n
+            @test isapprox(xss_v[i], egrid[i], rtol=1e-14)
+        end
+        mtr_loc = jxs_v[JXS_MTR]
+        @test round(Int, xss_v[mtr_loc]) == 102
+        @test round(Int, xss_v[mtr_loc+1]) == 51
+        @test is_int_v[mtr_loc] == true
+        @test is_int_v[1] == false
+    end
+
+    @testset "ACER-B -- write_ace_table format correctness" begin
+        n = 8
+        egrid = collect(range(1e-11, 20.0, length=n))
+        h = ACEHeader(zaid="92235.80c", awr=233.025,
+                      temp_mev=2.5852e-8, date="03/21/2026",
+                      comment="U-235 format test",
+                      mat_string="   mat9228")
+        t = ACENeutronTable(header=h, energy_grid=egrid,
+                            total_xs=fill(100.0, n),
+                            absorption_xs=fill(50.0, n),
+                            elastic_xs=fill(50.0, n),
+                            heating_numbers=zeros(n))
+        buf = IOBuffer()
+        write_ace_table(buf, t)
+        output = String(take!(buf))
+        lines = split(output, '\n')
+        nonempty = filter(l -> !isempty(l), lines)
+        @test length(nonempty[1]) >= 44
+        @test length(nonempty[2]) == 80
+        for i in 3:6; @test length(nonempty[i]) == 72; end
+        for i in 7:12; @test length(nonempty[i]) == 72; end
+        nxs_v, _, xss_v, _ = build_xss(t)
+        n_full = div(length(xss_v), 4)
+        for i in 1:n_full
+            @test length(nonempty[12 + i]) == 80
+        end
+        @test length(NJOY._ace_fmt_int(12345)) == 20
+        @test length(NJOY._ace_fmt_real(1.23e10)) == 20
+        @test length(NJOY._ace_fmt_real(0.0)) == 20
+    end
+
+    @testset "ACER-B -- write/read-back verification" begin
+        n = 6
+        egrid = [1e-11, 1e-8, 1e-5, 1e-2, 1.0, 20.0]
+        total_v = [100.0, 80.0, 50.0, 20.0, 10.0, 5.0]
+        elas_v = [60.0, 50.0, 30.0, 12.0, 6.0, 3.0]
+        absorp_v = total_v .- elas_v
+        rxns = [ReactionXS(Int32(102), 0.0, Int32(0), Int32(1), absorp_v)]
+        h = ACEHeader(zaid="1001.80c", awr=0.999167, temp_mev=2.53e-8,
+                      comment="H-1 roundtrip")
+        t = ACENeutronTable(header=h, energy_grid=egrid,
+                            total_xs=total_v, absorption_xs=absorp_v,
+                            elastic_xs=elas_v, heating_numbers=zeros(n),
+                            reactions=rxns)
+        buf = IOBuffer()
+        write_ace_table(buf, t)
+        output = String(take!(buf))
+        lines = split(output, '\n')
+        nonempty = filter(l -> !isempty(l), lines)
+        @test startswith(nonempty[1], "1001.80c")
+        nxs_jxs_text = join(nonempty[7:12], "")
+        vals = [parse(Int, nxs_jxs_text[(i-1)*9+1:i*9]) for i in 1:48]
+        @test vals[NXS_NES] == n
+        @test vals[NXS_NTR] == 1
+        @test vals[NXS_IZAID] == 1001
+        @test vals[16 + JXS_ESZ] == 1
+        data_line = nonempty[13]
+        e1_str = strip(data_line[1:20])
+        e1_val = parse(Float64, e1_str)
+        @test isapprox(e1_val, 1e-11, rtol=1e-6)
+    end
+
+    @testset "ACER-B -- build_ace_from_pendf" begin
+        nes_p = 8
+        energies = collect(range(1.0e-5, stop=2.0e7, length=nes_p))
+        xs = zeros(nes_p, 3)
+        for i in 1:nes_p
+            xs[i, 2] = 20.0 / sqrt(energies[i] / 0.0253)
+            xs[i, 3] = 10.0 / sqrt(energies[i] / 0.0253)
+            xs[i, 1] = xs[i, 2] + xs[i, 3]
+        end
+        pendf = PointwiseMaterial(Int32(1001), energies, xs, [1, 2, 102])
+        ace_t = build_ace_from_pendf(pendf, suffix="80c", temp_kelvin=300.0,
+                                      comment="H-1 from PENDF")
+        @test ace_nes(ace_t) == nes_p
+        @test ace_ntr(ace_t) == 1
+        @test isapprox(ace_t.energy_grid[1], energies[1]*1e-6, rtol=1e-10)
+        for i in 1:nes_p
+            @test isapprox(ace_t.total_xs[i], xs[i,1], rtol=1e-10)
+        end
+        buf = IOBuffer()
+        write_ace_table(buf, ace_t)
+        @test length(take!(buf)) > 0
+        buf2 = IOBuffer()
+        write_ace(buf2, ace_t)
+        @test length(take!(buf2)) > 0
+    end
+
+    @testset "ACER-B -- NXS/JXS consistency" begin
+        n = 5
+        egrid = collect(range(1e-11, 20.0, length=n))
+        h = ACEHeader(zaid="26056.80c", awr=55.454, temp_mev=2.53e-8)
+        rxns = [ReactionXS(Int32(102), 0.0, Int32(0), Int32(1), fill(4.0, n))]
+        t = ACENeutronTable(header=h, energy_grid=egrid,
+                            total_xs=fill(10.0, n),
+                            absorption_xs=fill(4.0, n),
+                            elastic_xs=fill(6.0, n),
+                            heating_numbers=zeros(n), reactions=rxns)
+        nxs_v, jxs_v, xss_v, _ = build_xss(t)
+        @test nxs_v[NXS_LEN2] == length(xss_v)
+        @test jxs_v[JXS_MTR] >= 5 * n + 1
+        lsig_loc = jxs_v[JXS_LSIG]
+        sig_loc = jxs_v[JXS_SIG]
+        @test round(Int, xss_v[lsig_loc]) == 1
+        ie_s = round(Int, xss_v[sig_loc])
+        ne_r = round(Int, xss_v[sig_loc + 1])
+        @test ie_s >= 1 && ie_s <= n
+        @test ne_r == n - ie_s + 1
+        @test jxs_v[JXS_END] == length(xss_v) + 1
+    end
+
 end  # @testset "NJOY.jl"

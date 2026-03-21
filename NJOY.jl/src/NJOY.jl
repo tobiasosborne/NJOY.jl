@@ -9,6 +9,8 @@ Doppler broadening, and related nuclear data processing capabilities.
 module NJOY
 
 using Printf
+using Dates
+using Random
 using SpecialFunctions
 using StaticArrays
 using LinearAlgebra
@@ -43,6 +45,14 @@ include("processing/heatr.jl")
 
 # Processing modules (THERMR -- thermal scattering cross sections)
 include("processing/thermr.jl")
+
+# Processing modules (UNRESR/PURR -- unresolved resonance self-shielding)
+include("processing/unresr.jl")
+include("processing/purr.jl")
+
+# Output formats (ACER -- ACE format for MCNP)
+include("formats/ace_types.jl")
+include("formats/ace_writer.jl")
 
 # Public API -- constants
 export PhysicsConstants, CODATA2014
@@ -112,5 +122,31 @@ export bragg_edges, bragg_edge_energies, build_bragg_data
 export incoh_elastic_xs
 export compute_thermal_xs, compute_thermal
 export THERMR_EGRID
+
+# Public API -- UNRESR (Bondarenko self-shielding)
+export URRSpinSequence, URRStatModel
+export urr_penetrability, ajku, bondarenko_xs, infinite_dilution_xs
+export HWANG_QW, HWANG_QP
+
+# Public API -- PURR (probability tables)
+export ProbabilityTable
+export chi2_sample, wigner_spacing
+export generate_ladder, generate_ptable, bondarenko_from_ptable
+export CHI2_QUANTILES
+
+# Public API -- ACER (ACE format for MCNP)
+export ACEHeader, ACENeutronTable, ACETable
+export ReactionXS, EquiprobableBins, TabulatedAngular, AngularBlock
+export NXS_LEN2, NXS_IZAID, NXS_NES, NXS_NTR, NXS_NR
+export NXS_NTRP, NXS_NTYPE, NXS_NDNF, NXS_IS, NXS_IZ, NXS_IA
+export JXS_ESZ, JXS_NU, JXS_MTR, JXS_LQR, JXS_TYR
+export JXS_LSIG, JXS_SIG, JXS_LAND, JXS_AND
+export JXS_LDLW, JXS_DLW, JXS_GPD, JXS_FIS, JXS_END
+export ESZ_ENERGY, ESZ_TOTAL, ESZ_DISAP, ESZ_ELASTIC, ESZ_HEATING
+export nxs_length, nxs_nes, nxs_ntr
+export esz_energies, esz_total, esz_elastic
+export format_zaid, parse_zaid, temp_to_mev, mev_to_temp
+export write_ace, write_ace_table, build_ace, build_ace_from_pendf, build_xss
+export write_ace_directory, ace_nes, ace_ntr
 
 end # module NJOY
