@@ -12,6 +12,7 @@ Both created ace_types.jl + ace_writer.jl. Merged result has both flat (ACETable
 3. ESZ block: 5 parallel arrays (energy, total, absorption, elastic, heating)
 4. build_ace_from_pendf converts eV→MeV automatically
 
-## Known issues
-- ace_types.jl (406 lines) and ace_writer.jl (467 lines) exceed 300-line limit
-- Both proposals wrote to same files, creating some redundancy
+## Reviewer Verdict: CONDITIONAL PASS
+Physics correct (NXS/JXS match acefc.f90, format strings match aceout()).
+Actions needed: split oversized files (NJOY.jl-1c0), consolidate duplicate builders.
+See reports/REVIEW_WAVE4.md.
