@@ -1,7 +1,7 @@
 # Integration tests -- full processing chain against NJOY2016 reference outputs.
 # Test data: njoy-reference/tests/{01..85}, ENDF files: njoy-reference/tests/resources/
 
-const NJOY_REF = normpath(joinpath(@__DIR__, "..", "..", "njoy-reference"))
+const NJOY_REF = normpath(joinpath(@__DIR__, "..", "njoy-reference"))
 const RESOURCES = joinpath(NJOY_REF, "tests", "resources")
 const TESTS = joinpath(NJOY_REF, "tests")
 

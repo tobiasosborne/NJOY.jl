@@ -618,7 +618,7 @@ using LinearAlgebra
     # ENDF I/O Integration Tests -- Real ENDF Evaluation Files
     # ======================================================================
     ENDF_RESOURCES = joinpath(@__DIR__,
-        "..", "..", "njoy-reference", "tests", "resources")
+        "..", "njoy-reference", "tests", "resources")
 
     @testset "ENDF I/O -- H-2 (n-001_H_002-ENDF8.0)" begin
         endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
@@ -1602,7 +1602,7 @@ using LinearAlgebra
     # ======================================================================
     @testset "RECONR -- H-2 reconstruction" begin
         endf_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
-        ref_file = joinpath(@__DIR__, "..", "..", "njoy-reference", "tests", "84",
+        ref_file = joinpath(@__DIR__, "..", "njoy-reference", "tests", "84",
                            "referenceTape100")
 
         if !isfile(endf_file)
@@ -4246,7 +4246,7 @@ using LinearAlgebra
     # ======================================================================
     # NJOY2016 Reference Value Tests (Task 1: NJOY.jl-pta)
     # ======================================================================
-    NJOY_REF_DIR = normpath(joinpath(@__DIR__, "..", "..", "njoy-reference"))
+    NJOY_REF_DIR = normpath(joinpath(@__DIR__, "..", "njoy-reference"))
     NJOY_REF_RESOURCES = joinpath(NJOY_REF_DIR, "tests", "resources")
     NJOY_REF_TESTS = joinpath(NJOY_REF_DIR, "tests")
 
