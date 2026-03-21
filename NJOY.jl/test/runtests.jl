@@ -3975,3 +3975,6 @@ using LinearAlgebra
     end
 
 end  # @testset "NJOY.jl"
+
+# Integration tests against NJOY2016 reference outputs (separate file)
+include("integration_tests.jl")
