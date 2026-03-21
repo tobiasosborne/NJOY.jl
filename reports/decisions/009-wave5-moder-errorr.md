@@ -14,6 +14,11 @@ Proposal B added sandwich formula for differentiability story.
 - errorr.jl (257 lines): read_mf33, LB=0/1/5/6 expansion, multigroup collapse, sandwich_covariance
 - Key: covariance operations are pure linear algebra — compose with ForwardDiff
 
+## Reviewer Verdict: PASS
+MODER: lossless roundtrip, correct format preservation.
+ERRORR: MF33 parsing correct, LB expansion verified, sandwich formula PSD.
+3 minor hardening items logged as NJOY.jl-5as.
+
 ## File splitting (concurrent)
 5 biggest files split into 13 smaller files, all ≤300 lines.
 reconr.jl(684→4 files), faddeeva.jl(524→2), breit_wigner.jl(473→2), ace_writer.jl(467→2), ace_types.jl(406→2)
