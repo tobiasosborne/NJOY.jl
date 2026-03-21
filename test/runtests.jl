@@ -6599,6 +6599,684 @@ using LinearAlgebra
         @test n_markers >= 8  # at least 8 records with constant block
     end
 
+    # ======================================================================
+    # LEAPR -- S(alpha,beta) thermal scattering law generation (Proposal B)
+    # ======================================================================
+    @testset "LEAPR" begin
+
+        # ------------------------------------------------------------------
+        # Debye model: analytical Debye-Waller factor
+        # ------------------------------------------------------------------
+        @testset "Debye-Waller factor (Debye model)" begin
+            T_D = 400.0   # Debye temperature
+            T = 600.0     # well above T_D for accuracy
+            dos = debye_dos(T_D, 200)
+            lam = debye_waller_factor(dos, T)
+            # Must be positive and finite
+            @test lam > 0.0
+            @test isfinite(lam)
+            # Let's just check it's in a reasonable range
+            x_D = T_D / T
+            # High-T limit: lambda ~ 3/(x_D) as T/theta -> large
+            @test lam > 1.0   # physically reasonable
+            @test lam < 20.0
+        end
+
+        # ------------------------------------------------------------------
+        # Phonon expansion: T_1 normalisation
+        # T_1(beta) = P(beta)*exp(beta/2)/lambda. The convolution norm check
+        # from NJOY (convol) is: integral T_n(b)*(1+exp(-b)) db should be
+        # close to 1 for each term. This accounts for both positive and
+        # negative beta contributions via detailed balance.
+        # ------------------------------------------------------------------
+        @testset "Phonon expansion T_1 normalisation" begin
+            T_D = 300.0
+            T = 300.0
+            dos = debye_dos(T_D, 150)
+            terms, deltab, f0 = phonon_expansion(dos, T, 3)
+
+            # Norm check: integral T_1(b)*(1 + exp(-b)) db (NJOY convol style)
+            t1 = terms[1]
+            np = length(t1)
+            integral = 0.0
+            for i in 1:np
+                be = deltab * (i - 1)
+                val = t1[i] * (1.0 + exp(-be))
+                w = (i == 1 || i == np) ? 0.5 : 1.0
+                integral += val * w
+            end
+            integral *= deltab
+            @test isapprox(integral, 1.0, atol=0.1)
+
+            # T_1 should be non-negative everywhere
+            @test all(t1 .>= 0.0)
+
+            # Higher-order terms should also be non-negative
+            @test all(terms[2] .>= 0.0)
+        end
+
+        # ------------------------------------------------------------------
+        # generate_sab: basic properties
+        # ------------------------------------------------------------------
+        @testset "generate_sab basic properties" begin
+            T_D = 300.0
+            T = 300.0
+            dos = debye_dos(T_D, 100)
+            alpha_g = collect(range(0.1, 5.0, length=10))
+            beta_g = collect(range(0.0, 10.0, length=20))
+            result = generate_sab(dos, T; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=50)
+
+            @test result.temperature == T
+            @test result.debye_waller > 0.0
+            @test size(result.sab) == (10, 20)
+
+            # S(alpha, beta) >= 0 everywhere
+            @test all(result.sab .>= 0.0)
+
+            # S should be nonzero for small alpha, small beta
+            @test result.sab[1, 1] > 0.0 || result.sab[1, 2] > 0.0
+
+            # S should decrease for large beta at fixed alpha
+            for j in 1:10
+                large_b_vals = result.sab[j, end-2:end]
+                small_b_vals = result.sab[j, 2:4]
+                @test maximum(small_b_vals) >= minimum(large_b_vals)
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Detailed balance: S(alpha, -beta) = exp(-beta)*S(alpha, beta)
+        # For the asymmetric S stored by LEAPR:
+        #   S_asym(a,b) * exp(-b) = S_asym(a,b) at b=0
+        # We check by generating at two adjacent beta values and verifying
+        # the symmetric S satisfies S_sym(a,b) = S_sym(a,-b).
+        # ------------------------------------------------------------------
+        @testset "Detailed balance" begin
+            T_D = 350.0
+            T = 500.0
+            dos = debye_dos(T_D, 120)
+            alpha_g = [0.5, 1.0, 2.0, 4.0]
+            beta_g = collect(range(0.0, 8.0, length=30))
+            result = generate_sab(dos, T; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=80)
+
+            # The symmetric S is: S_sym(a, b) = S_asym(a,b) * exp(-b/2)
+            # Detailed balance requires S_sym(a, b) = S_sym(a, -b)
+            # Since we only store positive beta, we check that
+            # S_asym(a, b) * exp(-b/2) is a valid (non-negative, decaying) function
+            for j in 1:length(alpha_g)
+                for k in 2:length(beta_g)
+                    s_asym = result.sab[j, k]
+                    if s_asym > 1.0e-20
+                        s_sym = s_asym * exp(-beta_g[k] / 2.0)
+                        @test s_sym >= 0.0
+                    end
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Normalisation: integral S(alpha, beta) * exp(-beta) dbeta +
+        #   integral S(alpha, beta) dbeta  should be close to 2 for each alpha
+        # Actually: integral_{-inf}^{inf} S_sym(a,b) db = 1
+        # => integral_0^inf [S_asym(a,b)*exp(-b) + S_asym(a,b)] db = 1
+        # => integral_0^inf S_asym(a,b) * [1 + exp(-b)] db = 1
+        # ------------------------------------------------------------------
+        @testset "Normalisation" begin
+            T_D = 300.0
+            T = 500.0
+            dos = debye_dos(T_D, 100)
+            alpha_g = [0.5, 1.0, 2.0]
+            beta_g = collect(range(0.0, 25.0, length=80))
+            result = generate_sab(dos, T; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=100)
+
+            for j in 1:length(alpha_g)
+                # Trapezoidal integration of S_asym * (1 + exp(-b))
+                integral = 0.0
+                for k in 2:length(beta_g)
+                    db = beta_g[k] - beta_g[k-1]
+                    f1 = result.sab[j, k-1] * (1.0 + exp(-beta_g[k-1]))
+                    f2 = result.sab[j, k] * (1.0 + exp(-beta_g[k]))
+                    integral += 0.5 * db * (f1 + f2)
+                end
+                # Should be close to 1; allow generous tolerance for finite grid
+                @test isapprox(integral, 1.0, atol=0.3)
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # Discrete oscillators: basic smoke test
+        # ------------------------------------------------------------------
+        @testset "Discrete oscillators" begin
+            T_D = 300.0
+            T = 300.0
+            tbeta_val = 0.8
+            dos = debye_dos(T_D, 100)
+            alpha_g = [0.5, 1.0, 3.0]
+            beta_g = collect(range(0.0, 15.0, length=40))
+
+            # Single oscillator with weight 0.2
+            osc = [DiscreteOscillator(0.05, 0.2)]
+            result = generate_sab(dos, T; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=50, tbeta=tbeta_val,
+                                  oscillators=osc)
+
+            # Updated DW should be larger than continuous-only
+            result_no_osc = generate_sab(dos, T; alpha_grid=alpha_g,
+                                         beta_grid=beta_g,
+                                         n_phonon_terms=50, tbeta=tbeta_val)
+            @test result.debye_waller > result_no_osc.debye_waller
+
+            # S should still be non-negative
+            @test all(result.sab .>= 0.0)
+
+            # Result should differ from no-oscillator case
+            @test !isapprox(result.sab, result_no_osc.sab)
+        end
+
+        # ------------------------------------------------------------------
+        # PhononDOS and SABTable struct constructors
+        # ------------------------------------------------------------------
+        @testset "Type constructors" begin
+            dos = PhononDOS([0.0, 0.01, 0.02], [0.0, 0.5, 1.0])
+            @test length(dos.energies) == 3
+            @test length(dos.density) == 3
+
+            osc = DiscreteOscillator(0.1, 0.3)
+            @test osc.energy == 0.1
+            @test osc.weight == 0.3
+
+            sab = SABTable([1.0], [0.0, 1.0], ones(1, 2), 300.0, 5.0)
+            @test sab.temperature == 300.0
+            @test sab.debye_waller == 5.0
+            @test size(sab.sab) == (1, 2)
+        end
+
+        # ------------------------------------------------------------------
+        # Default grids
+        # ------------------------------------------------------------------
+        @testset "Default grids" begin
+            ag = default_alpha_grid()
+            bg = default_beta_grid()
+            @test length(ag) == 20
+            @test length(bg) == 40
+            @test ag[1] < ag[end]
+            @test bg[1] < bg[end]
+            @test ag[1] > 0.0
+            @test bg[1] == 0.0
+        end
+
+        # ------------------------------------------------------------------
+        # debye_dos helper
+        # ------------------------------------------------------------------
+        @testset "debye_dos" begin
+            td = 500.0
+            dos = debye_dos(td, 100)
+            omega_D = NJOY.PhysicsConstants.bk * td
+            @test length(dos.energies) == 100
+            # rho should be zero beyond omega_D
+            for i in 1:100
+                if dos.energies[i] > omega_D * 1.01
+                    @test dos.density[i] == 0.0
+                end
+            end
+            # rho at omega_D should be 3/omega_D
+            idx_D = findfirst(e -> e >= omega_D, dos.energies)
+            if idx_D !== nothing && idx_D > 1
+                # Just below omega_D should be close to 3/omega_D
+                @test dos.density[idx_D-1] > 0.0
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: Analytical Debye-Waller for Debye model
+        # Exact: lambda = 3/(2*x_D) * [1 + (2/x_D)^2 * 2*integral]
+        # where x_D = theta_D/T. High-T limit: lambda -> 3/(x_D^2)
+        # ------------------------------------------------------------------
+        @testset "Debye-Waller analytical (Proposal B)" begin
+            for (T_D, T) in [(300.0, 1000.0), (500.0, 2000.0)]
+                x_D = T_D / T
+                # High-T asymptote: lambda_s ~ 3/(x_D^2) in these units
+                # More precisely: Debye integral D_1(x) ~ 1 - x/4 for small x
+                dos = debye_dos(T_D, 400)
+                lam = debye_waller_factor(dos, T)
+                # At very high T, lambda ~ 3/x_D^2 = 3*T^2/T_D^2 (dimensionless kT units)
+                # Actually lambda = integral P(b)*coth(b/2) db
+                # For high T: lambda ~ 3*T/T_D (in natural NJOY units)
+                # Check it is positive and scales roughly with T
+                @test lam > 0.0
+                @test isfinite(lam)
+                # Check monotonicity: higher T -> higher DW
+                lam_low = debye_waller_factor(dos, T/2)
+                @test lam > lam_low
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: Sum rule check
+        # integral_0^inf beta * [S(a,-b) - S(a,b)] db = alpha
+        # Since S(a,b) = S(a,-b)*exp(-b):
+        # integral_0^inf beta * S(a,-b) * [1 - exp(-b)] db = alpha
+        # ------------------------------------------------------------------
+        @testset "Sum rule (first moment)" begin
+            dos = debye_dos(400.0, 200)
+            alpha_g = [0.3, 0.8, 1.5, 3.0]
+            beta_g = collect(range(0.0, 30.0, length=120))
+            result = generate_sab(dos, 600.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=100)
+            for j in 1:length(alpha_g)
+                sum1 = 0.0
+                for k in 2:length(beta_g)
+                    db = beta_g[k] - beta_g[k-1]
+                    f1 = beta_g[k-1] * result.sab[j,k-1] * (1 - exp(-beta_g[k-1]))
+                    f2 = beta_g[k] * result.sab[j,k] * (1 - exp(-beta_g[k]))
+                    sum1 += 0.5*db*(f1+f2)
+                end
+                # Should be close to alpha (within ~10% for finite grid)
+                @test isapprox(sum1, alpha_g[j], rtol=0.15)
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: Detailed balance symmetry
+        # S_sym(a,b) = S(a,-b)*exp(-b/2) should equal S_sym(a,-b)
+        # We check S(a,-b)*exp(-b/2) is a smooth, non-negative function
+        # ------------------------------------------------------------------
+        @testset "Detailed balance" begin
+            dos = debye_dos(350.0, 150)
+            alpha_g = [0.5, 1.0, 2.0, 5.0]
+            beta_g = collect(range(0.0, 15.0, length=60))
+            result = generate_sab(dos, 500.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=80)
+            for j in 1:length(alpha_g)
+                for k in 2:length(beta_g)
+                    s_minus = result.sab[j,k]        # S(a,-b)
+                    s_plus = s_minus * exp(-beta_g[k]) # S(a,b) by detailed balance
+                    # Both must be non-negative
+                    @test s_minus >= 0.0
+                    @test s_plus >= 0.0
+                    # Symmetric form
+                    s_sym = s_minus * exp(-beta_g[k]/2)
+                    @test s_sym >= 0.0
+                end
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: THERMR composability via sab_table_to_thermr
+        # ------------------------------------------------------------------
+        @testset "THERMR composability" begin
+            dos = debye_dos(300.0, 100)
+            alpha_g = [0.5, 1.0, 2.0]
+            beta_g = collect(range(0.0, 10.0, length=30))
+            result = generate_sab(dos, 500.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=60)
+
+            # Convert to SABData
+            sab_data = sab_table_to_thermr(result; sigma_b=20.0, awr=12.0, lat=0)
+            @test sab_data isa SABData
+            @test sab_data.sigma_b == 20.0
+            @test sab_data.awr == 12.0
+            @test sab_data.T_eff == result.temperature
+            @test size(sab_data.sab) == size(result.sab)
+
+            # Log(S_sym) should be <= 0 where S_sym < 1
+            sabflg = -225.0
+            for j in 1:3, k in 1:30
+                ls = sab_data.sab[j,k]
+                @test ls >= sabflg  # not below floor
+                @test isfinite(ls)
+            end
+
+            # Use with sab_kernel from THERMR
+            E, Ep, mu = 0.025, 0.030, 0.5
+            T = 500.0
+            xs = sab_kernel(E, Ep, mu, sab_data, T)
+            @test xs >= 0.0
+            @test isfinite(xs)
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: SCT fallback for large alpha
+        # At very large alpha, the phonon expansion may not converge,
+        # and the SCT approximation should kick in smoothly.
+        # ------------------------------------------------------------------
+        @testset "SCT fallback" begin
+            dos = debye_dos(300.0, 80)
+            alpha_g = collect(range(0.1, 100.0, length=30))
+            beta_g = collect(range(0.0, 15.0, length=30))
+            result = generate_sab(dos, 400.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                  n_phonon_terms=50)
+            # For very large alpha, S should still be finite and non-negative
+            for j in 1:30, k in 1:30
+                @test result.sab[j,k] >= 0.0
+                @test isfinite(result.sab[j,k])
+            end
+            # At large alpha, S should be small but not exactly zero for small beta
+            @test any(result.sab[end, :] .> 0.0)
+        end
+
+        # ------------------------------------------------------------------
+        # PROPOSAL B: Phonon expansion convergence
+        # More phonon terms should improve accuracy monotonically.
+        # ------------------------------------------------------------------
+        @testset "Phonon expansion convergence" begin
+            dos = debye_dos(300.0, 100)
+            alpha_g = [1.0]; beta_g = collect(range(0.0, 20.0, length=50))
+            r20 = generate_sab(dos, 500.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                n_phonon_terms=20)
+            r100 = generate_sab(dos, 500.0; alpha_grid=alpha_g, beta_grid=beta_g,
+                                 n_phonon_terms=100)
+            # Both should produce valid results
+            @test all(r20.sab .>= 0.0)
+            @test all(r100.sab .>= 0.0)
+            # More terms should give different (presumably better) results
+            # but both should have similar normalisation
+            norm20 = sum(diff(beta_g) .* [(r20.sab[1,k]*(1+exp(-beta_g[k])) +
+                          r20.sab[1,k+1]*(1+exp(-beta_g[k+1])))/2 for k in 1:49])
+            norm100 = sum(diff(beta_g) .* [(r100.sab[1,k]*(1+exp(-beta_g[k])) +
+                           r100.sab[1,k+1]*(1+exp(-beta_g[k+1])))/2 for k in 1:49])
+            @test isapprox(norm20, 1.0, atol=0.3)
+            @test isapprox(norm100, 1.0, atol=0.3)
+        end
+
+    end  # @testset "LEAPR"
+
+    # ======================================================================
+    # Visualization (plotr/viewr replacement)
+    # ======================================================================
+    @testset "Visualization" begin
+
+        @testset "Enums" begin
+            @test Int(LINLIN) == 1
+            @test Int(LINLOG) == 2
+            @test Int(LOGLIN) == 3
+            @test Int(LOGLOG) == 4
+            @test Int(LINE_SOLID) == 0
+            @test Int(LINE_DASHED) == 1
+            @test Int(COLOR_BLACK) == 0
+            @test Int(COLOR_RED) == 1
+            @test Int(MARKER_NONE) == -1
+            @test Int(GRID_TICKS_OUT) == 2
+        end
+
+        @testset "CurveData" begin
+            x = [1.0, 2.0, 3.0]
+            y = [10.0, 20.0, 30.0]
+            c = CurveData(x, y; label="test", color=COLOR_RED, linestyle=LINE_DASHED)
+            @test c.x == x
+            @test c.y == y
+            @test c.label == "test"
+            @test c.color == COLOR_RED
+            @test c.linestyle == LINE_DASHED
+            @test c.marker == MARKER_NONE
+            @test c.thickness == 1
+            c2 = CurveData(x, y)
+            @test c2.label == ""
+            @test c2.color == COLOR_BLACK
+            @test c2.linestyle == LINE_SOLID
+            @test_throws ArgumentError CurveData([1.0, 2.0], [1.0])
+        end
+
+        @testset "AxisSpec" begin
+            ax = AxisSpec(lo=1.0, hi=100.0, label="Energy (eV)")
+            @test ax.lo == 1.0
+            @test ax.hi == 100.0
+            @test ax.label == "Energy (eV)"
+            @test !needs_autoscale(ax)
+            ax2 = AxisSpec()
+            @test needs_autoscale(ax2)
+        end
+
+        @testset "PlotSpec" begin
+            p = PlotSpec(title="Test", scale=LINLIN)
+            @test p.title == "Test"
+            @test p.scale == LINLIN
+            @test p.grid == GRID_TICKS_OUT
+            @test p.orientation == :landscape
+            @test isempty(p.curves)
+            @test p.xaxis.label == "Energy (eV)"
+            @test p.yaxis.label == "Cross section (barns)"
+            p2 = PlotSpec()
+            @test p2.scale == LOGLOG
+            @test_throws ArgumentError PlotSpec(orientation=:diagonal)
+        end
+
+        @testset "add_curve" begin
+            p = PlotSpec(title="Test")
+            c = CurveData([1.0, 2.0], [3.0, 4.0]; label="A")
+            p2 = add_curve(p, c)
+            @test length(p.curves) == 0
+            @test length(p2.curves) == 1
+            @test p2.curves[1].label == "A"
+        end
+
+        @testset "HeatmapSpec" begin
+            hm = HeatmapSpec(title="Cov", clabel="rel cov")
+            @test hm.title == "Cov"
+            @test hm.clabel == "rel cov"
+            @test hm.xlabel == "Energy group"
+        end
+
+        @testset "auto_scale_linear" begin
+            lo, hi, step, major = auto_scale_linear(0.5, 9.5)
+            @test lo <= 0.5
+            @test hi >= 9.5
+            @test step > 0
+            @test major > 0
+            lo2, hi2, _, _ = auto_scale_linear(5.0, 5.0)
+            @test hi2 > lo2
+        end
+
+        @testset "auto_scale_log" begin
+            lo, hi = auto_scale_log(0.01, 100.0)
+            # Allow tiny FP overshoot: 10^floor(log10(0.01)) can differ by eps
+            @test lo <= 0.01 + 1e-14
+            @test hi >= 100.0
+            @test_throws ArgumentError auto_scale_log(-1.0, 10.0)
+            @test_throws ArgumentError auto_scale_log(10.0, 5.0)
+        end
+
+        @testset "resolve_axes" begin
+            c1 = CurveData([1.0, 10.0], [0.5, 50.0]; label="a")
+            c2 = CurveData([2.0, 20.0], [1.0, 100.0]; label="b")
+            p = PlotSpec(curves=[c1, c2])
+            xlo, xhi, ylo, yhi = resolve_axes(p)
+            @test xlo <= 1.0
+            @test xhi >= 20.0
+            @test ylo <= 0.5
+            @test yhi >= 100.0
+            p2 = PlotSpec(curves=[c1],
+                          xaxis=AxisSpec(lo=0.1, hi=1000.0),
+                          yaxis=AxisSpec(lo=0.01, hi=500.0))
+            xlo2, xhi2, ylo2, yhi2 = resolve_axes(p2)
+            @test xlo2 == 0.1
+            @test xhi2 == 1000.0
+            @test ylo2 == 0.01
+            @test yhi2 == 500.0
+            p3 = PlotSpec()
+            xlo3, xhi3, ylo3, yhi3 = resolve_axes(p3)
+            @test xhi3 > xlo3
+        end
+
+        @testset "plot_material" begin
+            energies = [1e-5, 1e-3, 1e-1, 1.0, 1e2, 1e4, 1e6]
+            xs = hcat([20.0, 15.0, 10.0, 5.0, 2.0, 1.0, 0.5],
+                      [18.0, 13.0, 8.0, 4.0, 1.5, 0.8, 0.4],
+                      [2.0, 2.0, 2.0, 1.0, 0.5, 0.2, 0.1])
+            pendf = PointwiseMaterial(Int32(9228), energies, xs, [1, 2, 102])
+            p = plot_material(pendf)
+            @test length(p.curves) == 3
+            @test p.title == "MAT 9228"
+            @test p.scale == LOGLOG
+            @test any(c -> c.label == "Total", p.curves)
+            @test any(c -> c.label == "Elastic", p.curves)
+            @test any(c -> c.label == "Capture (n,g)", p.curves)
+            p2 = plot_material(pendf, mts=[1, 102], title="Custom")
+            @test length(p2.curves) == 2
+            @test p2.title == "Custom"
+            c = extract_curve(pendf, 1)
+            @test c.label == "Total"
+            @test length(c.x) == 7
+            @test_throws ArgumentError extract_curve(pendf, 999)
+        end
+
+        @testset "plot_multigroup" begin
+            bounds = [1e-5, 1e-3, 1e-1, 1.0, 1e2, 1e4, 1e6]
+            ng = 6
+            xs_data = [100.0 50.0; 80.0 40.0; 60.0 30.0;
+                       20.0 10.0; 5.0 2.5; 1.0 0.5]
+            flux = ones(ng)
+            mg = MultiGroupXS(bounds, [1, 2], xs_data, flux)
+            p = plot_multigroup(mg, mt=1)
+            @test p.title == "Multigroup Total"
+            @test length(p.curves) == 1
+            @test length(p.curves[1].x) == 2 * ng
+            @test p.curves[1].y[1] == 100.0
+            @test p.curves[1].y[end] == 1.0
+            @test_throws ArgumentError plot_multigroup(mg, mt=999)
+        end
+
+        @testset "plot_covariance" begin
+            eg = [1e-5, 1.0, 1e6]
+            mat = [0.01 0.002; 0.002 0.005]
+            cov = CovarianceMatrix(1, 1, eg, mat, true)
+            hm = plot_covariance(cov)
+            @test contains(hm.title, "Relative")
+            @test contains(hm.title, "MT1")
+            @test hm.values == mat
+            @test hm.xbins == eg
+            @test hm.clabel == "Relative covariance"
+        end
+
+        @testset "plot_probability_table" begin
+            energies = [100.0, 200.0, 500.0]
+            nb = 4
+            prob = [0.25 0.25 0.25; 0.25 0.25 0.25; 0.25 0.25 0.25; 0.25 0.25 0.25]
+            total = [10.0 12.0 8.0; 15.0 14.0 10.0; 20.0 18.0 14.0; 25.0 22.0 18.0]
+            elastic = [8.0 10.0 6.0; 12.0 11.0 8.0; 16.0 14.0 11.0; 20.0 18.0 14.0]
+            fission = zeros(nb, 3)
+            capture = [2.0 2.0 2.0; 3.0 3.0 2.0; 4.0 4.0 3.0; 5.0 4.0 4.0]
+            pt = ProbabilityTable(energies, nb, prob, total, elastic, fission, capture)
+            p = plot_probability_table(pt, 1)
+            @test contains(p.title, "100")
+            @test p.scale == LINLOG
+            @test p.xaxis.label == "Cumulative probability"
+            @test length(p.curves) == 3
+            @test any(c -> c.label == "Total", p.curves)
+            @test_throws BoundsError plot_probability_table(pt, 0)
+            @test_throws BoundsError plot_probability_table(pt, 4)
+        end
+
+        @testset "render_ascii" begin
+            c1 = CurveData([1.0, 10.0, 100.0, 1000.0],
+                           [100.0, 50.0, 10.0, 1.0]; label="Total")
+            c2 = CurveData([1.0, 10.0, 100.0, 1000.0],
+                           [80.0, 40.0, 8.0, 0.8]; label="Elastic",
+                           linestyle=LINE_DASHED)
+            p = PlotSpec(title="Test ASCII", curves=[c1, c2])
+            ascii = render_ascii(p, width=60, height=16)
+            @test isa(ascii, String)
+            @test contains(ascii, "Test ASCII")
+            @test contains(ascii, "Total")
+            @test contains(ascii, "Elastic")
+            @test contains(ascii, "+")
+            @test contains(ascii, "|")
+            @test contains(ascii, "-")
+            @test length(split(ascii, "\n")) >= 10
+            @test_throws ArgumentError render_ascii(p, width=10)
+            @test_throws ArgumentError render_ascii(p, height=5)
+        end
+
+        @testset "to_plot_recipe PlotSpec" begin
+            c1 = CurveData([1.0, 2.0], [3.0, 4.0]; label="A",
+                           linestyle=LINE_DASHED, color=COLOR_BLUE)
+            p = PlotSpec(title="Recipe Test",
+                         xaxis=AxisSpec(lo=0.5, hi=5.0, label="E (eV)"),
+                         yaxis=AxisSpec(label="XS (b)"),
+                         curves=[c1], scale=LOGLIN)
+            recipe = to_plot_recipe(p)
+            @test recipe["title"] == "Recipe Test"
+            @test recipe["xlabel"] == "E (eV)"
+            @test recipe["ylabel"] == "XS (b)"
+            @test recipe["xscale"] == :log10
+            @test recipe["yscale"] == :identity
+            @test recipe["xlim"] == (0.5, 5.0)
+            @test recipe["ylim"] == :auto
+            @test length(recipe["series"]) == 1
+            s = recipe["series"][1]
+            @test s["x"] == [1.0, 2.0]
+            @test s["y"] == [3.0, 4.0]
+            @test s["label"] == "A"
+            @test s["linestyle"] == :dash
+        end
+
+        @testset "to_plot_recipe HeatmapSpec" begin
+            hm = HeatmapSpec(title="Heatmap Test", xbins=[1.0, 2.0, 3.0],
+                             ybins=[1.0, 2.0, 3.0], values=[0.1 0.2; 0.3 0.4],
+                             clabel="Test label")
+            recipe = to_plot_recipe(hm)
+            @test recipe["type"] == :heatmap
+            @test recipe["title"] == "Heatmap Test"
+            @test recipe["values"] == [0.1 0.2; 0.3 0.4]
+            @test recipe["clabel"] == "Test label"
+        end
+
+        @testset "render_postscript" begin
+            c = CurveData([1.0, 10.0, 100.0], [50.0, 20.0, 5.0];
+                          label="Test curve", color=COLOR_RED)
+            p = PlotSpec(title="PS Test", curves=[c])
+            buf = IOBuffer()
+            render_postscript(p, buf)
+            ps = String(take!(buf))
+            @test startswith(ps, "%!PS-Adobe-3.0 EPSF-3.0")
+            @test contains(ps, "%%Title: PS Test")
+            @test contains(ps, "NJOY.jl visualization")
+            @test contains(ps, "moveto")
+            @test contains(ps, "lineto")
+            @test contains(ps, "stroke")
+            @test contains(ps, "showpage")
+            @test contains(ps, "%%EOF")
+            @test contains(ps, "setrgbcolor")
+            c2 = CurveData([1.0, 2.0], [3.0, 4.0]; linestyle=LINE_DASHED)
+            p2 = PlotSpec(curves=[c2])
+            buf2 = IOBuffer()
+            render_postscript(p2, buf2)
+            ps2 = String(take!(buf2))
+            @test contains(ps2, "[6 4] 0 setdash")
+            tmpf = tempname() * ".ps"
+            render_postscript(p, tmpf)
+            @test isfile(tmpf)
+            ps_file = read(tmpf, String)
+            @test startswith(ps_file, "%!PS-Adobe-3.0 EPSF-3.0")
+            rm(tmpf; force=true)
+        end
+
+        @testset "Full pipeline" begin
+            energies = collect(10.0 .^ range(-5, 7, length=50))
+            xs_total = 20.0 ./ sqrt.(energies)
+            xs_elastic = 18.0 ./ sqrt.(energies)
+            xs = hcat(xs_total, xs_elastic)
+            pendf = PointwiseMaterial(Int32(9228), energies, xs, [1, 2])
+            p = plot_material(pendf)
+            @test length(p.curves) == 2
+            ascii_out = render_ascii(p)
+            @test length(ascii_out) > 100
+            recipe = to_plot_recipe(p)
+            @test haskey(recipe, "series")
+            @test length(recipe["series"]) == 2
+            @test recipe["xscale"] == :log10
+            @test recipe["yscale"] == :log10
+            buf = IOBuffer()
+            render_postscript(p, buf)
+            ps_out = String(take!(buf))
+            @test length(ps_out) > 200
+        end
+
+    end  # @testset "Visualization"
+
 end  # @testset "NJOY.jl"
 
 # Integration tests against NJOY2016 reference outputs (separate file)

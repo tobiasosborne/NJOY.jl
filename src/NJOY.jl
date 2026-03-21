@@ -51,6 +51,9 @@ include("processing/heatr.jl")
 # Processing modules (THERMR -- thermal scattering cross sections)
 include("processing/thermr.jl")
 
+# Processing modules (LEAPR -- S(alpha,beta) generation from phonon DOS)
+include("processing/leapr.jl")
+
 # Processing modules (UNRESR/PURR -- unresolved resonance self-shielding)
 include("processing/unresr.jl")
 include("processing/purr.jl")
@@ -103,6 +106,10 @@ include("formats/dtfr.jl")
 
 # Output formats (POWR -- EPRI-CELL/EPRI-CPM library format)
 include("formats/powr.jl")
+
+# Visualization (replaces plotr/viewr -- zero-dependency plot specs + renderers)
+include("visualization/plotting.jl")
+include("visualization/backends.jl")
 
 # Public API -- constants
 export PhysicsConstants, CODATA2014
@@ -172,6 +179,13 @@ export bragg_edges, bragg_edge_energies, build_bragg_data, structure_factor
 export incoh_elastic_xs
 export compute_thermal_xs, compute_thermal
 export THERMR_EGRID
+
+# Public API -- LEAPR (S(alpha,beta) generation from phonon DOS)
+export PhononDOS, DiscreteOscillator, SABTable
+export debye_waller_factor, phonon_expansion
+export generate_sab, add_discrete_oscillators!
+export debye_dos, default_alpha_grid, default_beta_grid
+export sab_table_to_thermr
 
 # Public API -- UNRESR (Bondarenko self-shielding)
 export URRSpinSequence, URRStatModel
@@ -289,5 +303,19 @@ export POWROutput, POWR_LIB_FAST, POWR_LIB_THERMAL, POWR_LIB_CPM
 export POWR_NGNF, POWR_NGND_FAST, POWR_NGMIN, POWR_NGMAX
 export write_powr, write_powr_fast, write_powr_cpm
 export write_epri_cell, write_epri_cpm
+
+# Public API -- Visualization (plotr/viewr replacement)
+export AxisScale, LINLIN, LINLOG, LOGLIN, LOGLOG
+export GridStyle, GRID_NONE, GRID_LINES, GRID_TICKS_OUT, GRID_TICKS_IN
+export LineStyle, LINE_SOLID, LINE_DASHED, LINE_CHAIN_DASH, LINE_CHAIN_DOT, LINE_DOT, LINE_INVISIBLE
+export MarkerShape, MARKER_NONE, MARKER_SQUARE, MARKER_OCTAGON, MARKER_TRIANGLE
+export MARKER_CROSS, MARKER_EX, MARKER_DIAMOND, MARKER_CIRCLE
+export CurveColor, COLOR_BLACK, COLOR_RED, COLOR_GREEN, COLOR_BLUE
+export COLOR_MAGENTA, COLOR_CYAN, COLOR_BROWN, COLOR_PURPLE, COLOR_ORANGE
+export CurveData, AxisSpec, PlotSpec, HeatmapSpec
+export needs_autoscale, add_curve
+export auto_scale_linear, auto_scale_log, resolve_axes
+export extract_curve, plot_material, plot_multigroup, plot_covariance, plot_probability_table
+export render_ascii, render_postscript, to_plot_recipe
 
 end # module NJOY
