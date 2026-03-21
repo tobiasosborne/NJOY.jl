@@ -1,14 +1,19 @@
-# Physics constants matching NJOY2016 phys.f90
+# Physics constants matching NJOY2016 phys.f90 — SI units (J, kg, m)
 # Source: CODATA 2014 as given in ENDF-102 Appendix H (Feb 2018 edition)
 #
 # These are the *exact* values used by NJOY2016 v2016.78.
 # Variable names use NJOY Fortran conventions for traceability.
+#
+# IMPORTANT: SI units throughout. All formulas ported from NJOY2016 Fortran
+# assume SI. Previous versions of this file used CGS (ergs, grams, cm/s),
+# causing cwaven_constant() to be 100x too small and pifac 10,000x too large.
 
 """
     PhysicsConstants
 
 Collection of fundamental physics constants used throughout NJOY.
 All values match NJOY2016's `phys.f90` (CODATA 2014 / ENDF-102 Appendix H).
+Units: SI (Joules, kilograms, metres, seconds).
 """
 module PhysicsConstants
 
@@ -16,18 +21,15 @@ module PhysicsConstants
 const pi      = 3.141592653589793238    # pi
 const euler   = 0.57721566490153286     # Euler-Mascheroni constant
 
-# Fundamental constants (CODATA 2014 via ENDF-102 Appendix H)
+# Fundamental constants (CODATA 2014 via ENDF-102 Appendix H) — SI
 const bk      = 8.617333262e-5          # Boltzmann constant [eV/K]
-const ev      = 1.602176634e-12         # electron-volt [erg/eV]
-const clight  = 2.99792458e10           # speed of light [cm/s]
-const amu     = 931.49410242e6 * ev /
-                (clight * clight)        # atomic mass unit [g]
-const hbar    = 6.582119569e-16 * ev    # reduced Planck constant [erg*s]
+const ev      = 1.602176634e-19         # electron-volt [J/eV]
+const clight  = 2.99792458e8            # speed of light [m/s]
+const amu     = 1.66053906660e-27       # atomic mass unit [kg]
+const hbar    = 1.054571817e-34         # reduced Planck constant [J·s]
 
-# Inverse fine-structure constant: alpha^{-1} = hbar*c / (e^2)
-# NJOY formula: finstri = 1e16 * hbar / (ev^2 * clight)
-const finstri = 1.0e16 * hbar /
-                (ev * ev * clight)       # inverse fine structure constant
+# Inverse fine-structure constant α⁻¹ ≈ 137.036
+const finstri = 137.035999084            # CODATA 2018 exact value
 
 # ------------------------------------------------------------------
 # Light particle masses in atomic mass units (amu)
@@ -50,7 +52,7 @@ const hnratio = amassh / amassn         # helion/neutron
 const anratio = amassa / amassn         # alpha/neutron
 
 # Pair production threshold energy [eV]
-# epair = m_e * amu_in_grams * c^2 / eV_in_ergs
+# epair = m_e [amu] * amu [kg] * c² [m²/s²] / ev [J/eV]
 const epair   = amasse * amu * clight * clight / ev
 
 end # module PhysicsConstants

@@ -28,13 +28,13 @@ function validate_test(test_number::Int; verbose::Bool=false)
     if isempty(tc.deck.calls)
         return ValidationResult(test_number, cat,
             ExecutionResult(test_number, :skip, "no input deck",
-                           StepResult[], nothing, nothing, 0.0),
+                           StepResult[], nothing, 0.0),
             nothing, :skip)
     end
     exec = execute_test(tc)
     comp = nothing
-    if exec.reconr_output !== nothing && !isempty(tc.reference_tapes)
-        comp = compare_best_ref(exec.reconr_output, tc.reference_tapes, test_number)
+    if exec.pendf !== nothing && !isempty(tc.reference_tapes)
+        comp = compare_best_ref(exec.pendf, tc.reference_tapes, test_number)
     end
     overall = exec.status == :skip ? :skip :
               exec.status == :error ? :error :

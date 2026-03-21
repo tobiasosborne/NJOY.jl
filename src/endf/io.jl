@@ -10,18 +10,15 @@
 Parse an 11-character ENDF float field. Handles compact notation without 'E'.
 """
 function parse_endf_float(s::AbstractString)
-    t = strip(s)
+    t = filter(!isspace, s)
     isempty(t) && return 0.0
-    if occursin(r"[eEdD]", t)
-        return parse(Float64, replace(t, r"[dD]" => "e"))
-    end
-    for i in lastindex(t):-1:2
-        c = t[i]
-        if (c == '+' || c == '-') && (isdigit(t[i-1]) || t[i-1] == '.')
-            return parse(Float64, t[1:i-1] * "e" * t[i:end])
-        end
-    end
-    return parse(Float64, t)
+    # Normalize Fortran D/d notation
+    t = replace(t, r"[dD]" => "e")
+    # Already has explicit exponent marker → parse directly
+    occursin(r"[eE]", t) && return parse(Float64, t)
+    # Compact ENDF notation: 1.234567+8 → 1.234567e+8
+    t = replace(t, r"([\d.])([+-])(\d)" => s"\1e\2\3")
+    parse(Float64, t)
 end
 
 """

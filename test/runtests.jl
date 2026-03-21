@@ -64,6 +64,18 @@ using LinearAlgebra
         # Negative mantissa with positive exponent
         @test parse_endf_float("-3.14159+0") == -3.14159
 
+        # Spaces inside exponent (real-world ENDF edge case)
+        @test parse_endf_float("2.00300e+ 3") == 2.003e3
+        @test parse_endf_float(" 1.0000E- 5") == 1.0e-5
+
+        # Fortran D/d notation
+        @test parse_endf_float("1.23456D+08") == 1.23456e8
+        @test parse_endf_float("1.23456d-03") == 1.23456e-3
+
+        # Multi-digit exponents in compact notation
+        @test parse_endf_float(" 1.23456-12") == 1.23456e-12
+        @test parse_endf_float(" 9.87654+10") == 9.87654e10
+
         # Roundtrip consistency
         for val in [0.0, 1.0, -1.0, 1.23456e7, -3.14159e-12, 9.99999e38]
             formatted = format_endf_float(val)

@@ -61,10 +61,9 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
     factor_n = emb_n / (emb_n + ema_n)  # = alabcm for neutron channel
 
     # twomhb = sqrt(2 * m_n * amu_eV) / (hbar_eV_s * 1e15 * c_m_s)
-    hbar_evs = C.hbar / C.ev                         # hbar in eV*s
+    hbar_evs = C.hbar / C.ev                         # hbar in eV·s
     amu_ev = C.amu * C.clight * C.clight / C.ev       # amu in eV
-    c_ms = C.clight / 100.0                            # c in m/s
-    twomhb = sqrt(2.0 * C.amassn * amu_ev) / (hbar_evs * 1.0e15 * c_ms)
+    twomhb = sqrt(2.0 * C.amassn * amu_ev) / (hbar_evs * 1.0e15 * C.clight)
 
     # Accumulate cross sections indexed by particle-pair
     sigmas = zeros(typeof(float(E)), npp)

@@ -549,10 +549,9 @@ function cross_section_rml(E::Float64, rml::RMLData)
     end
 
     # Wavenumber constant following NJOY samm.f90 fxradi
-    hbarrr = C.hbar / C.ev                          # hbar in eV*s
+    hbarrr = C.hbar / C.ev                          # hbar in eV·s
     amuevv = C.amu * C.clight * C.clight / C.ev      # amu in eV
-    cspeed = C.clight / 100.0                         # c in m/s
-    twomhb = sqrt(2.0 * C.amassn * amuevv) / (hbarrr * 1.0e15 * cspeed)
+    twomhb = sqrt(2.0 * C.amassn * amuevv) / (hbarrr * 1.0e15 * C.clight)
 
     factor_lab = emb_el / (emb_el + ema_el)
     alabcm = factor_lab

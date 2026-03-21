@@ -27,8 +27,8 @@ function run_njoy_test(tc::NJOYTestCase; rtol::Float64=0.05)
     exec = execute_test(tc)
     comps = ReactionComparison[]
     ref_tape = ""
-    if exec.reconr_output !== nothing && !isempty(tc.reference_tapes)
-        report = compare_best_ref(exec.reconr_output, tc.reference_tapes, tc.number)
+    if exec.pendf !== nothing && !isempty(tc.reference_tapes)
+        report = compare_best_ref(exec.pendf, tc.reference_tapes, tc.number)
         comps = report.reactions
         ref_tape = report.ref_tape
     end

@@ -187,6 +187,128 @@ function parse_heatr(mc::ModuleCall)::HeatrParams
     HeatrParams(nendf, nin, nout, mat, nqa, mts)
 end
 
+struct ThermrParams
+    nin_thermal::Int; nin_pendf::Int; nout::Int
+    mat_thermal::Int; mat::Int; ntemp::Int; iinc::Int; icoh::Int
+    natom::Int; mtref::Int; iprint::Int
+    temperatures::Vector{Float64}; tol::Float64; emax::Float64
+end
+
+function parse_thermr(mc::ModuleCall)::ThermrParams
+    cards = mc.raw_cards
+    isempty(cards) && return ThermrParams(0,0,0,0,0,1,0,0,1,221,0,Float64[],0.05,10.0)
+    nin_th = _fint(cards[1], 1); nin_p = abs(_fint(cards[1], 2))
+    nout = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
+    mat_th = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    mat = length(cards) >= 2 ? _fint(cards[2], 2) : 0
+    ntemp = length(cards) >= 2 ? _fint(cards[2], 3; default=1) : 1
+    iinc = length(cards) >= 2 ? _fint(cards[2], 4; default=0) : 0
+    icoh = length(cards) >= 2 ? _fint(cards[2], 5; default=0) : 0
+    natom = length(cards) >= 2 ? _fint(cards[2], 6; default=1) : 1
+    mtref = length(cards) >= 2 ? _fint(cards[2], 9; default=221) : 221
+    iprint = length(cards) >= 2 ? _fint(cards[2], 10; default=0) : 0
+    temps = Float64[]
+    if length(cards) >= 3
+        for t in cards[3]; startswith(t, "'") && continue; push!(temps, _parse_num(t)); end
+    end
+    tol = length(cards) >= 4 ? _fnum(cards[4], 1; default=0.05) : 0.05
+    emax = length(cards) >= 4 ? _fnum(cards[4], 2; default=10.0) : 10.0
+    ThermrParams(nin_th, nin_p, nout, mat_th, mat, max(ntemp, length(temps)),
+                 iinc, icoh, natom, mtref, iprint, temps, tol, emax)
+end
+
+struct AcerParams
+    nendf::Int; npendf::Int; nace::Int; ndir::Int
+    mat::Int; iopt::Int; temp::Float64; suffix::String
+end
+
+function parse_acer(mc::ModuleCall)::AcerParams
+    cards = mc.raw_cards
+    isempty(cards) && return AcerParams(0,0,0,0,0,1,300.0,"80c")
+    nendf = abs(_fint(cards[1], 1)); npendf = abs(_fint(cards[1], 2))
+    nace = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
+    ndir = length(cards[1]) >= 4 ? abs(_fint(cards[1], 4)) : 0
+    iopt = length(cards) >= 2 ? _fint(cards[2], 1; default=1) : 1
+    # Card 3 is a title string (hz); Card 4 has mat, temp for iopt=1
+    mat = 0; temp = 300.0; suffix = "80c"
+    if iopt == 1 && length(cards) >= 4
+        # Card 4: matd, tempd, [local], [iprint]
+        card4 = cards[4]
+        mat = _fint(card4, 1)
+        temp = _fnum(card4, 2; default=300.0)
+    end
+    AcerParams(nendf, npendf, nace, ndir, mat, iopt, temp, suffix)
+end
+
+struct GasprParams
+    nendf::Int; npendf_in::Int; npendf_out::Int
+end
+
+function parse_gaspr(mc::ModuleCall)::GasprParams
+    cards = mc.raw_cards
+    isempty(cards) && return GasprParams(0,0,0)
+    GasprParams(abs(_fint(cards[1], 1)), abs(_fint(cards[1], 2)),
+                length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0)
+end
+
+struct UnresrParams
+    nendf::Int; npendf_in::Int; npendf_out::Int
+    mat::Int; ntemp::Int; nsigz::Int
+    temperatures::Vector{Float64}; sigz::Vector{Float64}
+end
+
+function parse_unresr(mc::ModuleCall)::UnresrParams
+    cards = mc.raw_cards
+    isempty(cards) && return UnresrParams(0,0,0,0,1,1,Float64[],Float64[])
+    nendf = abs(_fint(cards[1], 1)); nin = abs(_fint(cards[1], 2))
+    nout = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
+    mat = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    ntemp = length(cards) >= 2 ? _fint(cards[2], 2; default=1) : 1
+    nsigz = length(cards) >= 2 ? _fint(cards[2], 3; default=1) : 1
+    temps = Float64[]
+    if length(cards) >= 3
+        for t in cards[3]; startswith(t, "'") && continue
+            v = _parse_num(t); v == 0 && break; push!(temps, v); end
+    end
+    sigz = Float64[]
+    if length(cards) >= 4
+        for t in cards[4]; startswith(t, "'") && continue
+            v = _parse_num(t); v == 0 && break; push!(sigz, v); end
+    end
+    UnresrParams(nendf, nin, nout, mat, max(ntemp, length(temps)),
+                 max(nsigz, length(sigz)), temps, sigz)
+end
+
+struct PurrParams
+    nendf::Int; npendf_in::Int; npendf_out::Int
+    mat::Int; ntemp::Int; nsigz::Int; nbin::Int; nladr::Int
+    temperatures::Vector{Float64}; sigz::Vector{Float64}
+end
+
+function parse_purr(mc::ModuleCall)::PurrParams
+    cards = mc.raw_cards
+    isempty(cards) && return PurrParams(0,0,0,0,1,1,20,64,Float64[],Float64[])
+    nendf = abs(_fint(cards[1], 1)); nin = abs(_fint(cards[1], 2))
+    nout = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
+    mat = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    ntemp = length(cards) >= 2 ? _fint(cards[2], 2; default=1) : 1
+    nsigz = length(cards) >= 2 ? _fint(cards[2], 3; default=1) : 1
+    nbin = length(cards) >= 2 ? _fint(cards[2], 4; default=20) : 20
+    nladr = length(cards) >= 2 ? _fint(cards[2], 5; default=64) : 64
+    temps = Float64[]
+    if length(cards) >= 3
+        for t in cards[3]; startswith(t, "'") && continue
+            v = _parse_num(t); v == 0 && break; push!(temps, v); end
+    end
+    sigz = Float64[]
+    if length(cards) >= 4
+        for t in cards[4]; startswith(t, "'") && continue
+            v = _parse_num(t); v == 0 && break; push!(sigz, v); end
+    end
+    PurrParams(nendf, nin, nout, mat, max(ntemp, length(temps)),
+               max(nsigz, length(sigz)), nbin, nladr, temps, sigz)
+end
+
 # =========================================================================
 # CMakeLists.txt parser
 # =========================================================================
