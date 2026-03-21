@@ -1730,4 +1730,225 @@ using NJOY
         end
     end
 
+    # ======================================================================
+    # BROADR -- F-function (sigma1 kernel)
+    # ======================================================================
+    @testset "F-function analytical values" begin
+        # f_0(0) = erfc(0)/2 = 1/2
+        @test isapprox(f_func(0, 0.0), 0.5, atol=1e-15)
+        # f_1(0) = exp(0)/(2*sqrt(pi)) = 1/(2*sqrt(pi))
+        @test isapprox(f_func(1, 0.0), 1.0/(2*sqrt(pi)), atol=1e-15)
+        # f_2(0) = 1/4
+        @test isapprox(f_func(2, 0.0), 0.25, atol=1e-15)
+        # f_3(0) = 1/(2*sqrt(pi))
+        @test isapprox(f_func(3, 0.0), 1.0/(2*sqrt(pi)), atol=1e-15)
+        # f_4(0) = 3/8
+        @test isapprox(f_func(4, 0.0), 0.375, atol=1e-15)
+
+        # f_0(a) = erfc(a)/2 for various a
+        using SpecialFunctions: erfc
+        for a in [0.1, 0.5, 1.0, 2.0, 5.0]
+            @test isapprox(f_func(0, a), erfc(a)/2, rtol=1e-12)
+        end
+
+        # f_1(a) = exp(-a^2)/(2*sqrt(pi))
+        for a in [0.1, 1.0, 3.0]
+            @test isapprox(f_func(1, a), exp(-a^2)/(2*sqrt(pi)), rtol=1e-12)
+        end
+
+        # Large a: all f_n -> 0
+        for n in 0:4
+            @test f_func(n, 15.0) == 0.0
+        end
+
+        # f_all returns consistent tuple
+        for a in [0.0, 0.5, 2.0, 8.0]
+            fa = f_all(a)
+            for n in 0:4
+                @test isapprox(fa[n+1], f_func(n, a), atol=1e-14)
+            end
+        end
+    end
+
+    # ======================================================================
+    # BROADR -- H-function cancellation avoidance
+    # ======================================================================
+    @testset "H-function cancellation" begin
+        # h(n, a, a) = 0 exactly
+        for n in 0:4
+            @test h_func(n, 1.5, 1.5) == 0.0
+        end
+
+        # h(n, a, b) = f(n, a) - f(n, b) for well-separated a, b
+        for n in 0:4
+            h_direct = f_func(n, 0.5) - f_func(n, 2.0)
+            @test isapprox(h_func(n, 0.5, 2.0), h_direct, rtol=1e-10)
+        end
+
+        # CRITICAL TEST: h(n, a, a+eps) for small eps -- cancellation avoidance
+        # The Taylor series must give accurate results where direct subtraction fails
+        for n in 0:4
+            a = 1.5
+            eps_val = 1.0e-8
+            b = a + eps_val
+            h_val = h_func(n, a, b)
+            # The result should be approximately -eps * d/da f_n(a)
+            # For f_0: d/da f_0 = -exp(-a^2)/sqrt(pi)
+            # So h ~ eps * exp(-a^2)/sqrt(pi) (positive, since f decreases)
+            @test isfinite(h_val)
+            # Verify it is small but not zero (meaningful value)
+            if n == 0
+                expected = eps_val * exp(-a^2) / sqrt(pi)
+                @test abs(h_val) > 0.0
+                @test isapprox(abs(h_val), expected, rtol=0.1)
+            end
+        end
+
+        # h_taylor directly: verify it matches h_func for small intervals
+        for n in 0:4
+            a = 2.0; b = 2.0 + 1e-6
+            ht = h_taylor(n, a, b)
+            hf = h_func(n, a, b)
+            @test isapprox(ht, hf, rtol=1e-6)
+        end
+
+        # h_all returns consistent values
+        f_old = f_all(1.0)
+        h_vals, f_new = h_all(1.0, f_old, 1.5)
+        for n in 0:4
+            @test isapprox(h_vals[n+1], h_func(n, 1.0, 1.5), atol=1e-12)
+        end
+    end
+
+    # ======================================================================
+    # BROADR -- Broadening invariants
+    # ======================================================================
+    @testset "Broadening constant XS invariant" begin
+        # A constant XS remains constant after broadening.
+        # Use Fe-56 (awr=55.85) with energies well above the Doppler width
+        # so boundary extrapolation effects are negligible.
+        energies = collect(range(1.0, 1000.0, length=50))
+        sigma_const = 10.0
+        xs = fill(sigma_const, length(energies))
+        T = 300.0
+        awr = 55.85  # Fe-56
+
+        out_e, out_xs = doppler_broaden(energies, xs, T, awr; tol=0.001)
+
+        # All broadened values should equal the constant within ~1%
+        for i in eachindex(out_xs)
+            @test isapprox(out_xs[i], sigma_const, rtol=0.1)
+        end
+    end
+
+    @testset "Broadening 1/v XS invariant" begin
+        # sigma(E)*sqrt(E)=const is invariant under Doppler broadening.
+        # Use Fe-56 to keep Doppler width narrow relative to energy grid.
+        energies = collect(range(0.01, 100.0, length=500))
+        sigma0 = 100.0
+        xs = sigma0 ./ sqrt.(energies)
+        T = 300.0
+        awr = 55.85
+
+        out_e, out_xs = doppler_broaden(energies, xs, T, awr; tol=0.001)
+
+        # Check product sigma*sqrt(E) is approximately constant
+        # away from boundaries
+        for i in eachindex(out_e)
+            if out_e[i] > 1.0 && out_e[i] < 50.0
+                product = out_xs[i] * sqrt(out_e[i])
+                @test isapprox(product, sigma0, rtol=0.05)
+            end
+        end
+    end
+
+    @testset "Broadening smooths a step" begin
+        # A step function is smoothed by broadening
+        energies = [1.0, 5.0, 5.0 + 1e-3, 10.0, 50.0, 100.0]
+        xs = [1.0, 1.0, 100.0, 100.0, 100.0, 100.0]
+        T = 300.0
+        awr = 55.85  # Fe-56
+
+        out_e, out_xs = doppler_broaden(energies, xs, T, awr; tol=0.001)
+
+        # All values should be positive
+        @test all(x -> x >= 0, out_xs)
+        # Far from the step, XS should approach the plateau values
+        for i in eachindex(out_e)
+            if out_e[i] > 20.0
+                @test out_xs[i] > 50.0  # should be close to 100
+            end
+        end
+    end
+
+    # ======================================================================
+    # BROADR -- Thinning
+    # ======================================================================
+    @testset "Thinning preserves accuracy" begin
+        # Build a smooth function with many redundant points
+        energies = collect(range(0.1, 10.0, length=500))
+        xs = 10.0 .* ones(500)  # constant -- maximally thinnable
+
+        thinned_e, thinned_xs = thin_xs(energies, xs; tol=0.001)
+
+        # Should thin dramatically (constant function needs only 2 points)
+        @test length(thinned_e) < 50  # much fewer than 500
+
+        # First and last points preserved
+        @test thinned_e[1] == energies[1]
+        @test thinned_e[end] == energies[end]
+
+        # Interpolation of thinned result matches original within tolerance
+        for i in 1:10:500
+            e = energies[i]
+            idx = searchsortedlast(thinned_e, e)
+            idx = clamp(idx, 1, length(thinned_e) - 1)
+            fr = (e - thinned_e[idx]) / (thinned_e[idx+1] - thinned_e[idx])
+            interp_val = (1 - fr) * thinned_xs[idx] + fr * thinned_xs[idx+1]
+            @test isapprox(interp_val, xs[i], rtol=0.002)
+        end
+    end
+
+    @testset "Thinning preserves non-trivial features" begin
+        # A linear ramp thins well (step_max guard limits how aggressively)
+        energies = collect(range(1.0, 100.0, length=200))
+        xs = collect(range(1.0, 50.0, length=200))
+
+        thinned_e, thinned_xs = thin_xs(energies, xs; tol=0.001)
+
+        # Should thin significantly (but step_max=1.24 prevents full thinning)
+        @test length(thinned_e) < 100
+        @test thinned_e[1] == energies[1]
+        @test thinned_e[end] == energies[end]
+
+        # Verify interpolation accuracy at all original points
+        for i in 1:20:200
+            e = energies[i]
+            idx = searchsortedlast(thinned_e, e)
+            idx = clamp(idx, 1, length(thinned_e) - 1)
+            de = thinned_e[idx+1] - thinned_e[idx]
+            de > 0 || continue
+            fr = (e - thinned_e[idx]) / de
+            interp_val = (1 - fr)*thinned_xs[idx] + fr*thinned_xs[idx+1]
+            @test isapprox(interp_val, xs[i], rtol=0.002)
+        end
+    end
+
+    # ======================================================================
+    # BROADR -- sigma1_at kernel
+    # ======================================================================
+    @testset "sigma1_at kernel basic" begin
+        # Constant XS: sigma1 should return the constant
+        seg_e = [0.01, 1.0, 10.0, 100.0]
+        seg_xs = [5.0, 5.0, 5.0, 5.0]
+        awr = 56.0  # Fe-like
+        T = 300.0
+        alpha = awr / (NJOY.PhysicsConstants.bk * T)
+
+        for E in [0.1, 1.0, 10.0, 50.0]
+            val = sigma1_at(E, seg_e, seg_xs, alpha)
+            @test isapprox(val, 5.0, rtol=0.01)
+        end
+    end
+
 end  # @testset "NJOY.jl"

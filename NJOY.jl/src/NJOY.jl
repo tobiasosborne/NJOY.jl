@@ -34,6 +34,10 @@ include("processing/adaptive_grid.jl")
 include("processing/reconr.jl")
 include("processing/pendf_writer.jl")
 
+# Processing modules (BROADR pipeline -- Proposal B: sigma1 kernel + pipeline)
+include("processing/sigma1.jl")
+include("processing/broadr.jl")
+
 # Public API -- constants
 export PhysicsConstants, CODATA2014
 
@@ -81,5 +85,9 @@ export merge_background!, reconstruct, reconr, sigma_mf2
 
 # Public API -- PENDF writer
 export write_pendf, write_pendf_file
+
+# Public API -- BROADR (Doppler broadening -- Proposal B)
+export f_func, f_all, h_func, h_all, h_taylor
+export sigma1_at, doppler_broaden, doppler_broaden_multi, thin_xs
 
 end # module NJOY
