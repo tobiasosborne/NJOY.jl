@@ -32,6 +32,7 @@ include("resonances/reader.jl")
 include("resonances/slbw.jl")
 include("resonances/mlbw.jl")
 include("resonances/reich_moore.jl")
+include("resonances/sammy.jl")
 
 # Processing modules (RECONR pipeline)
 include("processing/adaptive_grid.jl")
@@ -131,6 +132,7 @@ export terp1, interpolate, integrate
 # Public API -- Resonance types
 export AbstractResonanceFormalism
 export SLBWParameters, MLBWParameters, ReichMooreParameters
+export SAMMYParameters, SAMMYParticlePair, SAMMYSpinGroup
 export AdlerAdlerParameters, UnresolvedParameters
 export ResonanceRange, CrossSections
 
@@ -145,7 +147,7 @@ export psi_chi, faddeeva_w_julia
 export MF2Data, IsotopeData, read_mf2
 
 # Public API -- Cross section evaluation
-export cross_section, cross_section_slbw, cross_section_mlbw, cross_section_rm
+export cross_section, cross_section_slbw, cross_section_mlbw, cross_section_rm, cross_section_sammy
 export cwaven_constant, channel_radius
 
 # Public API -- Adaptive grid reconstruction

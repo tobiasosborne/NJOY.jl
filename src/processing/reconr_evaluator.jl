@@ -228,17 +228,12 @@ end
 
 Sammy background R-matrix parameters (LBK=2).
 
-The 7 backgrdata values map to the ENDF LIST record as:
-  data[1] = ED (lower energy boundary, from LIST C1)
-  data[2] = EU (upper energy boundary, from LIST C2)
-  data[3..7] = the 5 parameters from LIST data
-
-The Sammy background R-matrix formula (NJOY setr, reconr.f90):
-  R_bg = data[3] - data[7]*(data[2]-data[1])
-       + (data[4] + data[5]*E)*E
-       - (data[6] + data[7]*E) * log((data[2]-E)/(E-data[1]))
+The Sammy background R-matrix formula (NJOY setr, samm.f90):
+  R_bg = p1 - p5*(EU-ED) + (p2 + p3*E)*E - (p4 + p5*E) * log((EU-E)/(E-ED))
 """
 struct RMLSammyBG
+    LCH::Int      # channel number this background applies to (1-based)
+    LBK::Int      # background type (2=Sammy, 3=Frohner)
     ED::Float64   # lower energy boundary (from LIST C1)
     EU::Float64   # upper energy boundary (from LIST C2)
     p1::Float64   # parameter 1 (constant term)
@@ -260,7 +255,9 @@ struct RMLSpinGroup
     KPS::Int                 # phase-shift option
     channels::Vector{RMLChannel}
     Er::Vector{Float64}      # resonance energies
-    GAM::Matrix{Float64}     # reduced width amplitudes (nres x nch)
+    GAM::Matrix{Float64}     # width data (nres x (1+nch_nongamma)):
+                             #   col 1 = gamgam (capture width)
+                             #   col 2.. = channel widths (non-gamma channels)
     sammy_bg::Vector{RMLSammyBG}  # background R-matrix data (from KBK records)
 end
 
@@ -329,9 +326,9 @@ function read_rml_data(io::IO)
                 # Read RML data
                 rml_cont = read_cont(io)
                 IFG = Int(rml_cont.L1)
-                KRL = Int(rml_cont.L2)
+                KRM = Int(rml_cont.L2)
                 NJS = Int(rml_cont.N1)
-                KRM = Int(rml_cont.N2)
+                KRL = Int(rml_cont.N2)
 
                 # Particle pairs
                 pp_list = read_list(io)
@@ -371,20 +368,42 @@ function read_rml_data(io::IO)
                     end
 
                     # Resonance data
+                    # NCH includes the gamma channel -- actual reaction channels
+                    # are NCH-1 (the gamma channel has IPP=1 and is excluded from
+                    # the channel list by the Fortran code, but the ENDF format
+                    # counts it in the channel definitions).
+                    # However, the channel list already read above may or may not
+                    # include the gamma channel depending on the evaluation.
+                    # We keep all channels as-is and let cross_section_rml sort
+                    # them by particle-pair MT.
                     res_list = read_list(io)
-                    vals_per_res = NCH + 1
-                    nres = NCH > 0 ? div(length(res_list.data), vals_per_res) : 0
+                    nres = Int(res_list.L2)  # number of resonances from L2
+
+                    # Stride: ENDF pads to 6 or 12 values per resonance
+                    # Following Fortran: nx=6; if (2+ichan > 6) nx=12
+                    # where ichan = number of non-gamma channels
+                    # But we can just derive from data length:
+                    nx = nres > 0 ? div(length(res_list.data), nres) : 6
+
+                    # Actual number of width values per resonance:
+                    # First value is Er, second is gamgam (capture width),
+                    # remaining are channel widths (1 per non-gamma channel)
+                    n_non_gamma = count(ch -> ch.ipp >= 1 && ch.ipp <= length(pairs) &&
+                                        pairs[ch.ipp].MT != 102, channels)
 
                     Er_vec = Float64[]
                     GAM_mat = zeros(0, max(NCH, 0))
                     if nres > 0 && NCH > 0
                         Er_vec = zeros(nres)
-                        GAM_mat = zeros(nres, NCH)
+                        # Store gamgam + all channel widths
+                        # Column 1 = gamgam, columns 2.. = channel widths
+                        GAM_mat = zeros(nres, 1 + n_non_gamma)
                         for ir in 1:nres
-                            base = (ir - 1) * vals_per_res
+                            base = (ir - 1) * nx
                             Er_vec[ir] = res_list.data[base+1]
-                            for ich in 1:NCH
-                                GAM_mat[ir, ich] = res_list.data[base+1+ich]
+                            GAM_mat[ir, 1] = res_list.data[base+2]  # gamgam
+                            for jch in 1:n_non_gamma
+                                GAM_mat[ir, 1+jch] = res_list.data[base+2+jch]
                             end
                         end
                     end
@@ -440,23 +459,31 @@ function _read_rml_background(io::IO, KBK::Int)
     result = RMLSammyBG[]
     for _ in 1:KBK
         bk_header = read_cont(io)
-        LBK = Int(bk_header.L1)
+        LCH = Int(bk_header.L1)  # channel number
+        LBK = Int(bk_header.L2)  # background type
         if LBK == 2
             bk_list = read_list(io)
             d = bk_list.data
             ED = bk_list.C1   # lower energy boundary
             EU = bk_list.C2   # upper energy boundary
-            # The 5 data values map to backgrdata indices 3..7
             p1 = length(d) >= 1 ? d[1] : 0.0
             p2 = length(d) >= 2 ? d[2] : 0.0
             p3 = length(d) >= 3 ? d[3] : 0.0
             p4 = length(d) >= 4 ? d[4] : 0.0
             p5 = length(d) >= 5 ? d[5] : 0.0
-            push!(result, RMLSammyBG(ED, EU, p1, p2, p3, p4, p5))
-        elseif LBK == 1
-            read_list(io)  # consume but don't use
+            push!(result, RMLSammyBG(LCH, LBK, ED, EU, p1, p2, p3, p4, p5))
         elseif LBK == 3
-            read_tab1(io)  # consume but don't use
+            bk_list = read_list(io)
+            d = bk_list.data
+            ED = bk_list.C1
+            EU = bk_list.C2
+            p1 = length(d) >= 1 ? d[1] : 0.0
+            p2 = length(d) >= 2 ? d[2] : 0.0
+            p3 = length(d) >= 3 ? d[3] : 0.0
+            push!(result, RMLSammyBG(LCH, LBK, ED, EU, p1, p2, p3, 0.0, 0.0))
+        elseif LBK == 1
+            read_tab1(io)  # real part table
+            read_tab1(io)  # imaginary part table
         end
     end
     return result
@@ -484,408 +511,513 @@ end
 """
     cross_section_rml(E, rml::RMLData) -> CrossSections
 
-Evaluate R-Matrix Limited (LRF=7, KRM=0 Reich-Moore) cross sections.
-Handles non-fissile materials with elastic + capture channels.
+Evaluate R-Matrix Limited (LRF=7, KRM=3 Reich-Moore) cross sections
+using the SAMMY method.
 
-The calculation follows the same physics as `cross_section_rm` (LRF=3)
-but reads from the RML data layout.
+Follows NJOY2016 samm.f90 subroutines: betset, abpart, setr, yinvrs,
+setxqx, sectio, crosss.
+
+For each spin group:
+1. Compute reduced width amplitudes betapr from widths and P(Er)
+2. Form beta products: beta_kl = betapr_k * betapr_l
+3. Compute alphar/alphai from the Cauchy-eliminated capture channel
+4. Build R-matrix from beta * alpha
+5. Form Y = L^{-1} - R where L^{-1} = 1/(S-B+iP)
+6. Invert Y to get Y^{-1}
+7. Form XXXX = sqrt(P)/L * Y^{-1} * R * sqrt(P)
+8. Extract cross sections from XXXX via the collision matrix formalism
 """
 function cross_section_rml(E::Float64, rml::RMLData)
     C = PhysicsConstants
-    cwaven = cwaven_constant()
 
-    sig_total = 0.0
     sig_elastic = 0.0
-    sig_fission = 0.0
     sig_capture = 0.0
+    sig_fission = 0.0
 
-    awri = rml.AWR
-    arat = awri / (awri + 1.0)
-    k = cwaven * arat * sqrt(abs(E))
-    if k == 0.0
-        return CrossSections(0.0, 0.0, 0.0, 0.0)
-    end
-    pifac = C.pi / (k * k)
-
-    # Find the elastic particle pair to get target spin
-    # (IB field of the elastic PP contains target spin)
+    # --- Wavenumber setup ---
+    # Find elastic particle pair to get masses and target spin
     spi = 0.0
+    ema_el = 1.0   # neutron mass ratio (amu)
+    emb_el = rml.AWR
     for pp in rml.pairs
         if pp.MT == 2
             spi = pp.IB
+            ema_el = pp.MA != 0.0 ? pp.MA : 1.0
+            emb_el = pp.MB != 0.0 ? pp.MB : rml.AWR
             break
         end
     end
-    gjd = 2.0 * (2.0 * spi + 1.0)
 
+    # Wavenumber constant following NJOY samm.f90 fxradi
+    hbarrr = C.hbar / C.ev                          # hbar in eV*s
+    amuevv = C.amu * C.clight * C.clight / C.ev      # amu in eV
+    cspeed = C.clight / 100.0                         # c in m/s
+    twomhb = sqrt(2.0 * C.amassn * amuevv) / (hbarrr * 1.0e15 * cspeed)
+
+    factor_lab = emb_el / (emb_el + ema_el)
+    alabcm = factor_lab
+    factor = alabcm / ema_el
+
+    fourpi = 4.0 * C.pi / 100.0  # normalization: 4*pi / 100 (fm^2 -> barns)
+    if E <= 0.0
+        return CrossSections(0.0, 0.0, 0.0, 0.0)
+    end
+
+    # Loop over spin groups
     for sg in rml.spin_groups
-        NCH = length(sg.channels)
-        NCH == 0 && continue
+        nch_all = length(sg.channels)
+        nch_all == 0 && continue
         nres = length(sg.Er)
 
         ajc = abs(sg.AJ)
-        gj = (2.0 * ajc + 1.0) / gjd
 
-        # Find elastic and capture channels
-        elastic_ch = 0
-        capture_ch = 0
+        # Separate channels: identify non-gamma channels and their properties
+        # In LRF=7, channels in the spin group include gamma (IPP corresponding
+        # to MT=102) and non-gamma channels. The gamma channel is "eliminated"
+        # via the Cauchy approach (its width goes into gamgam).
+        #
+        # Our reader already separated: GAM column 1 = gamgam,
+        # GAM columns 2+ = non-gamma channel widths.
+        # The channels vector contains ALL channels from the ENDF data.
+        # We need to identify which are elastic (IPP -> MT=2) etc.
+
+        # Build list of non-gamma channels with their particle-pair info
+        nongamma_chs = Int[]
         for (ich, ch) in enumerate(sg.channels)
             if ch.ipp >= 1 && ch.ipp <= length(rml.pairs)
-                if rml.pairs[ch.ipp].MT == 2
-                    elastic_ch = ich
-                elseif rml.pairs[ch.ipp].MT == 102
-                    capture_ch = ich
+                if rml.pairs[ch.ipp].MT != 102  # not gamma/capture
+                    push!(nongamma_chs, ich)
                 end
             end
         end
-        elastic_ch == 0 && continue
+        nchan = length(nongamma_chs)
+        nchan == 0 && continue
 
-        ch_el = sg.channels[elastic_ch]
-        ll = ch_el.l
-
-        # Scattering radius
-        apt = ch_el.apt
-        ape = ch_el.ape
-        ra = apt > 0.0 ? apt : channel_radius(awri)
-        ap = ape > 0.0 ? ape : ra
-
-        rho_l = k * ra
-        rhoc_l = k * ap
-
-        # Penetrability, shift, phase at cross section energy
-        pe = penetrability(ll, rho_l)
-        se = shift_factor(ll, rho_l)
-        phi = phase_shift(ll, rhoc_l)
-
-        p1 = cos(2.0 * phi)
-        p2 = sin(2.0 * phi)
-
-        # Build R-matrix in the channel basis (not width-weighted)
-        # R_nn = sum_r gamma_n_r^2 * (alphar + i*alphai)
-        # where alphar = (Er-E)/den, alphai = (gg/2)/den
-        # and gamma_n^2 = Gamma_n / (2*P(Er)) for IFG=0
-        rmat_r = 0.0  # real part of R-matrix
-        rmat_i = 0.0  # imaginary part
-
-        # Add Sammy background R-matrix (real only, LBK=2)
-        for bg in sg.sammy_bg
-            r_bg = bg.p1
-            if bg.p5 != 0.0
-                r_bg -= bg.p5 * (bg.EU - bg.ED)
+        # Determine entrance channels (elastic, MT=2) and exit channels
+        nent = 0   # number of entrance channels
+        for idx in nongamma_chs
+            ch = sg.channels[idx]
+            if rml.pairs[ch.ipp].MT == 2
+                nent += 1
             end
-            r_bg += (bg.p2 + bg.p3 * E) * E
-            if bg.p4 != 0.0 || bg.p5 != 0.0
-                num = bg.EU - E
-                den = E - bg.ED
-                if num > 0.0 && den > 0.0
-                    r_bg -= (bg.p4 + bg.p5 * E) * log(num / den)
+        end
+        nent == 0 && continue
+
+        # Statistical weight factor: goj = (2J+1) / ((2*IA+1)*(2*IB+1))
+        # Use the first entrance channel's particle pair for spins
+        first_ent_pp = 0
+        for idx in nongamma_chs
+            ch = sg.channels[idx]
+            if rml.pairs[ch.ipp].MT == 2
+                first_ent_pp = ch.ipp
+                break
+            end
+        end
+        ia = abs(rml.pairs[first_ent_pp].IA)
+        ib = abs(rml.pairs[first_ent_pp].IB)
+        goj = (2.0 * ajc + 1.0) / ((2.0 * ia + 1.0) * (2.0 * ib + 1.0))
+
+        # --- Compute channel-specific wavenumber parameters ---
+        # Following fxradi in samm.f90
+        zke_ch = zeros(nchan)   # k factor for each channel
+        zkfe_ch = zeros(nchan)  # k * ape (effective)
+        zkte_ch = zeros(nchan)  # k * apt (true)
+        echan_ch = zeros(nchan) # channel threshold energy
+        lpent_ch = zeros(Int, nchan)
+        ishift_ch = zeros(Int, nchan)
+        ll_ch = zeros(Int, nchan)
+        ape_ch = zeros(nchan)
+        apt_ch = zeros(nchan)
+        bnd_ch = zeros(nchan)
+
+        for (ic, idx) in enumerate(nongamma_chs)
+            ch = sg.channels[idx]
+            pp = rml.pairs[ch.ipp]
+            ll_ch[ic] = ch.l
+            ape_ch[ic] = ch.ape
+            apt_ch[ic] = ch.apt
+            bnd_ch[ic] = ch.bnd
+            lpent_ch[ic] = Int(pp.PNT)
+            ishift_ch[ic] = Int(pp.SHF)
+
+            ema_pp = pp.MA != 0.0 ? pp.MA : 1.0
+            emb_pp = pp.MB != 0.0 ? pp.MB : rml.AWR
+            aa = emb_pp / (emb_pp + ema_pp)
+
+            # Channel threshold from Q value
+            if pp.Q != 0.0
+                echan_ch[ic] = -pp.Q / alabcm
+            end
+
+            redmas = aa * ema_pp
+            z = twomhb * sqrt(redmas * factor)
+            zke_ch[ic] = z
+            zkfe_ch[ic] = z * ch.ape * 10.0  # convert fm to 10^-15 m
+            zkte_ch[ic] = z * ch.apt * 10.0
+        end
+
+        # --- Compute betapr (reduced width amplitudes) for each resonance ---
+        # Following betset in samm.f90
+        betapr = zeros(nchan, nres)
+        gbetpr2 = zeros(nres)   # |gamgam|/2
+        gbetpr3 = zeros(nres)   # (gamgam/2)^2
+
+        for ires in 1:nres
+            gg = sg.GAM[ires, 1]  # gamgam (capture width)
+            gbetpr2[ires] = abs(gg) / 2.0
+            gbetpr3[ires] = gbetpr2[ires]^2
+
+            for ic in 1:nchan
+                gam_val = sg.GAM[ires, 1 + ic]  # channel width
+                gam_val == 0.0 && continue
+
+                if lpent_ch[ic] <= 0
+                    # No penetrability calculation
+                    betapr[ic, ires] = sqrt(0.5 * abs(gam_val))
+                    if gam_val < 0.0
+                        betapr[ic, ires] = -betapr[ic, ires]
+                    end
+                else
+                    # Penetrability at resonance energy
+                    er = sg.Er[ires]
+                    ex = abs(er - echan_ch[ic])
+                    if ex != 0.0
+                        ex = sqrt(ex)
+                        rho = zkte_ch[ic] * ex
+                        lsp = ll_ch[ic]
+                        p_er = penetrability(lsp, rho)
+                        if p_er <= 0.0
+                            p_er = 1.0
+                        end
+                        betapr[ic, ires] = sqrt(0.5 * abs(gam_val) / p_er)
+                        if gam_val < 0.0
+                            betapr[ic, ires] = -betapr[ic, ires]
+                        end
+                    end
                 end
             end
-            rmat_r += r_bg
+        end
+
+        # --- Compute beta products: beta_kl = betapr_k * betapr_l ---
+        # Stored in lower-triangular packed form
+        ntriag = div(nchan * (nchan + 1), 2)
+        beta = zeros(ntriag, nres)
+        for ires in 1:nres
+            kl = 0
+            for ik in 1:nchan
+                for il in 1:ik
+                    kl += 1
+                    beta[kl, ires] = betapr[il, ires] * betapr[ik, ires]
+                end
+            end
+        end
+
+        # --- Energy-dependent part: alphar, alphai ---
+        # Following abpart in samm.f90
+        # alphar = (Er - E) / ((Er - E)^2 + (gamgam/2)^2)
+        # alphai = (gamgam/2) / ((Er - E)^2 + (gamgam/2)^2)
+        alphar_v = zeros(nres)
+        alphai_v = zeros(nres)
+        for ires in 1:nres
+            diff = sg.Er[ires] - E
+            den = diff * diff + gbetpr3[ires]
+            if den != 0.0
+                alphar_v[ires] = diff / den
+                alphai_v[ires] = gbetpr2[ires] / den
+            end
+        end
+
+        # --- Build R-matrix (lower-triangular packed complex) ---
+        # Following setr in samm.f90
+        rmat_r = zeros(ntriag)
+        rmat_i = zeros(ntriag)
+
+        # Add background R-matrix elements on diagonal
+        for bg in sg.sammy_bg
+            # bg.LCH is the channel number (1-based, includes gamma)
+            # In the ENDF data, channel 1 is gamma. So non-gamma channel
+            # index in our array is bg.LCH - 1 (since we stripped gamma).
+            bg_ch = bg.LCH - 1
+            if bg_ch < 1 || bg_ch > nchan
+                continue
+            end
+            # Diagonal index in packed lower-triangular
+            diag_idx = div(bg_ch * (bg_ch + 1), 2)
+
+            if bg.LBK == 2
+                # Sammy parametrization
+                r_bg = bg.p1
+                if bg.p5 != 0.0
+                    r_bg -= bg.p5 * (bg.EU - bg.ED)
+                end
+                r_bg += (bg.p2 + bg.p3 * E) * E
+                if bg.p4 != 0.0 || bg.p5 != 0.0
+                    num_v = bg.EU - E
+                    den_v = E - bg.ED
+                    if num_v > 0.0 && den_v > 0.0
+                        r_bg -= (bg.p4 + bg.p5 * E) * log(num_v / den_v)
+                    end
+                end
+                rmat_r[diag_idx] += r_bg
+            elseif bg.LBK == 3
+                # Frohner parametrization
+                esum = bg.ED + bg.EU
+                ediff = bg.EU - bg.ED
+                rmat_r[diag_idx] += bg.p1 + 2.0 * bg.p2 * atanh((2.0 * E - esum) / ediff)
+                rmat_i[diag_idx] += bg.p3 / ediff / (1.0 - ((2.0 * E - esum) / ediff)^2)
+            end
         end
 
         # Add resonance contributions
-        for ir in 1:nres
-            er = sg.Er[ir]
-            er == 0.0 && continue
+        for ires in 1:nres
+            kl = 0
+            for ik in 1:nchan
+                for il in 1:ik
+                    kl += 1
+                    b = beta[kl, ires]
+                    if E > echan_ch[ik] && E > echan_ch[il] && b != 0.0
+                        rmat_r[kl] += alphar_v[ires] * b
+                        rmat_i[kl] += alphai_v[ires] * b
+                    end
+                end
+            end
+        end
 
-            gam_el = sg.GAM[ir, elastic_ch]
-            gam_cap = capture_ch > 0 ? sg.GAM[ir, capture_ch] : 0.0
+        # Check if R-matrix is all zeros
+        lrmat = all(rmat_r .== 0.0) && all(rmat_i .== 0.0) ? 1 : 0
 
-            if rml.IFG == 0
-                # GAM = formal widths: Gamma_n and Gamma_gamma
-                gn = gam_el
-                gg = gam_cap
+        # --- Build Y-matrix = L^{-1} - R, compute penetrability/phase ---
+        # Following setr in samm.f90
+        ymat_r = copy(-rmat_r)
+        ymat_i = copy(-rmat_i)
 
-                # Reduced width amplitude squared: gamma_n^2 = Gamma_n / (2*P(Er))
-                rho_r = cwaven * arat * sqrt(abs(er)) * ra
-                per = penetrability(ll, rho_r)
-                per == 0.0 && continue
-                gamma_n2 = abs(gn) / (2.0 * per)
-                if gn < 0.0; gamma_n2 = -gamma_n2; end
+        rootp_ch = ones(nchan)
+        elinvr_ch = zeros(nchan)
+        elinvi_ch = fill(-1.0, nchan)
+        sinsqr_ch = zeros(nchan)
+        sin2ph_ch = zeros(nchan)
 
-                # R-matrix: R_nn += gamma_n^2 * (alphar + i*alphai)
-                diff = er - E
-                den_val = diff * diff + 0.25 * gg * gg
-                den_val == 0.0 && continue
-                alphar = diff / den_val
-                alphai = 0.5 * gg / den_val
+        for ic in 1:nchan
+            ii = div(ic * (ic + 1), 2)  # diagonal index
+            if E > echan_ch[ic]
+                if lpent_ch[ic] <= 0
+                    # No penetrability calculation
+                    ymat_i[ii] -= 1.0
+                else
+                    ex = sqrt(E - echan_ch[ic])
+                    rho = zkte_ch[ic] * ex
+                    rhof = zkfe_ch[ic] * ex
+                    lsp = ll_ch[ic]
 
-                rmat_r += gamma_n2 * alphar
-                rmat_i += gamma_n2 * alphai
+                    # Phase shift (from effective radius)
+                    phi_ch = phase_shift(lsp, rhof)
+                    sp = sin(phi_ch)
+                    cp = cos(phi_ch)
+                    sinsqr_ch[ic] = sp * sp
+                    sin2ph_ch[ic] = 2.0 * cp * sp
+
+                    # Penetrability and shift (from true radius)
+                    p_val = penetrability(lsp, rho)
+                    s_val = shift_factor(lsp, rho)
+
+                    rootp_ch[ic] = sqrt(p_val)
+
+                    # L^{-1} = 1/(S - B + iP) where B = boundary condition
+                    bnd = bnd_ch[ic]
+                    gg_val = ishift_ch[ic] > 0 ? s_val - bnd : -bnd
+                    hh_val = p_val
+
+                    # Compute g + ih = 1/(gg + i*hh) = (gg - i*hh)/(gg^2+hh^2)
+                    if hh_val <= 1.0e-35
+                        hh_val = 0.0
+                    end
+
+                    if gg_val == 0.0 && hh_val == 0.0
+                        # iffy case: very small, skip
+                        elinvr_ch[ic] = 0.0
+                        elinvi_ch[ic] = -1.0
+                        ymat_i[ii] -= 1.0
+                    elseif gg_val == 0.0
+                        elinvr_ch[ic] = 0.0
+                        elinvi_ch[ic] = -1.0 / hh_val
+                        ymat_r[ii] += 0.0
+                        ymat_i[ii] += -1.0 / hh_val
+                    elseif hh_val == 0.0
+                        elinvr_ch[ic] = 1.0 / gg_val
+                        elinvi_ch[ic] = 0.0
+                        ymat_r[ii] += 1.0 / gg_val
+                        ymat_i[ii] += 0.0
+                    else
+                        d = hh_val^2 + gg_val^2
+                        g_inv = gg_val / d
+                        h_inv = -hh_val / d
+                        elinvr_ch[ic] = g_inv
+                        elinvi_ch[ic] = h_inv
+                        ymat_r[ii] += g_inv
+                        ymat_i[ii] += h_inv
+                    end
+                end
             else
-                # IFG=1: gamma values are reduced width amplitudes
-                gamma_n2 = gam_el * gam_el
-                gam_cap_sq = gam_cap * gam_cap
-                diff = er - E
-                den_val = diff * diff + 0.25 * gam_cap_sq * gam_cap_sq
-                den_val == 0.0 && continue
-                alphar = diff / den_val
-                alphai = 0.5 * gam_cap_sq / den_val
-                rmat_r += gamma_n2 * alphar
-                rmat_i += gamma_n2 * alphai
+                # Below threshold: channel is closed
+                rootp_ch[ic] = 0.0
+                elinvr_ch[ic] = 1.0
+                elinvi_ch[ic] = 0.0
             end
         end
 
-        # Full 2-channel R-matrix calculation (elastic + eliminated capture)
-        # Build the R-matrix elements: R_cc, R_cn, R_nn
-        # Channel ordering: c=capture (1), n=elastic (2)
-        rmat_cc_r = 0.0; rmat_cc_i = 0.0  # capture-capture
-        rmat_cn_r = 0.0; rmat_cn_i = 0.0  # capture-elastic (off-diagonal)
-        rmat_nn_r = rmat_r; rmat_nn_i = rmat_i  # elastic-elastic (already has bg + resonance)
-
-        # Add capture-capture and capture-elastic R-matrix elements from resonances
-        for ir in 1:nres
-            er = sg.Er[ir]
-            er == 0.0 && continue
-
-            gam_el_raw = sg.GAM[ir, elastic_ch]
-            gam_cap_raw = capture_ch > 0 ? sg.GAM[ir, capture_ch] : 0.0
-
-            if rml.IFG == 0
-                gn = gam_el_raw
-                gg = gam_cap_raw
-
-                rho_r = cwaven * arat * sqrt(abs(er)) * ra
-                per = penetrability(ll, rho_r)
-                per == 0.0 && continue
-
-                gamma_n2 = abs(gn) / (2.0 * per)
-                gamma_n_sign = gn < 0.0 ? -1.0 : 1.0
-
-                # For capture: gamma_cap^2 = Gamma_gamma/2 (no penetrability)
-                gamma_c2 = abs(gg) / 2.0
-                gamma_c_sign = gg < 0.0 ? -1.0 : 1.0
-
-                gamma_cn = gamma_n_sign * sqrt(abs(gamma_n2)) *
-                           gamma_c_sign * sqrt(abs(gamma_c2))
-
-                diff = er - E
-                den_val = diff * diff + 0.25 * gg * gg
-                den_val == 0.0 && continue
-
-                # Note: for the R-matrix alpha, we DON'T include Gamma_gamma
-                # in the denominator. The capture width goes into R_cc.
-                # The den is just (Er-E)^2 + capture_width term
-                # Actually, in the ENDF RML format, the denominator should
-                # NOT have the gg^2/4 term -- that's for the BW approximation.
-                # The R-matrix is R = sum gamma*gamma / (Er - E)
-                # No imaginary part in denominator! The capture is eliminated
-                # through the Y-matrix formalism, not the R-matrix.
-                alphar_simple = diff / (diff * diff)  # = 1/(Er-E)... but singular at resonance
-                # Actually the correct R-matrix denominator is just (Er-E):
-                # R_kl = sum_r gamma_k_r * gamma_l_r / (Er - E)
-                # This is real-valued.
-                inv_diff = 1.0 / diff  # This can blow up at resonance
-
-                rmat_cc_r += gamma_c2 * inv_diff
-                rmat_cn_r += gamma_cn * inv_diff
-                # rmat_nn was already accumulated above with the gg denominator...
-                # but that was WRONG. Let me redo.
+        # Ensure diagonal elements are not zero (for inversion)
+        if lrmat != 1
+            for ic in 1:nchan
+                ii = div(ic * (ic + 1), 2)
+                if ymat_r[ii] == 0.0 && ymat_i[ii] == 0.0
+                    ymat_r[ii] = 1.0
+                end
             end
         end
 
-        # Actually, I realize this approach is getting too complex and error-prone.
-        # Let me go back to the simple approach that matches the LRF=3 code,
-        # which already works for non-fissile materials.
-        # The key: the LRF=3 code computes R_eff = sum (gg/4)/(den) * a1^2
-        # which is the R-function after Cauchy elimination of the capture channel.
-        # I just need to add the Sammy background correctly.
-        #
-        # The Sammy background contributes to R_nn (elastic diagonal) BEFORE
-        # the capture elimination. After elimination, R_eff = R_nn_eff where
-        # the capture has been absorbed into the denominator.
-        #
-        # For the non-fissile case with Cauchy elimination:
-        # R_eff = R_bg + sum_r gamma_n^2 * (gg/2 + i*(Er-E)) / ((Er-E)^2 + (gg/2)^2)
-        #       = R_bg + r11 + i*s11 (from original code)
-        #
-        # But the background R_bg should NOT go through the Cauchy denominator.
-        # The correct formula is:
-        # R_eff = R_bg + sum_r gamma_n^2(E) / (Er - E - i*gg/2)
-        #       where gamma_n^2(E) = gamma_n^2 * P(E) / P(Er) ... wait no
-        #
-        # The LRF=3 R-function is exactly:
-        # R = sum_r a1^2 / (2*(Er-E-i*gg/2))
-        # where a1 = sqrt(Gamma_n * P(E)/P(Er))
-        # This includes the P(E) factor, making it a modified R-function.
-        #
-        # The background R_bg is for the UNMODIFIED R-matrix (no P factor).
-        # To include background: R_total = P(E) * R_bg + R_resonance_modified
-        #
-        # So: r11_total = P(E) * R_bg + r11_resonance
-        #     s11_total = s11_resonance (background has no imaginary part)
+        # --- Invert Y-matrix ---
+        # If R-matrix is zero, XXXX is zero (no resonance contribution)
+        xxxxr = zeros(ntriag)
+        xxxxi = zeros(ntriag)
 
-        # Recompute with correct background scaling:
-        # r11 already has the resonance contribution (from above).
-        # Add background scaled by penetrability.
-        r11_with_bg = rmat_r   # resonance contribution (from the loop above)
-        # Wait, rmat_r has the background already mixed in.
-        # Let me separate them.
+        if lrmat != 1
+            # Build complex Y-matrix (full symmetric) for inversion
+            Y = zeros(ComplexF64, nchan, nchan)
+            for ik in 1:nchan
+                for il in 1:ik
+                    idx = div(ik * (ik - 1), 2) + il
+                    Y[ik, il] = complex(ymat_r[idx], ymat_i[idx])
+                    Y[il, ik] = Y[ik, il]  # symmetric
+                end
+            end
 
-        # This is getting circular. Let me just use a clean approach:
-        # Separate background (real R-matrix, no P factor needed for Cauchy-eliminated form)
-        # from resonances (already in Cauchy form with P factor).
+            # Invert Y
+            Yinv = inv(Y)
 
-        # Compute R_bg (already done above in rmat_r before resonance loop)
-        # Compute resonance R_eff (as in LRF=3 code)
-        # Combine: R_total = pe * R_bg + R_resonance_eff
-        # Then proceed with collision matrix as before.
+            # Build complex R-matrix (full symmetric) for multiplication
+            R = zeros(ComplexF64, nchan, nchan)
+            for ik in 1:nchan
+                for il in 1:ik
+                    idx = div(ik * (ik - 1), 2) + il
+                    R[ik, il] = complex(rmat_r[idx], rmat_i[idx])
+                    R[il, ik] = R[ik, il]
+                end
+            end
 
-        # Actually, let me re-examine the Fortran code more carefully.
-        # In `setr`, the R-matrix `rmat` is built as:
-        #   rmat_nn = R_bg + sum_r gamma_n^2 * (alphar + i*alphai)
-        # where alphar = (Er-E)/den, alphai = (gg/2)/den
-        # and gamma_n^2 = Gamma_n/(2*P(Er))
-        #
-        # Then Y_nn = (S+iP) - rmat_nn
-        # and U = exp(2iphi) * (2*P*Y^{-1} - 1)
-        #
-        # The Schur complement for the 2x2 case:
-        # Y_nn_eff = Y_nn - Y_nc * Y_cc^{-1} * Y_cn
-        #
-        # Y_cc = -R_cc + (0-i*1) = -(R_cc_r + i*R_cc_i) - i
-        #       = -R_cc_r + i*(-R_cc_i - 1)
-        # Y_cn = -R_cn
-        #
-        # For the RM approximation, we use the Cauchy trick to avoid
-        # the 2x2 inversion. The result is that the effective R-function
-        # for the elastic channel is:
-        #
-        # R_eff_nn = R_bg + sum_r gamma_n^2 * 1/(Er - E - i*gg/2)
-        #
-        # where gg/2 effectively appears from the capture elimination.
-        #
-        # Then the modified R-function (with P factor) is:
-        # r11 = Re(R_eff_nn) (real part with capture absorption)
-        # s11 = Im(R_eff_nn) (imaginary part)
-        #
-        # And Y_nn = S + iP - r11 - i*s11
-        # U_nn = exp(2iphi) * (2*P / Y_nn - 1)
-        #
-        # But wait, the R_bg is in the unmodified basis (gamma_n^2, not gamma_n^2*P/P_er).
-        # The R_resonance is in the modified basis (includes P(E)/P(Er) factor).
-        # These can't be simply added.
-        #
-        # The correct treatment: build the FULL R-matrix in the channel basis
-        # (with background), then form Y, then extract U.
-        # For 2x2 (capture eliminated):
-        # Y_nn = S + iP - R_nn_full
-        # Y_cc = -i (for eliminated capture)
-        # Y_cn = -R_cn
-        #
-        # Y_nn_eff = Y_nn - Y_cn * Y_cc^{-1} * Y_cn
-        #          = Y_nn - R_cn^2 * i (since Y_cc^{-1} = 1/(-i) = i)
-        #          = (S - R_nn_r) + i*(P - R_nn_i) - i*R_cn_r^2 + R_cn_i^2
-        #          = (S - R_nn_r + R_cn_i^2) + i*(P - R_nn_i - R_cn_r^2)
-        # For the simple case where R is real: R_nn_i=0, R_cn_i=0:
-        #          = (S - R_nn_r) + i*(P - R_cn_r^2)
-        #
-        # This doesn't match the Cauchy approach. Let me reconsider.
+            # XQ = Yinv * R
+            XQ = Yinv * R
 
-        # I think the cleanest approach is the simple one from the LRF=3 code.
-        # The LRF=3 R-function (Cauchy eliminated form):
-        #   R_eff = sum_r a1^2 * (gg/4 + i*(Er-E)/2) / ((Er-E)^2 + (gg/2)^2)
-        # is EXACTLY correct, and the background R_bg adds to the R-matrix
-        # BEFORE the penetrability weighting.
-        #
-        # In the Fortran NJOY, the Y-matrix is:
-        #   Y = L - R  where R includes background + resonances in channel basis
-        #
-        # For the collision matrix U_nn, the formula is:
-        #   U_nn = exp(2iphi) * (2*rootp * (Y^-1)_nn * rootp - 1)
-        # where rootp = sqrt(P)
-        #
-        # For 2x2 with eliminated capture:
-        #   (Y^-1)_nn = 1 / (Y_nn - Y_nc * Y_cc^-1 * Y_cn)
-        #
-        # where Y_nn = S+iP - R_nn_bg - R_nn_res
-        #       Y_cc = 0-i - R_cc_res (capture has no pen, just -i on diag)
-        #       Y_nc = -R_nc_res
-        #
-        # After Schur complement and simplification, the effective 1-channel
-        # Y is:
-        #   Y_eff = S+iP - R_nn_bg - R_nn_eff_res
-        #
-        # where R_nn_eff_res includes the capture elimination.
-        # The capture elimination gives the standard RM formula:
-        #   R_nn_eff_res = sum_r gamma_n^2 * (gg/2 - i*(Er-E)) / ((Er-E)^2+(gg/2)^2)
-        #   (note the sign convention)
-        #
-        # Then U_nn = exp(2iphi) * (2*P*Y_eff^-1 - 1)
-
-        # Modified R-function (LRF=3 style with Cauchy-eliminated capture)
-        # Note: Sammy background R-matrix (LBK=2) is stored but not yet
-        # applied in this simplified evaluator. The full SAMMY formulation
-        # requires multi-channel R-matrix inversion which is beyond the
-        # scope of this implementation. The resonance contribution alone
-        # provides a reasonable approximation for most applications.
-        r11 = 0.0
-        s11 = 0.0
-
-        for ir in 1:nres
-            er = sg.Er[ir]
-            er == 0.0 && continue
-            gam_el_val = sg.GAM[ir, elastic_ch]
-            gam_cap_val = capture_ch > 0 ? sg.GAM[ir, capture_ch] : 0.0
-
-            if rml.IFG == 0
-                gn = gam_el_val; gg = gam_cap_val
-                rho_r = cwaven * arat * sqrt(abs(er)) * ra
-                per_r = penetrability(ll, rho_r)
-                per_r == 0.0 && continue
-
-                a1 = sqrt(abs(gn) * pe / per_r)
-                if gn < 0.0; a1 = -a1; end
-
-                diff = er - E
-                den_val = diff * diff + 0.25 * gg * gg
-                den_val == 0.0 && continue
-                de2 = 0.5 * diff / den_val
-                gg4 = 0.25 * gg / den_val
-
-                r11 += gg4 * a1 * a1
-                s11 -= de2 * a1 * a1
+            # XXXX = sqrt(P)/L * XQ * sqrt(P) (symmetric, packed)
+            for ii in 1:nchan
+                plr = rootp_ch[ii] * elinvr_ch[ii]
+                pli = rootp_ch[ii] * elinvi_ch[ii]
+                pl = complex(plr, pli)
+                for jj in 1:ii
+                    idx = div(ii * (ii - 1), 2) + jj
+                    val = rootp_ch[jj] * pl * XQ[jj, ii]
+                    xxxxr[idx] = real(val)
+                    xxxxi[idx] = imag(val)
+                end
             end
         end
 
-        # Collision matrix (same as LRF=3 R-function path)
-        dd = r11
-        rr = 1.0 + dd
-        ss = s11
-        amag = rr^2 + ss^2
-        amag == 0.0 && continue
+        # --- Extract cross sections from XXXX (following sectio) ---
+        crss_elastic = 0.0
+        crss_absorb = 0.0
 
-        rri = rr / amag
-        ssi = -ss / amag
+        # Elastic: crss(1) = g * [sin^2(phi)*(1-2*XXXX_i) - sin(2phi)*XXXX_r + |XXXX|^2] / zke^2
+        # Absorption: crss(2) = g * [XXXX_i - |XXXX|^2] / zke^2
+        ient = 0
+        for ic in 1:nchan
+            ch = sg.channels[nongamma_chs[ic]]
+            if rml.pairs[ch.ipp].MT != 2
+                continue
+            end
+            ient += 1
 
-        uur = p1 * (2.0 * rri - 1.0) + 2.0 * p2 * ssi
-        uui = p2 * (1.0 - 2.0 * rri) + 2.0 * p1 * ssi
+            zz = zke_ch[ic]^2
+            ii_diag = div(ic * (ic + 1), 2)
 
-        small_val = 3.0e-4
-        termt = 0.0; termn = 0.0
-        if abs(dd) < small_val && abs(phi) < small_val
-            xx = 2.0 * dd
-            xx += 2.0 * (dd^2 + ss^2 + phi^2 + p2 * ss)
-            xx -= 2.0 * phi^2 * (dd^2 + ss^2)
-            xx /= amag
-            termt = 2.0 * gj * xx
-            termn = gj * (xx^2 + uui^2)
-        else
-            termt = 2.0 * gj * (1.0 - uur)
-            termn = gj * ((1.0 - uur)^2 + uui^2)
+            # Elastic term (from entrance channel)
+            termn = sinsqr_ch[ic] * (1.0 - 2.0 * xxxxi[ii_diag]) -
+                    sin2ph_ch[ic] * xxxxr[ii_diag]
+            termn /= zz
+
+            # Sum |XXXX_ij|^2 for all j <= i (entrance channels)
+            for jc in 1:ic
+                ij = div(ic * (ic - 1), 2) + jc
+                ar = (xxxxr[ij]^2 + xxxxi[ij]^2) / zz
+                if ic != jc
+                    ar += ar
+                end
+                termn += ar
+            end
+            crss_elastic += termn
+
+            # Absorption term
+            terma = xxxxi[ii_diag] / zz
+            for jc in 1:ic
+                ij = div(ic * (ic - 1), 2) + jc
+                ar = -(xxxxr[ij]^2 + xxxxi[ij]^2) / zz
+                if ic != jc
+                    ar += ar
+                end
+                terma += ar
+            end
+            crss_absorb += terma
+        end
+        crss_elastic *= goj
+        crss_absorb *= goj
+
+        # Other reaction channels (fission etc.)
+        crss_other = zeros(length(rml.pairs))
+        next_count = 0
+        for ic in 1:nchan
+            ch = sg.channels[nongamma_chs[ic]]
+            mt_ch = rml.pairs[ch.ipp].MT
+            if mt_ch == 2 || mt_ch == 102
+                continue
+            end
+            # This is an exit-only channel
+            for jc in 1:nchan
+                ch_j = sg.channels[nongamma_chs[jc]]
+                if rml.pairs[ch_j.ipp].MT != 2
+                    continue
+                end
+                # jc is entrance, ic is exit
+                if ic > jc
+                    ij = div(ic * (ic - 1), 2) + jc
+                else
+                    ij = div(jc * (jc - 1), 2) + ic
+                end
+                zz = zke_ch[jc]^2
+                crss_other[ch.ipp] += (xxxxr[ij]^2 + xxxxi[ij]^2) / zz
+            end
+        end
+        for ipp in 1:length(rml.pairs)
+            crss_other[ipp] *= goj
         end
 
-        termg = termt - termn
-        sig_elastic += termn
-        sig_capture += termg
-        sig_total += termt
+        # Map to cross section components
+        # sigmas(1) = elastic, sigmas(2) = absorption (capture + other)
+        # Normalization: fourpi / E (applied later)
+        norm = fourpi / E
+        sig_elastic += crss_elastic * norm
+        sig_capture += crss_absorb * norm
+
+        # Subtract other channel contributions from capture
+        for ipp in 1:length(rml.pairs)
+            mt_pp = rml.pairs[ipp].MT
+            if mt_pp == 18
+                sig_fission += crss_other[ipp] * norm
+                sig_capture -= crss_other[ipp] * norm
+            elseif mt_pp != 2 && mt_pp != 102
+                sig_capture -= crss_other[ipp] * norm
+            end
+        end
     end
 
-    sig_total *= pifac
-    sig_elastic *= pifac
-    sig_fission *= pifac
-    sig_capture *= pifac
+    sig_total = sig_elastic + sig_capture + sig_fission
 
     return CrossSections(sig_total, sig_elastic, sig_fission, sig_capture)
 end

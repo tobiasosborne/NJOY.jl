@@ -229,6 +229,12 @@ function cross_section(E::Real, range::ResonanceRange{ReichMooreParameters};
     return cross_section_rm(E, range.parameters, range)
 end
 
+function cross_section(E::Real, range::ResonanceRange{SAMMYParameters};
+                       temperature::Real=0.0,
+                       table::Union{Nothing,FaddeevaTable}=nothing)
+    return cross_section_sammy(E, range.parameters, range)
+end
+
 function cross_section(E::Real, range::ResonanceRange;
                        temperature::Real=0.0,
                        table::Union{Nothing,FaddeevaTable}=nothing)

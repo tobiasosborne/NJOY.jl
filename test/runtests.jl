@@ -1354,6 +1354,75 @@ using LinearAlgebra
     end
 
     # ======================================================================
+    # SAMMY R-Matrix Limited (LRF=7) -- Sr-88
+    # ======================================================================
+    @testset "SAMMY LRF=7 -- Sr-88 read and evaluate" begin
+        endf_file = joinpath(@__DIR__, "..", "njoy-reference", "tests", "resources",
+                             "n-038_Sr_088-ENDF8.1.endf")
+        if isfile(endf_file)
+            io = open(endf_file, "r")
+            find_section(io, 2, 151)
+            mf2 = read_mf2(io)
+            close(io)
+
+            @test length(mf2.isotopes) == 1
+            @test length(mf2.isotopes[1].ranges) == 1
+
+            rng = mf2.isotopes[1].ranges[1]
+            @test rng.LRF == Int32(7)
+            @test rng.parameters isa SAMMYParameters
+
+            params = rng.parameters
+            @test params.KRM == Int32(3)  # Reich-Moore
+            @test length(params.particle_pairs) == 2
+            @test length(params.spin_groups) == 7
+
+            # Verify particle pairs
+            @test params.particle_pairs[1].mt == Int32(102)  # capture
+            @test params.particle_pairs[2].mt == Int32(2)    # elastic
+
+            # Verify total resonance count
+            total_res = sum(sg.nres for sg in params.spin_groups)
+            @test total_res > 400  # Sr-88 has ~443 resonances
+
+            # Cross section at thermal (0.0253 eV)
+            xs = cross_section_sammy(0.0253, params, rng)
+            @test xs.total > 6.0  # expected ~7.7 barns
+            @test xs.total < 10.0
+            @test xs.elastic > 6.0
+            @test xs.elastic < 10.0
+            @test xs.capture > 0.001
+            @test xs.capture < 0.01
+            @test xs.fission == 0.0
+
+            # Verify elastic matches NJOY reference to high accuracy
+            # (MF3 background does not affect elastic for Sr-88)
+            @test abs(xs.elastic - 7.709123) / 7.709123 < 0.001  # <0.1%
+
+            # Cross section at 1e-5 eV
+            xs_low = cross_section_sammy(1e-5, params, rng)
+            @test xs_low.total > 8.0  # expected ~9.0 barns
+            @test xs_low.total < 10.0
+            @test abs(xs_low.elastic - 8.84321) / 8.84321 < 0.001  # <0.1%
+
+            # Near a resonance (13840 eV) -- should see large peak
+            xs_res = cross_section_sammy(13840.0, params, rng)
+            @test xs_res.total > 50.0  # resonance peak
+
+            # Verify dispatch works through cross_section()
+            xs_disp = cross_section(0.0253, rng)
+            @test xs_disp.total == xs.total
+            @test xs_disp.elastic == xs.elastic
+
+            # Verify build_evaluator pipeline works
+            eval_fn = build_evaluator(mf2)
+            t, e, f, c = eval_fn(0.0253)
+            @test t > 6.0
+            @test e > 6.0
+        end
+    end
+
+    # ======================================================================
     # NRO=1 energy-dependent scattering radius storage (NJOY.jl-o96)
     # ======================================================================
     @testset "NRO=1 energy-dependent AP storage" begin
@@ -7281,3 +7350,6 @@ end  # @testset "NJOY.jl"
 
 # Integration tests against NJOY2016 reference outputs (separate file)
 include("integration_tests.jl")
+
+# Full NJOY validation pipeline (85 tests against NJOY2016 reference tapes)
+include("validation/run_all_tests.jl")

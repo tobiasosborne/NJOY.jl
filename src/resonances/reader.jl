@@ -100,6 +100,11 @@ function read_mf2(io::IO)
                 params, ap_tab = _read_rm_params(io, NRO, NAPS)
                 push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params, ap_tab))
 
+            elseif LRU == 1 && LRF == 7
+                # SAMMY R-Matrix Limited
+                params = _read_sammy_params(io, NAPS)
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
+
             else
                 # Unsupported formalisms (Adler-Adler, URR, etc.)
                 # Skip by reading lines until the next range or end of section.
@@ -305,6 +310,227 @@ function _read_rm_params(io::IO, NRO::Int32, NAPS::Int32)
                                 Er_all, AJ_all,
                                 Gn_all, Gg_all, Gfa_all, Gfb_all)
     return params, ap_tab
+end
+
+"""
+Read SAMMY R-Matrix Limited (LRF=7) resonance parameters.
+
+Format (from ENDF-102 and NJOY's rdsammy for mode=7):
+  CONT: SPI, AP, IFG, KRM, NJS, 0    (NJS = number of spin groups)
+  LIST: particle pairs (NPP pairs, each 12 values)
+  For each spin group:
+    LIST: spin group header + channel definitions
+    LIST: resonance parameters (Er, gamgam, gamma_1, ..., gamma_nchan)
+    [optional: KBK background R-matrix CONT+LIST records per channel]
+"""
+function _read_sammy_params(io::IO, NAPS::Int32)
+    # Parameters CONT: SPI, AP, IFG, KRM, NJS, 0
+    params_cont = read_cont(io)
+    SPI = params_cont.C1
+    AP = params_cont.C2
+    IFG = params_cont.L1
+    KRM = params_cont.L2
+    NJS = Int(params_cont.N1)  # number of spin groups
+
+    # Particle-pair LIST record
+    pp_lst = read_list(io)
+    NPP = Int(pp_lst.L1)
+
+    particle_pairs = SAMMYParticlePair[]
+    for i in 1:NPP
+        base = (i - 1) * 12
+        ema   = pp_lst.data[base + 1]
+        emb   = pp_lst.data[base + 2]
+        kza   = Int32(round(pp_lst.data[base + 3]))
+        kzb   = Int32(round(pp_lst.data[base + 4]))
+        spina = pp_lst.data[base + 5]
+        spinb = pp_lst.data[base + 6]
+        qqq   = pp_lst.data[base + 7]
+        lpent = Int32(round(pp_lst.data[base + 8]))
+        ishift = Int32(round(pp_lst.data[base + 9]))
+        mt    = Int32(round(pp_lst.data[base + 10]))
+        pa    = pp_lst.data[base + 11]
+        pb    = pp_lst.data[base + 12]
+        # Apply default masses from particle-pair definitions
+        if mt == 2  # neutron elastic
+            if ema == 0.0; ema = 1.0; end
+            if spina == 0.0; spina = 0.5; end
+            lpent = Int32(1)
+        elseif mt == 18  # fission
+            lpent = Int32(0)
+        elseif mt == 102  # capture
+            # gamma channel: defaults are zero masses
+        end
+        push!(particle_pairs, SAMMYParticlePair(ema, emb, kza, kzb, spina, spinb,
+                                                qqq, lpent, ishift, mt, pa, pb))
+    end
+
+    # Find neutron particle-pair (mt=2) to get target spin from its spinb
+    target_spin = SPI
+    for pp in particle_pairs
+        if pp.mt == 2
+            target_spin = pp.spinb
+            break
+        end
+    end
+
+    spin_groups = SAMMYSpinGroup[]
+
+    for ig in 1:NJS
+        # Spin group header LIST: AJ, parity, KBK, 0, NCH_total*6, NCH_total
+        sg_lst = read_list(io)
+        AJ = sg_lst.C1
+        parity = sg_lst.C2
+        KBK = sg_lst.L1  # number of background R-matrix channels
+        nch_plus1 = Int(sg_lst.N2)  # NCH+1 (includes eliminated capture)
+
+        # Read channel definitions: first entry is the eliminated capture channel
+        ipp_arr = Int32[]
+        lspin_arr = Int32[]
+        chspin_arr = Float64[]
+        bound_arr = Float64[]
+        rdeff_arr = Float64[]
+        rdtru_arr = Float64[]
+        igamma = 0  # index of eliminated capture channel within the full list
+
+        nchan = 0
+        for ich in 1:nch_plus1
+            base = (ich - 1) * 6
+            ippx = Int32(round(sg_lst.data[base + 1]))
+            if ippx == 1  # this is the eliminated capture channel (particle pair 1)
+                igamma = ich
+            else
+                nchan += 1
+                push!(ipp_arr, ippx)
+                push!(lspin_arr, Int32(round(sg_lst.data[base + 2])))
+                push!(chspin_arr, sg_lst.data[base + 3])
+                push!(bound_arr, sg_lst.data[base + 4])
+                push!(rdeff_arr, sg_lst.data[base + 5])
+                push!(rdtru_arr, sg_lst.data[base + 6])
+            end
+        end
+
+        # Resonance parameter LIST: 0, 0, 0, NRES, NPL, NRES
+        res_lst = read_list(io)
+        nres = Int(res_lst.L2)
+
+        eres = Float64[]
+        gamgam = Float64[]
+        gamma_ch = [Float64[] for _ in 1:nchan]
+
+        if nres > 0
+            # Determine record width: 6 or 12 depending on nchan
+            nx = 6
+            if 2 + nchan > 6
+                nx = 12
+            end
+
+            for ir in 1:nres
+                base = (ir - 1) * nx
+                er = res_lst.data[base + 1]
+                gg = res_lst.data[base + 2]
+
+                # Channel widths are in positions 3..2+nchan
+                # But if igamma != 1, we need to rearrange
+                raw_widths = Float64[]
+                for j in 1:(nx - 2)
+                    if j <= nchan
+                        push!(raw_widths, res_lst.data[base + 2 + j])
+                    end
+                end
+
+                # Handle the case where igamma is not the first channel
+                # (need to swap gamma channel width with capture width)
+                if igamma != 1 && igamma > 0
+                    # The data was stored with capture in position igamma
+                    # and widths shifted. We need to un-swap.
+                    # igamma-1 corresponds to a channel index after excluding capture
+                    # The raw data has: [ch1, ch2, ..., gamgam_at_igamma-1, ..., chN]
+                    # But the capture width gg is for the non-eliminated channel
+                    # and the eliminated channel's width is at position igamma in the original list
+                    if igamma - 1 <= length(raw_widths)
+                        # Swap: the value at position igamma-1 in raw_widths is actually gamgam
+                        # and the listed gg is actually a channel width
+                        actual_gamgam = raw_widths[igamma - 1]
+                        for j in (igamma - 1):-1:2
+                            raw_widths[j] = raw_widths[j - 1]
+                        end
+                        raw_widths[1] = gg
+                        gg = actual_gamgam
+                    end
+                end
+
+                push!(eres, er)
+                push!(gamgam, gg)
+                for j in 1:nchan
+                    if j <= length(raw_widths)
+                        push!(gamma_ch[j], raw_widths[j])
+                    else
+                        push!(gamma_ch[j], 0.0)
+                    end
+                end
+            end
+        end
+
+        # Read background R-matrix records if KBK > 0
+        backgr_type = zeros(Int32, nchan)
+        backgr_data = [Float64[] for _ in 1:nchan]
+
+        if KBK > 0
+            for _ in 1:KBK
+                bkg_cont = read_cont(io)
+                lch = bkg_cont.L1  # channel index (1-based, includes capture)
+                lbk = bkg_cont.L2  # background type (0,1,2,3)
+
+                # Convert from full channel index (including capture) to our index
+                ch_idx = lch - 1  # subtract 1 because capture channel is removed
+                if lch == 1
+                    # This is the capture channel - skip but shouldn't happen
+                    ch_idx = 0
+                end
+
+                if lbk == 0 || ch_idx <= 0
+                    # No background or capture channel
+                    continue
+                end
+
+                if ch_idx > nchan
+                    continue
+                end
+
+                backgr_type[ch_idx] = Int32(lbk)
+
+                if lbk == 1
+                    # Tabulated background: two TAB1 records
+                    tab1_r = read_tab1(io)
+                    tab1_i = read_tab1(io)
+                    # Store as flat array: [type=1, tab_r_data..., tab_i_data...]
+                    backgr_data[ch_idx] = Float64[1.0]
+                    # For now, skip tabulated background (very rare)
+                elseif lbk == 2 || lbk == 3
+                    # Sammy (lbk=2) or Frohner (lbk=3) parametrisation: one LIST record
+                    bkg_lst = read_list(io)
+                    ed = bkg_lst.C1  # ED (lower bound energy)
+                    eu = bkg_lst.C2  # EU (upper bound energy)
+                    vals = Float64[ed, eu]
+                    for j in 1:Int(bkg_lst.N1)
+                        push!(vals, bkg_lst.data[j])
+                    end
+                    backgr_data[ch_idx] = vals
+                end
+            end
+        end
+
+        push!(spin_groups, SAMMYSpinGroup(
+            AJ, parity, Int32(nchan),
+            ipp_arr, lspin_arr, chspin_arr, bound_arr, rdeff_arr, rdtru_arr,
+            backgr_type, backgr_data,
+            Int32(nres), eres, gamgam, gamma_ch
+        ))
+    end
+
+    return SAMMYParameters(target_spin, AP, Int32(KRM), Int32(IFG),
+                           particle_pairs, spin_groups)
 end
 
 """

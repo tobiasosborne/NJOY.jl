@@ -147,6 +147,79 @@ struct AdlerAdlerParameters <: AbstractResonanceFormalism
 end
 
 # --------------------------------------------------------------------------
+# SAMMY R-Matrix Limited (LRF=7)
+# --------------------------------------------------------------------------
+
+"""
+    SAMMYParticlePair
+
+One particle-pair description from LRF=7 data. Stores masses, charges,
+spins, Q-value, penetrability/shift flags, MT, and boundary radii.
+"""
+struct SAMMYParticlePair
+    ema::Float64       # mass of particle a [amu ratio to neutron]
+    emb::Float64       # mass of particle b [amu ratio to neutron]
+    kza::Int32         # charge of particle a
+    kzb::Int32         # charge of particle b
+    spina::Float64     # spin of particle a
+    spinb::Float64     # spin of particle b
+    qqq::Float64       # Q-value [eV]
+    lpent::Int32       # penetrability flag (0=not calculated, 1=calculated)
+    ishift::Int32      # shift factor flag
+    mt::Int32          # ENDF reaction MT number
+    pa::Float64        # boundary radius a
+    pb::Float64        # boundary radius b
+end
+
+"""
+    SAMMYSpinGroup
+
+One spin-parity group from LRF=7 data. Contains channel definitions
+and resonance parameters for all resonances in this group.
+"""
+struct SAMMYSpinGroup
+    AJ::Float64                     # total angular momentum J
+    parity::Float64                 # parity (+1 or -1)
+    nchan::Int32                    # number of channels (excluding eliminated capture)
+    # Per-channel arrays (length = nchan):
+    ipp::Vector{Int32}              # particle-pair index for each channel
+    lspin::Vector{Int32}            # orbital angular momentum for each channel
+    chspin::Vector{Float64}         # channel spin for each channel
+    bound::Vector{Float64}          # boundary condition for each channel
+    rdeff::Vector{Float64}          # effective radius [fm] for each channel
+    rdtru::Vector{Float64}          # true radius [fm] for each channel
+    # Background R-matrix (LBK) per channel:
+    backgr_type::Vector{Int32}      # LBK flag per channel (0=none, 2=Sammy, 3=Frohner)
+    backgr_data::Vector{Vector{Float64}}  # background parameters per channel
+    # Resonances in this group:
+    nres::Int32                     # number of resonances
+    eres::Vector{Float64}           # resonance energies [eV]
+    gamgam::Vector{Float64}         # capture (gamma) widths [eV]
+    gamma::Vector{Vector{Float64}}  # channel widths gamma[ch][res] [eV]
+end
+
+"""
+    SAMMYParameters <: AbstractResonanceFormalism
+
+SAMMY R-Matrix Limited resonance parameters (LRF=7, KRM=3 Reich-Moore).
+
+This formalism uses the full R-matrix theory with explicit particle-pair
+and spin-group structure, supporting:
+- Multiple channels per J-value
+- Proper channel-spin coupling
+- Eliminated channels for capture
+- Background R-matrix contributions (LBK)
+"""
+struct SAMMYParameters <: AbstractResonanceFormalism
+    SPI::Float64                     # target spin
+    AP::Float64                      # scattering radius [fm]
+    KRM::Int32                       # R-matrix approximation (3=Reich-Moore)
+    IFG::Int32                       # reduced width flag (0=widths, 1=reduced widths)
+    particle_pairs::Vector{SAMMYParticlePair}
+    spin_groups::Vector{SAMMYSpinGroup}
+end
+
+# --------------------------------------------------------------------------
 # Unresolved resonance region
 # --------------------------------------------------------------------------
 
