@@ -26,13 +26,18 @@ include("endf/interpolation.jl")
 # Resonance formalisms
 include("resonances/types.jl")
 include("resonances/penetrability.jl")
-include("resonances/faddeeva.jl")
+include("resonances/faddeeva_exact.jl")
+include("resonances/faddeeva_table.jl")
 include("resonances/reader.jl")
-include("resonances/breit_wigner.jl")
+include("resonances/slbw.jl")
+include("resonances/mlbw.jl")
 include("resonances/reich_moore.jl")
 
 # Processing modules (RECONR pipeline)
 include("processing/adaptive_grid.jl")
+include("processing/reconr_types.jl")
+include("processing/reconr_evaluator.jl")
+include("processing/reconr_grid.jl")
 include("processing/reconr.jl")
 include("processing/pendf_writer.jl")
 
@@ -55,8 +60,16 @@ include("processing/group_structures.jl")
 include("processing/weight_functions.jl")
 include("processing/groupr.jl")
 
+# Processing modules (MODER -- tape management and material extraction)
+include("processing/moder.jl")
+
+# Processing modules (ERRORR -- covariance processing)
+include("processing/errorr.jl")
+
 # Output formats (ACER -- ACE format for MCNP)
 include("formats/ace_types.jl")
+include("formats/ace_neutron.jl")
+include("formats/ace_builder.jl")
 include("formats/ace_writer.jl")
 
 # Public API -- constants
@@ -150,6 +163,19 @@ export vitamin_e_weight, thermal_fission_fusion, tabulated_weight
 export get_weight_function
 export weight_flat, weight_inv_e, weight_maxwell_fission
 export group_integrate, group_average, group_average_shielded
+
+# Public API -- MODER (tape management)
+export TapeEntry, TapeDirectory, ENDFTapeSection, ENDFTapeMaterial
+export read_tape_directory, extract_material, merge_tapes
+export write_tpid, write_tend, moder_copy, materials, sections
+export validate_tape, read_endf_tape, write_endf_tape
+
+# Public API -- ERRORR (covariance processing)
+export CovarianceBlock, CovarianceMatrix, CovarianceData
+export expand_covariance_block, multigroup_covariance
+export sandwich_covariance, sensitivity_jacobian
+export is_symmetric, is_psd
+export read_mf33, ni_covariance, nc_covariance, process_covariance
 
 # Public API -- ACER (ACE format for MCNP)
 export ACEHeader, ACENeutronTable, ACETable

@@ -1,5 +1,7 @@
 using Test
 using NJOY
+using Printf
+using LinearAlgebra
 
 @testset "NJOY.jl" begin
 
@@ -3492,6 +3494,483 @@ using NJOY
                                             weight_fn=inv_e_weight)
         for g in 1:3
             @test isapprox(mgxs_large.xs[g, 1], mgxs_unshielded.xs[g, 1], rtol=1e-3)
+        end
+    end
+
+    # ======================================================================
+    # MODER (tape management)
+    # ======================================================================
+    @testset "MODER" begin
+
+        # Helper: create a minimal valid ENDF tape in an IOBuffer
+        function make_test_tape(mat::Int, mf::Int, mt::Int; tpid="Test tape")
+            buf = IOBuffer()
+            # TPID
+            println(buf, rpad(tpid, 66), "   0 0  0    0")
+            # HEAD record for one section
+            line = format_endf_float(92235.0) * format_endf_float(233.0) *
+                   lpad("0", 11) * lpad("0", 11) * lpad("0", 11) * lpad("0", 11) *
+                   @sprintf("%4d%2d%3d%5d", mat, mf, mt, 1)
+            println(buf, line)
+            # SEND record
+            line_s = format_endf_float(0.0)^2 * lpad("0",11)^4 *
+                     @sprintf("%4d%2d%3d%5d", mat, mf, 0, 99999)
+            println(buf, line_s)
+            # FEND record
+            line_f = " "^66 * @sprintf("%4d%2d%3d%5d", mat, 0, 0, 0)
+            println(buf, line_f)
+            # MEND record
+            line_m = " "^66 * @sprintf("%4d%2d%3d%5d", 0, 0, 0, 0)
+            println(buf, line_m)
+            # TEND record
+            line_t = format_endf_float(0.0)^2 * lpad("0",11)^4 *
+                     @sprintf("%4d%2d%3d%5d", -1, 0, 0, 0)
+            println(buf, line_t)
+            seekstart(buf)
+            return buf
+        end
+
+        @testset "read_tape_directory" begin
+            tape = make_test_tape(9228, 3, 1)
+            dir = read_tape_directory(tape)
+            @test length(dir) == 1
+            @test dir.entries[1].mat == 9228
+            @test dir.entries[1].mf == 3
+            @test dir.entries[1].mt == 1
+            @test strip(dir.tpid) == "Test tape"
+        end
+
+        @testset "materials and sections" begin
+            tape = make_test_tape(9228, 3, 1)
+            dir = read_tape_directory(tape)
+            mats = materials(dir)
+            @test 9228 in mats
+            secs = sections(dir, 9228)
+            @test (3, 1) in secs
+        end
+
+        @testset "extract_material" begin
+            tape = make_test_tape(9228, 3, 1)
+            seekstart(tape)
+            extracted = extract_material(tape, 9228)
+            @test !isempty(extracted)
+            @test occursin("9228", extracted)
+
+            # Material not on tape
+            seekstart(tape)
+            not_found = extract_material(tape, 1111)
+            @test isempty(not_found)
+        end
+
+        @testset "extract_material stream" begin
+            tape = make_test_tape(9228, 3, 1)
+            seekstart(tape)
+            out = IOBuffer()
+            n = extract_material(tape, 9228, out)
+            @test n > 0
+            seekstart(out)
+            content = read(out, String)
+            @test occursin("9228", content)
+        end
+
+        @testset "merge_tapes" begin
+            tape1 = make_test_tape(9228, 3, 1; tpid="Tape 1")
+            tape2 = make_test_tape(9437, 3, 2; tpid="Tape 2")
+            out = IOBuffer()
+            merge_tapes(out, tape1, tape2; tpid="Merged")
+            seekstart(out)
+            dir = read_tape_directory(out)
+            mats = materials(dir)
+            @test 9228 in mats
+            @test 9437 in mats
+            @test length(dir) >= 2
+        end
+
+        @testset "write_tpid and write_tend" begin
+            buf = IOBuffer()
+            write_tpid(buf, "My tape ID")
+            seekstart(buf)
+            line = readline(buf)
+            @test length(line) == 80
+            @test startswith(line, "My tape ID")
+
+            buf2 = IOBuffer()
+            write_tend(buf2)
+            seekstart(buf2)
+            line2 = readline(buf2)
+            p = rpad(line2, 80)
+            mat = NJOY._parse_int(p[67:70])
+            @test mat == -1
+        end
+
+        @testset "moder_copy" begin
+            tape = make_test_tape(9228, 3, 1)
+            seekstart(tape)
+            out = IOBuffer()
+            n = moder_copy(tape, out; mat=0)
+            @test n > 0
+
+            tape2 = make_test_tape(9228, 3, 1)
+            seekstart(tape2)
+            out2 = IOBuffer()
+            n2 = moder_copy(tape2, out2; mat=9228)
+            @test n2 > 0
+        end
+
+        @testset "validate_tape" begin
+            tape = make_test_tape(9228, 3, 1)
+            seekstart(tape)
+            result = validate_tape(tape)
+            @test result.valid == true
+            @test isempty(result.errors)
+
+            empty_tape = IOBuffer()
+            result2 = validate_tape(empty_tape)
+            @test result2.valid == false
+        end
+
+        @testset "TapeDirectory show" begin
+            tape = make_test_tape(9228, 3, 1)
+            dir = read_tape_directory(tape)
+            s = sprint(show, dir)
+            @test occursin("TapeDirectory", s)
+            @test occursin("1 sections", s)
+        end
+    end
+
+    # ======================================================================
+    # ERRORR (covariance processing)
+    # ======================================================================
+    @testset "ERRORR" begin
+
+        @testset "CovarianceBlock construction" begin
+            block = CovarianceBlock(1, 1, 1, 0,
+                                     [1.0, 2.0, 3.0],
+                                     [0.01, 0.02])
+            @test block.mt1 == 1
+            @test block.lb == 1
+            @test length(block.energies) == 3
+            @test length(block.data) == 2
+        end
+
+        @testset "expand_covariance_block LB=1 (diagonal)" begin
+            # 2 energy intervals: [1,2) and [2,3)
+            block = CovarianceBlock(1, 1, 1, 0,
+                                     [1.0, 2.0, 3.0],
+                                     [0.01, 0.04])
+            egrid = [1.0, 2.0, 3.0]
+            C = expand_covariance_block(block, egrid)
+            @test size(C) == (2, 2)
+            @test C[1, 1] == 0.01
+            @test C[2, 2] == 0.04
+            @test C[1, 2] == 0.0  # off-diagonal zero
+            @test C[2, 1] == 0.0
+        end
+
+        @testset "expand_covariance_block LB=5 symmetric" begin
+            # 3 bins: upper triangle has 6 elements
+            ek = [1.0, 2.0, 3.0, 4.0]
+            # Upper-tri packed: (1,1),(1,2),(1,3),(2,2),(2,3),(3,3)
+            data = [0.01, 0.002, 0.001, 0.04, 0.003, 0.09]
+            block = CovarianceBlock(1, 1, 5, 1, ek, data)
+            egrid = [1.0, 2.0, 3.0, 4.0]
+            C = expand_covariance_block(block, egrid)
+            @test size(C) == (3, 3)
+            # Diagonal
+            @test C[1, 1] == 0.01
+            @test C[2, 2] == 0.04
+            @test C[3, 3] == 0.09
+            # Symmetry
+            @test C[1, 2] == C[2, 1]
+            @test C[1, 3] == C[3, 1]
+            @test C[2, 3] == C[3, 2]
+            # Off-diagonal values
+            @test C[1, 2] == 0.002
+            @test C[1, 3] == 0.001
+            @test C[2, 3] == 0.003
+        end
+
+        @testset "expand_covariance_block LB=5 full" begin
+            ek = [1.0, 2.0, 3.0]
+            # 2x2 full matrix in row-major: [(1,1),(1,2),(2,1),(2,2)]
+            data = [0.01, 0.002, 0.003, 0.04]
+            block = CovarianceBlock(1, 1, 5, 0, ek, data)
+            egrid = [1.0, 2.0, 3.0]
+            C = expand_covariance_block(block, egrid)
+            @test size(C) == (2, 2)
+            @test C[1, 1] == 0.01
+            @test C[2, 2] == 0.04
+            @test C[1, 2] == 0.002
+            @test C[2, 1] == 0.003
+        end
+
+        @testset "multigroup_covariance" begin
+            # Simple case: 4 fine bins collapsed to 2 groups
+            ek = [1.0, 2.0, 3.0, 4.0, 5.0]
+            # Diagonal covariance, 4 values
+            data = [0.01, 0.02, 0.03, 0.04]
+            block = CovarianceBlock(1, 1, 1, 0, ek, data)
+            gbounds = [1.0, 3.0, 5.0]  # 2 groups
+            cm = multigroup_covariance([block], gbounds)
+            @test size(cm.matrix) == (2, 2)
+            @test cm.mt1 == 1
+            @test cm.mt2 == 1
+            @test cm.is_relative == true
+            # Symmetry check
+            @test is_symmetric(cm)
+        end
+
+        @testset "multigroup_covariance symmetry and PSD" begin
+            # LB=5 symmetric with known PSD data
+            ek = [1.0, 2.0, 3.0, 4.0]
+            # Make a small positive-definite matrix
+            # [0.04  0.01  0.005]
+            # [0.01  0.09  0.01 ]
+            # [0.005 0.01  0.16 ]
+            data = [0.04, 0.01, 0.005, 0.09, 0.01, 0.16]  # upper-tri packed
+            block = CovarianceBlock(1, 1, 5, 1, ek, data)
+            gbounds = [1.0, 2.5, 4.0]  # 2 groups
+            cm = multigroup_covariance([block], gbounds)
+            @test is_symmetric(cm)
+            @test is_psd(cm)
+        end
+
+        @testset "sandwich_covariance" begin
+            # 3 params, 2 groups
+            J = [1.0 0.5 0.0;
+                 0.0 0.3 1.0]
+            Cp = [0.01 0.001 0.0;
+                  0.001 0.04 0.002;
+                  0.0 0.002 0.09]
+            C = sandwich_covariance(J, Cp)
+            @test size(C) == (2, 2)
+            # Must be symmetric
+            @test isapprox(C, C', atol=1e-15)
+            # Must be PSD (Cp is PSD, so J*Cp*J' is PSD)
+            evals = eigvals(Symmetric(C))
+            @test all(evals .>= -1e-15)
+            # Manual check: C[1,1] = J[1,:]' * Cp * J[1,:]
+            expected_11 = J[1, :]' * Cp * J[1, :]
+            @test isapprox(C[1, 1], expected_11, atol=1e-14)
+        end
+
+        @testset "sandwich_covariance identity" begin
+            # J = I -> C should equal Cp
+            I3 = Matrix{Float64}(I, 3, 3)
+            Cp = [0.04 0.01 0.005;
+                  0.01 0.09 0.01;
+                  0.005 0.01 0.16]
+            C = sandwich_covariance(I3, Cp)
+            @test isapprox(C, Cp, atol=1e-14)
+        end
+
+        @testset "sensitivity_jacobian" begin
+            # sigma(E, p) = p[1] + p[2]*E  -> dsigma_g/dp[1] = 1, dsigma_g/dp[2] = E_avg
+            sigma_func(E, p) = p[1] + p[2] * E
+            params = [10.0, 0.5]
+            gbounds = [0.0, 1.0, 2.0]
+            J = sensitivity_jacobian(sigma_func, params, gbounds)
+            @test size(J) == (2, 2)
+            # dsigma/dp[1] should be ~1 for both groups
+            @test isapprox(J[1, 1], 1.0, atol=0.01)
+            @test isapprox(J[2, 1], 1.0, atol=0.01)
+            # dsigma/dp[2] should be ~E_avg for each group
+            @test isapprox(J[1, 2], 0.5, atol=0.05)  # avg E in [0,1] = 0.5
+            @test isapprox(J[2, 2], 1.5, atol=0.05)  # avg E in [1,2] = 1.5
+        end
+
+        @testset "sensitivity + sandwich roundtrip" begin
+            # If we know cov(params), the sandwich formula should give
+            # a consistent multigroup covariance
+            sigma_func(E, p) = p[1] * exp(-E / p[2])
+            params = [100.0, 5.0]
+            gbounds = [0.0, 2.0, 5.0, 10.0]
+            Cp = [1.0 0.0; 0.0 0.25]  # param uncertainties
+            J = sensitivity_jacobian(sigma_func, params, gbounds)
+            C = sandwich_covariance(J, Cp)
+            @test size(C) == (3, 3)
+            @test isapprox(C, C', atol=1e-12)  # symmetric
+            evals = eigvals(Symmetric(C))
+            @test all(evals .>= -1e-10)  # PSD
+        end
+
+        @testset "CovarianceMatrix show" begin
+            cm = CovarianceMatrix(1, 2, [1.0, 2.0, 3.0],
+                                   [0.01 0.001; 0.001 0.04], true)
+            s = sprint(show, cm)
+            @test occursin("CovarianceMatrix", s)
+            @test occursin("MT1/MT2", s)
+            @test occursin("relative", s)
+        end
+
+        @testset "unsupported LB error" begin
+            block = CovarianceBlock(1, 1, 99, 0, [1.0, 2.0], [0.01])
+            @test_throws ErrorException expand_covariance_block(block, [1.0, 2.0])
+        end
+
+        @testset "multiple blocks accumulate" begin
+            ek = [1.0, 2.0, 3.0]
+            b1 = CovarianceBlock(1, 1, 1, 0, ek, [0.01, 0.02])
+            b2 = CovarianceBlock(1, 1, 1, 0, ek, [0.03, 0.01])
+            gbounds = [1.0, 2.0, 3.0]
+            cm = multigroup_covariance([b1, b2], gbounds)
+            # Blocks should sum: diag = [0.04, 0.03]
+            @test isapprox(cm.matrix[1, 1], 0.04, atol=1e-10)
+            @test isapprox(cm.matrix[2, 2], 0.03, atol=1e-10)
+        end
+
+        @testset "is_symmetric and is_psd" begin
+            # Symmetric PSD matrix
+            cm_good = CovarianceMatrix(1, 1, [1.0, 2.0, 3.0],
+                                        [0.04 0.01; 0.01 0.09], true)
+            @test is_symmetric(cm_good)
+            @test is_psd(cm_good)
+
+            # Non-PSD matrix (negative eigenvalue)
+            cm_bad = CovarianceMatrix(1, 1, [1.0, 2.0, 3.0],
+                                       [0.01 0.5; 0.5 0.01], true)
+            @test is_symmetric(cm_bad)
+            @test !is_psd(cm_bad)
+        end
+
+        @testset "ni_covariance produces correct relative covariance" begin
+            # NI-type with LB=1 (relative diagonal covariance)
+            ek = [1.0, 5.0, 10.0, 20.0]
+            fk = [0.01, 0.04, 0.09]  # relative variances
+            block = CovarianceBlock(2, 2, 1, 0, ek, fk)
+            egrid = [1.0, 5.0, 10.0, 20.0]
+            C = ni_covariance(block, egrid)
+            @test size(C) == (3, 3)
+            @test C[1, 1] == 0.01
+            @test C[2, 2] == 0.04
+            @test C[3, 3] == 0.09
+            @test C[1, 2] == 0.0  # diagonal -> off-diagonal zero
+            @test C[2, 3] == 0.0
+        end
+
+        @testset "nc_covariance returns zero matrix" begin
+            nc_data = (coeffs=[1.0, -1.0], mts=[18, 102])
+            egrid = [1.0, 5.0, 10.0]
+            C = nc_covariance(nc_data, egrid)
+            @test size(C) == (2, 2)
+            @test all(C .== 0.0)
+        end
+
+        @testset "read_mf33 from U-235 ENDF file" begin
+            u235_file = joinpath(ENDF_RESOURCES, "n-092_U_235-ENDF8.0.endf")
+            if !isfile(u235_file)
+                @warn "Skipping read_mf33 test: U-235 file not found"
+            else
+                open(u235_file, "r") do io
+                    # MT=2 (elastic) has NI-type covariance data
+                    cov_data = read_mf33(io, 9228, 2)
+                    @test cov_data.mat == 9228
+                    @test cov_data.mt == 2
+                    @test !isempty(cov_data.ni_subsections)
+                    # Check that subsections have valid LB flags
+                    for sub in cov_data.ni_subsections
+                        @test sub.lb in (0, 1, 2, 3, 4, 5, 6, 8)
+                        @test !isempty(sub.energies)
+                    end
+                end
+            end
+        end
+
+        @testset "process_covariance U-235 pipeline" begin
+            u235_file = joinpath(ENDF_RESOURCES, "n-092_U_235-ENDF8.0.endf")
+            if !isfile(u235_file)
+                @warn "Skipping process_covariance test: U-235 file not found"
+            else
+                # Verify the pipeline runs without crashing on real data.
+                # MT=18 (fission) is smaller than MT=2 to avoid OOM.
+                gbounds = [1e-5, 1.0, 1e3, 1e5, 3e7]
+                results = process_covariance(u235_file, gbounds; mts=[18])
+                for cm in results
+                    @test size(cm.matrix, 1) == 4
+                    @test is_symmetric(cm; atol=1e-10)
+                end
+                @test true  # pipeline completed without error
+            end
+        end
+    end
+
+    # ======================================================================
+    # MODER -- read/write roundtrip
+    # ======================================================================
+    @testset "MODER read_endf_tape / write_endf_tape roundtrip" begin
+        h2_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(h2_file)
+            @warn "Skipping MODER roundtrip test: H-2 file not found"
+        else
+            # Read
+            materials_in = read_endf_tape(h2_file)
+            @test length(materials_in) >= 1
+            mat1 = materials_in[1]
+            @test mat1.mat > 0
+            @test !isempty(mat1.sections)
+
+            # Verify sections have valid MF/MT
+            for sec in mat1.sections
+                @test sec.mf > 0
+                @test sec.mt >= 0
+                @test !isempty(sec.lines)
+            end
+
+            # Write to temp file and read back
+            tmpfile = tempname() * ".endf"
+            try
+                write_endf_tape(tmpfile, materials_in)
+                @test isfile(tmpfile)
+                @test filesize(tmpfile) > 0
+
+                # Read back
+                materials_out = read_endf_tape(tmpfile)
+                @test length(materials_out) == length(materials_in)
+                @test materials_out[1].mat == materials_in[1].mat
+                @test length(materials_out[1].sections) == length(materials_in[1].sections)
+
+                # Verify each section matches
+                for (s_in, s_out) in zip(materials_in[1].sections,
+                                          materials_out[1].sections)
+                    @test s_in.mf == s_out.mf
+                    @test s_in.mt == s_out.mt
+                    @test length(s_in.lines) == length(s_out.lines)
+                    # Lines should round-trip (modulo padding)
+                    for (l_in, l_out) in zip(s_in.lines, s_out.lines)
+                        @test rpad(l_in, 80) == rpad(l_out, 80)
+                    end
+                end
+            finally
+                isfile(tmpfile) && rm(tmpfile)
+            end
+        end
+    end
+
+    @testset "MODER moder_copy roundtrip" begin
+        h2_file = joinpath(ENDF_RESOURCES, "n-001_H_002-ENDF8.0.endf")
+        if !isfile(h2_file)
+            @warn "Skipping MODER moder_copy test: H-2 file not found"
+        else
+            # Copy entire file
+            buf_out = IOBuffer()
+            open(h2_file, "r") do io
+                n = moder_copy(io, buf_out; mat=0)
+                @test n > 0
+            end
+            seekstart(buf_out)
+            dir_out = read_tape_directory(buf_out)
+            @test length(dir_out) >= 1
+
+            # Copy filtered by MAT
+            buf_mat = IOBuffer()
+            open(h2_file, "r") do io
+                seekstart(io)
+                dir_in = read_tape_directory(io)
+                target_mat = dir_in.entries[1].mat
+                seekstart(io)
+                n = moder_copy(io, buf_mat; mat=target_mat)
+                @test n > 0
+            end
         end
     end
 
