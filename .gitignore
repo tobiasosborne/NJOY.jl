@@ -1,3 +1,7 @@
 njoy-reference/
 endftk-reference/
 endf-data/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
