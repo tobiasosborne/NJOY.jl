@@ -235,18 +235,17 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         npts < 2 && continue
 
         # Compute physical threshold for reactions with Q < 0
-        # (matching Fortran lunion lines 1915-1936)
+        # (matching Fortran lunion lines 1911-1921)
+        # Fortran: awrx = c2h/awin, awin=1 for neutrons → awrx = AWR
         thrx = 0.0
         qx = sec.QI
         if qx < 0.0 && mt != 2 && mt != 18 && mt != 19 && mt != 102
-            thrx = if awr > 0.0
-                -qx * (awr + 1) / awr
-            else
-                -qx
-            end
+            thrx = awr > 0.0 ? -qx * (awr + 1) / awr : -qx
         end
 
-        # Process this section's panels through the bisection loop
+        # Process this section's panels through the bisection loop.
+        # Split panels at existing grid nodes (matching Fortran lunion
+        # labels 210-280 which merges existing grid into panel processing).
         new_points = Float64[]
         sizehint!(new_points, 1024)
 
@@ -255,29 +254,55 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
             e_hi = tab.x[k + 1]
             e_hi <= e_lo && continue
 
-            y_lo = tab.y[k]
-            y_hi = tab.y[k + 1]
-
-            # Determine interpolation law
             law = _law_for_interval(tab, k)
             is_nonlinear = (law != LinLin && law != Histogram)
 
-            # Bisect this panel with the Fortran label-310 DFS
-            _bisect_panel!(new_points, tab, e_lo, y_lo, e_hi, y_hi,
-                           is_nonlinear, law, stpmax, err, elim)
+            # Find existing grid points within this panel
+            i_start = searchsortedfirst(grid, e_lo)
+            i_end = searchsortedlast(grid, e_hi)
+
+            # Build sub-panels by splitting at grid nodes
+            panel_lo = e_lo
+            panel_y_lo = tab.y[k]
+            for gi in i_start:i_end
+                gp = grid[gi]
+                (gp <= panel_lo || gp >= e_hi) && continue
+                # Sub-panel [panel_lo, gp]
+                gp_y = is_nonlinear ? interpolate(tab, gp) :
+                       tab.y[k] + (tab.y[k+1] - tab.y[k]) * (gp - e_lo) / (e_hi - e_lo)
+                _bisect_panel!(new_points, tab, panel_lo, panel_y_lo,
+                               gp, gp_y, is_nonlinear, law, stpmax, err, elim)
+                panel_lo = gp
+                panel_y_lo = gp_y
+            end
+            # Final sub-panel [panel_lo, e_hi]
+            _bisect_panel!(new_points, tab, panel_lo, panel_y_lo,
+                           e_hi, tab.y[k+1], is_nonlinear, law, stpmax, err, elim)
         end
 
         # Add section breakpoints + linearisation points to grid
         append!(grid, tab.x)
         append!(grid, new_points)
 
-        # Add computed threshold if it differs from the raw MF3 breakpoint
-        # (Fortran adjusts the first point using sigfig(thrx,7,+1))
+        # Add computed threshold only when:
+        # 1. MF3 first breakpoint is below the threshold (line 1931)
+        # 2. The pseudo-threshold skip (lines 1973-1976) doesn't skip past it.
+        #    The skip fires when current AND next XS are both zero.
         if thrx > 0.0
             thrxx = round_sigfig(thrx, 7, +1)
-            push!(grid, thrxx)
+            if tab.x[1] < thrxx
+                # Check pseudo-threshold: if first xs=0 AND second xs=0,
+                # the Fortran skips this panel (never reaches threshold code)
+                skip_pseudo = npts >= 2 && abs(tab.y[1]) < 1e-30 && abs(tab.y[2]) < 1e-30
+                if !skip_pseudo
+                    push!(grid, thrxx)
+                end
+            end
         end
-        sort!(grid); unique!(grid)
+        sort!(grid)
+        # Tolerance-based deduplication matching Fortran lunion (small=1e-9).
+        # The sigfig bias creates near-duplicates that exact unique! misses.
+        _dedup_tol!(grid)
         filter!(>(0.0), grid)
     end
 
@@ -304,6 +329,20 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
     end
 
     grid
+end
+
+"""Remove near-duplicate energies from a sorted vector (tolerance=1e-9 relative)."""
+function _dedup_tol!(v::Vector{Float64})
+    isempty(v) && return v
+    j = 1
+    for i in 2:length(v)
+        if abs(v[i] - v[j]) > 1.0e-9 * max(abs(v[j]), abs(v[i]))
+            j += 1
+            v[j] = v[i]
+        end
+    end
+    resize!(v, j)
+    v
 end
 
 # Fortran constants (reconr.f90:1796-1806)

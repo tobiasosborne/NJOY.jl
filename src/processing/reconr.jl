@@ -216,20 +216,13 @@ function reconr(endf_file::AbstractString;
 
         # Handle materials with no resonances (LRU=0 only, e.g. H-2)
         if (isinf(eresl) || eresh == 0.0) && rml_data === nothing
-            # For LRU=0, Fortran sets eresl/eresr/eresh from MF2 range bounds
-            # (reconr.f90:304-322). Extract EH from MF2 for boundary filtering.
-            elow = 1.0e-5
-            ehigh = 0.0
-            for iso in mf2.isotopes
-                for rng in iso.ranges
-                    ehigh = max(ehigh, rng.EH)
-                end
-            end
-            if ehigh <= 0.0; ehigh = 2.0e7; end
+            # For LRU=0, Fortran sets eresr/eresh = ehigh = 20e6 (constant,
+            # reconr.f90:144,308-309). NOT from MF2 EH.
+            ehigh_const = 20.0e6  # Fortran parameter ehigh=20.e6_kr
 
             # Build union grid matching Fortran lunion (reconr.f90:1771-2238).
+            # elim = min(0.99e6, eresr) = min(0.99e6, 20e6) = 0.99e6
             all_energies = lunion_grid(mf3_sections, err;
-                                       eresl=elow, eresr=ehigh, eresh=ehigh,
                                        awr=mf2.AWR)
 
             n_pts = length(all_energies)

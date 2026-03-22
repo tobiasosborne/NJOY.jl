@@ -1065,7 +1065,7 @@ function merge_background_legacy(energies::Vector{Float64},
         qx = sec.QI
         if qx < 0.0 && mt != 2 && mt != 18 && mt != 19 && mt != 102
             thrx = awr > 0.0 ? -qx * (awr + 1) / awr : -qx
-            thrxx = round_sigfig(thrx, 7, +1)  # shade up, matching grid point
+            thrxx = round_sigfig(thrx, 7, +1)
             thresholds[mt] = thrxx
         end
     end
