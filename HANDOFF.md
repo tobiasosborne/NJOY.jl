@@ -38,7 +38,7 @@ We work **module by module, test by test**:
 9. **Idiomatic Julia** — no Fortran transliterations. Multiple dispatch, broadcasting, clean types.
 10. **3+1 agent workflow** for significant architectural changes (dual proposals, orchestrator, reviewer)
 
-## Current State (after Grind Phase 3)
+## Current State (after Grind Phases 3+4)
 
 ### What WORKS — bit-identical
 
@@ -46,38 +46,21 @@ We work **module by module, test by test**:
 |------|----------|-----------|-----|------|-----------|
 | Test 84 | H-2 (deuterium) | LRU=0 | 4/4 PERFECT | 769 pts exact | All identical |
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 PERFECT | 1033 pts exact | All identical |
-| Test 02 | Pu-238 | SLBW | 13/17 PERFECT | ~3556 pts | 13 MTs identical |
+| Test 02 | Pu-238 | SLBW+URR | 14/17 PERFECT | 3567 pts exact | 14 MTs identical |
 
-Test 02 is the first resonance material (LRU=1, LRF=1 SLBW). The PERFECT MTs:
-- Threshold reactions: MT=16 (n,2n), MT=17 (n,3n), MT=51-59 (discrete inelastic), MT=91 (continuum)
-- Redundant sums: MT=4 (inelastic total = sum MT=51-91)
+Test 02 is the first resonance material (SLBW resolved + unresolved). The PERFECT MTs:
+- All threshold reactions: MT=4, 16, 17, 51-59, 91
+- Fission: MT=18 (including unresolved range 200-10000 eV)
 
 ### What does NOT yet work for Test 02
 
-**CRITICAL BLOCKER: Missing unresolved resonance evaluation (LRU=2)**
-
-The MF2 data for Pu-238 (MAT 1050) has TWO resonance ranges:
-- Range 1: EL=1.0, EH=200.0, **LRU=1**, LRF=1 (resolved SLBW) — ✓ PARSED
-- Range 2: EL=200.0, EH=10000.0, **LRU=2**, LRF=1 (unresolved) — ✗ SKIPPED
-
-The `read_mf2` function in `src/resonances/reader.jl` (line 108-116) skips LRU=2 ranges entirely. This causes:
-1. `eresh = 200` instead of 10000 — wrong grid extent
-2. Missing unresolved XS in [200, 10000] eV — Fortran's `sigunr` gives ~45 barns elastic at 200 eV, Julia gives 0
-3. Grid structure wrong above 200 eV (missing ~100 grid points)
-
-**To fix**: implement `sigunr` (unresolved resonance average XS evaluation) in Julia. The Fortran code is in `reconr.f90` subroutine `sigunr`. Also need to:
-- Parse LRU=2 MF2 data (ENDF/B-IV format with LRF=1, NLS l-values, average parameters)
-- Store unresolved parameters in a new type (or extend existing `UnresolvedParameters`)
-- Call `sigunr` in `sigma_mf2` for energies in [eresu, eresh)
-- The raw MF2 data for the unresolved range starts at line 1154 of `njoy-reference/tests/resources/t404`
-
-**Also fixed in this session** (resolved range improvements):
-- SLBW `sigfig(sigp(2),8,0)` rounding before adding potential scattering (reconr.f90:2845-2847)
-- Adaptive convergence now tests only partials (elastic, fission, capture), not total — matching Fortran resxs `j=1,nsig-1`
+3 MTs remain with ±1 differences in the 7th significant digit:
+- **MT=1 (total)**: 753 XS diffs — the total is recomputed from components in Julia (elastic+fission+capture+other_bg) but Fortran uses MF3/MT=1 background directly. Sigfig rounding of individual components produces a sum that differs by ±1 from the MF3/MT=1 total. Fix: use MF3/MT=1 + resonance_total for MT=1 output (but careful — non-primary MTs must still be included).
+- **MT=2 (elastic)**: 1 XS diff at 200.0001 eV (44.83975 vs 44.83976) — URR table edge rounding
+- **MT=102 (capture)**: 1 XS diff at 191.58 eV (3.227129 vs 3.227130) — SLBW sigfig rounding edge case
 
 ### Other items NOT yet done
 
-- **Unresolved resonance evaluation**: `sigunr` for LRU=2 materials (BLOCKING Test 02)
 - **PENDF headers**: MF1/MT451 format, MF2 EH value, MF12/MT=102 photon production not output
 - **BROADR, HEATR, THERMR**: Not validated against per-module oracle
 - **Unit tests**: May need updating — some test expectations were written against old (incorrect) behavior
@@ -306,7 +289,7 @@ bd list
 |------|-----|-----------|-----|-----------|-------|--------|
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→HEATR→THERMR→GROUPR | RECONR **BIT-IDENTICAL**, rest untested |
-| 02 | 1050 | t404 | 0.005 | SLBW | RECONR→BROADR→UNRESR→GROUPR | RECONR **13/17 PERFECT** (MT=1,2,18,102 have ~11 grid pt diffs) |
+| 02 | 1050 | t404 | 0.005 | SLBW+URR | RECONR→BROADR→UNRESR→GROUPR | RECONR **14/17 PERFECT** (MT=1: 753 ±1 diffs, MT=2,102: 1 diff each) |
 
 ## Open beads issues
 
