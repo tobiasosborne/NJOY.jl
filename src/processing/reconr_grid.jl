@@ -284,14 +284,37 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         # Fortran lunion (lines 1930-1937): when consecutive MF3 breakpoints
         # are very close (duplicates encoding discontinuities), shade them to
         # sigfig(x, 7, -1) and sigfig(x, 7, +1) to prevent singularities.
+        #
+        # Histogram shading (reconr.f90:2050-2064): for sections with histogram
+        # interpolation (like MF=12 photon multiplicities), each interior
+        # breakpoint is replaced by a shaded pair {sigfig(E,7,-1), sigfig(E,7,+1)}.
+        # This is a two-pass mechanism: first pass creates the lower shade,
+        # second pass (triggered when et==enl) creates the upper shade. Any
+        # existing grid point at the exact breakpoint energy is consumed.
+        is_histogram = any(l == Histogram for l in tab.interp.law)
+        shaded_energies = Float64[]
+
         for k in 1:npts
             e = tab.x[k]
             if k < npts && abs(tab.x[k+1] - e) < 1.0e-9 * abs(e)
                 push!(grid, round_sigfig(e, 7, -1))
             elseif k > 1 && abs(e - tab.x[k-1]) < 1.0e-9 * abs(e)
                 push!(grid, round_sigfig(e, 7, +1))
+            elseif is_histogram && k > 1 && k < npts
+                # Histogram interior breakpoint → shaded pair
+                push!(grid, round_sigfig(e, 7, -1))
+                push!(grid, round_sigfig(e, 7, +1))
+                push!(shaded_energies, e)
             else
                 push!(grid, e)
+            end
+        end
+
+        # Remove exact values that were replaced by histogram shading.
+        # The Fortran consumes old-grid points at these energies (label 280).
+        if !isempty(shaded_energies)
+            filter!(grid) do e
+                !any(abs(e - s) <= 1.0e-8 * abs(s) for s in shaded_energies)
             end
         end
         append!(grid, new_points)

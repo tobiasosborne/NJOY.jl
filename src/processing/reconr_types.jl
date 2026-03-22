@@ -103,6 +103,53 @@ function _skip_to_send(io::IO)
     end
 end
 
+"""
+    read_mf12_lo1_sections(io::IO, mat::Integer) -> Vector{MF3Section}
+
+Read MF=12 photon multiplicity sections with LO=1 (tabulated multiplicities).
+Returns them as `MF3Section` objects so they can be processed by `lunion_grid`.
+
+Matches Fortran lunion behaviour (reconr.f90:1868-1881): MF=12 sections with
+LO=1 contribute energy breakpoints to the union grid. The Fortran forces NK=1
+(line 1879), reading only the first subsection's TAB1 record.
+"""
+function read_mf12_lo1_sections(io::IO, mat::Integer)
+    sections = MF3Section[]
+    seekstart(io)
+
+    while !eof(io)
+        pos = position(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        mf = _parse_int(p[71:72])
+        mt = _parse_int(p[73:75])
+        mat_line = _parse_int(p[67:70])
+
+        mat_line != mat && continue
+
+        if mf == 12 && mt > 0
+            seek(io, pos)
+            try
+                head = read_cont(io)
+                lo = Int(head.L1)
+                if lo != 1
+                    _skip_to_send(io)
+                    continue
+                end
+                # LO=1: read first TAB1 (Fortran forces NK=1)
+                tab1 = read_tab1(io)
+                tf = TabulatedFunction(tab1)
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf))
+                _skip_to_send(io)
+            catch e
+                @warn "read_mf12_lo1_sections: skipping MF12/MT=$mt" exception=(e, catch_backtrace())
+                _skip_to_send(io)
+            end
+        end
+    end
+    sections
+end
+
 function _detect_mat(io::IO, requested::Integer)
     requested > 0 && return Int32(requested)
     seekstart(io)

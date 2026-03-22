@@ -141,28 +141,19 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 | Test 84 | H-2 (deuterium) | LRU=0 | 4/4 | 769 pts exact | **BIT-IDENTICAL** |
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 | 1033 pts exact | **BIT-IDENTICAL** |
 | Test 02 | Pu-238 | SLBW + URR | 17/17 | 3567 pts exact | **BIT-IDENTICAL** |
+| Test 08 | Ni-61 | Reich-Moore (LRF=3) | 18/18 | 4825 pts exact | **BIT-IDENTICAL** |
 
-### In Progress — Test 08 (Ni-61, Reich-Moore)
+### Test 08 Root Cause (SOLVED)
 
-**Test details**: MAT=2834, err=0.01, ENDF file `eni61`, single resolved range [1e-5, 70000 eV] with LRF=3 (Reich-Moore). 18 MTs total.
+The grid differences were caused by **MF=12 LO=1 sections** (photon production multiplicities) that the Fortran lunion processes but the Julia wasn't reading. MF=12 MT=102 for Ni-61 has breakpoints at 0.0253, 4000, 100000, 250000, 500000, 750000, 2000000, 5000000 eV with **histogram interpolation** (INT=1). The Fortran's two-pass histogram shading mechanism (reconr.f90:2050-2064) replaces each interior breakpoint E with a pair {sigfig(E,7,-1), sigfig(E,7,+1)}, consuming any existing grid point at E from previous MF=3 sections.
 
-**Status: 3/18 PERFECT** (MT=16, 28, 111 — all high-threshold MTs above the problem grid region).
+Previous HANDOFF analysis was wrong about the mechanism — it was NOT the coincidence check at line 1996 (which indeed never fires). The actual mechanism is histogram interpolation shading from MF=12, not MF=3 breakpoint coincidence.
 
-**Single root cause**: The Fortran PENDF grid has 4825 energy points; the Julia has 4784 (41 fewer). The missing points are **shaded breakpoint pairs** at energies where multiple MF3 sections share a breakpoint. The Fortran creates `sigfig(E, 7, -1)` and `sigfig(E, 7, +1)` pairs at these coincident breakpoints; the Julia keeps the single unshaded energy.
-
-**Specifically identified Fortran-only grid points above 70000 eV:**
-- 99999.9 (= sigfig(100000, 7, -1)) — Julia has just 100000
-- 249999.9 and 250000.1 — Julia has just 250000
-- 749999.9 and 750000.1 — Julia has just 750000
-- 1999999 and 2000001 — Julia has just 2000000
-
-**Pattern**: These are all energies where MANY MF3 sections share a breakpoint (e.g., 100000 appears as a breakpoint in MT=2, 4, 51, 52, 107, etc.). The Fortran `lunion` subroutine creates shaded pairs at these coincident breakpoints through a mechanism at reconr.f90 lines 1996-2003 (coincident MF3 breakpoint + old-grid point → shading). The exact triggering condition has not been fully traced — the condition `(er - sigfig(abs(eg), 7, -1)) > 1e-8*er` appears to evaluate TRUE (skipping the shading), yet the output shows shaded pairs. Understanding this mechanism is the key to fixing all 15 failing MTs.
-
-**Below 70000 eV (in the resonance range)**: 17 extra Fortran points, mostly near 0.0253 eV (thermal point). The grid diverges at index 82. The Julia has [0.0253, 0.028387] while the Fortran has a dense cluster [0.02529999, 0.02530001, 0.02530006, ..., 0.028387]. These extra points cascade through the step guard (estp=4.1) in the adaptive reconstruction. The Julia's convergence test and thermal tightening (err/5 below 0.4999 eV) are correctly implemented — the remaining difference is from the initial grid having different breakpoint spacing due to the cumulative lunion processing.
-
-**What's verified working:**
-- Reich-Moore reader (`_read_rm_params`) and evaluator (`cross_section_rm`) produce correct XS — verified bit-identical at 50+ grid points near the 70000 eV boundary
-- MF3 interpolation at discontinuities (duplicate breakpoints) works correctly
+**Three fixes applied:**
+1. `reconr_types.jl`: Added `read_mf12_lo1_sections` to read MF=12 LO=1 TAB1 data
+2. `reconr.jl`: Read MF=12 sections and pass to `lunion_grid` alongside MF=3 sections
+3. `reconr_grid.jl`: Added histogram breakpoint shading — interior breakpoints of histogram sections are replaced with {sigfig(E,7,-1), sigfig(E,7,+1)} pairs, and exact values are removed from the grid
+4. `pendf_writer.jl`: Added pseudo-threshold skip for redundant MT=4 — skip leading zero values to match Fortran recout ith tracking
 - Thermal tightening (err/5 below 0.4999 eV), step guard (estp=4.1), sigfig midpoint rounding all correctly implemented in `adaptive_reconstruct`
 - Duplicate MF3 breakpoint shading (at 70000 eV discontinuity) correctly implemented
 - Oracle cache at `test/validation/oracle_cache/test08/`
@@ -181,7 +172,7 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 | LRU=0 (no resonances) | N/A | N/A | Tests 84, 01 BIT-IDENTICAL |
 | SLBW (LRF=1) | `_read_bw_params` | `cross_section_slbw` | Test 02 BIT-IDENTICAL |
 | MLBW (LRF=2) | `_read_bw_params` | `cross_section_mlbw` | Not tested |
-| Reich-Moore (LRF=3) | `_read_rm_params` | `cross_section_rm` | Test 08 (grid issues, XS correct) |
+| Reich-Moore (LRF=3) | `_read_rm_params` | `cross_section_rm` | Test 08 BIT-IDENTICAL |
 | SAMMY/RML (LRF=7) | `_read_sammy_params` | `build_rml_evaluator` | Not tested |
 | URR mode=11 (LRU=2, LRF≤1, LFW=1) | `_read_urr_lfw1` | `_csunr1`/`_gnrl` | Test 02 BIT-IDENTICAL |
 | URR mode=12 (LRU=2, LRF=2) | **NOT IMPLEMENTED** | **NOT IMPLEMENTED** | Needed for Test 07 (U-235) |
@@ -204,6 +195,7 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 | `src/resonances/reich_moore.jl` | Reich-Moore R-matrix cross section evaluation | reconr.f90 csrmat |
 | `src/resonances/unresolved.jl` | Unresolved resonance XS: `_csunr1`, `_gnrl`, table builder + interpolator | reconr.f90 csunr1, gnrl, genunr, sigunr |
 | `src/resonances/reader.jl` | MF2 reader: SLBW, MLBW, RM, SAMMY, URR (LRU=2) | reconr.f90 rdfil2, rdf2u1 |
+| `src/processing/reconr_types.jl` | MF3 + MF12 readers: `read_mf3_sections`, `read_mf12_lo1_sections` | reconr.f90 lunion (MF processing) |
 | `src/endf/io.jl` | ENDF I/O: `format_endf_float` (with 9-sigfig `a11` extension), `parse_endf_float` | endf.f90 a11, lineio |
 | `src/constants.jl` | Physics constants in CGS matching `phys.f90` | phys.f90 |
 
@@ -295,19 +287,15 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 
 16. **Forced 1-2-5 decade points** — Fortran lunion (lines 2112-2127) forces grid points at 1, 2, 5, 10, 20, 50, ..., 100000 eV AND the thermal point 0.0253 eV. Only applies below `elim = min(0.99e6, eresr)`. The Julia's `_bisect_panel!` handles this through the step ratio check, but the forced decade logic is NOT separately implemented. For Test 02 (eresr=200 eV), this doesn't matter. For Test 08 (eresr=70000 eV), the forced decades up to 50000 eV should match but haven't been independently verified.
 
-17. **Coincident breakpoint shading in lunion** — The Fortran lunion creates shaded pairs when an MF3 breakpoint coincides with an existing grid point from a previously processed section (reconr.f90:1996-2003). This is NOT the same as duplicate breakpoints (trap #15). It produces sigfig(E,7,0) and sigfig(E,7,+1) at shared breakpoints like 100000, 250000, 750000, 2000000 eV. The exact triggering mechanism has not been fully traced in the Fortran code. **This is the primary open problem for Test 08.**
+17. **MF=12 histogram shading in lunion** — The Fortran lunion processes MF=12 LO=1 (photon multiplicity) sections alongside MF=3. When these use histogram interpolation (INT=1), the two-pass histogram shading mechanism (reconr.f90:2050-2064) replaces each interior breakpoint E with {sigfig(E,7,-1), sigfig(E,7,+1)}, consuming any existing grid point at E. For Ni-61, MF=12 MT=102 has breakpoints at 0.0253, 4000, 100000, 250000, 500000, 750000, 2000000, 5000000 eV — all the "mystery" grid differences. The coincidence check at line 1996 is a red herring (it never fires for practical energies). **SOLVED.**
+
+18. **Redundant MT=4 pseudo-threshold** — The Fortran's recout tracks the first nonzero cross-section index (`ith`) and starts redundant reactions like MT=4 from the energy before the first nonzero point. Without this pseudo-threshold skip, the output includes many leading zeros below the effective threshold. **SOLVED.**
 
 ---
 
 ## Immediate Next Steps
 
-### Priority 1: Fix Test 08 coincident breakpoint shading
-
-The Fortran lunion creates shaded pairs at energies shared by multiple MF3 sections. Five specific Fortran-only points have been identified (see "Current State" above). The mechanism is in reconr.f90 lines 1996-2003, triggered when an MF3 breakpoint `er` is close to an old-grid point `eg`. Trace through the Fortran code with specific energy values (er=100000, eg=100000 from MT=2's grid) to understand exactly when the condition fires. The fix goes in `lunion_grid` in `reconr_grid.jl`.
-
-**Approach**: Add instrumented tracing to the Fortran (via print statements in a local build) OR exhaustively enumerate the condition at each energy. Once the mechanism is understood, replicate it in Julia. Fixing this single issue should make all 15 failing MTs pass (since the XS values at common grid points already match).
-
-### Priority 2: Implement LRU=2/LRF=2 reader (mode=12)
+### Priority 1: Implement LRU=2/LRF=2 reader (mode=12)
 
 Test 07 (U-235, MAT=1395, err=0.005, ENDF file `t511`) needs `_read_urr_lrf2` (matching Fortran `rdf2u2`) and `_csunr2` evaluator. This unlocks U-235 and Mn-55 tests. The Fortran `rdf2u2` is around reconr.f90 line 828. The evaluator `csunr2` handles the case where ALL partial widths are energy-dependent (unlike mode=11 where only fission widths vary).
 
@@ -328,7 +316,7 @@ The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next 
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→... | RECONR **BIT-IDENTICAL** |
 | 02 | 1050 | t404 | 0.005 | SLBW+URR(mode=11) | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
-| 08 | 2834 | eni61 | 0.01 | Reich-Moore(LRF=3) | RECONR→BROADR→HEATR→... | RECONR **3/18 PERFECT** |
+| 08 | 2834 | eni61 | 0.01 | Reich-Moore(LRF=3) | RECONR→BROADR→HEATR→... | RECONR **BIT-IDENTICAL** |
 | 07 | 1395 | t511 | 0.005 | SLBW+URR(mode=12) | RECONR→BROADR→... | **Needs mode=12 reader** |
 
 ---
@@ -356,7 +344,7 @@ Built `lunion_grid`, fixed 17 bugs in grid construction, XS evaluation, threshol
 - Boundary-crossing forced convergence (`force_boundaries`)
 - Expanded adaptive range to [eresl, eresh) for full resonance + unresolved coverage
 
-### Phase 5: Test 02 final 3 diffs + Test 08 investigation → Test 02 17/17 BIT-IDENTICAL, Test 08 3/18 PERFECT
+### Phase 5: Test 02 final 3 diffs + Test 08 investigation → Test 02 17/17 BIT-IDENTICAL, Test 08 3/18 PERFECT (then 18/18 in Phase 6)
 
 Three fixes achieved 100% bit agreement on Test 02:
 
@@ -367,3 +355,13 @@ Three fixes achieved 100% bit agreement on Test 02:
 3. **MT=2 elastic (1 diff → 0)**: At E=200.0001 eV (resolved/unresolved boundary), the URR table's first node was at `sigfig(200,7,0)=200.00000000002` but the Fortran table had `sigfig(200,7,+1)=200.0001` (from rdfil2 boundary nodes). Fixed `build_unresolved_table` to include rdfil2 boundary nodes (`sigfig(EL,7,±1)` with overlap marking, `sigfig(EH,7,±1)`), then sort and deduplicate matching Fortran rdfil2 lines 856-869.
 
 Test 08 investigation: identified root cause as coincident breakpoint shading in lunion (5 specific Fortran-only grid points traced, XS verified correct at shared points, RM evaluator verified bit-identical, thermal tightening and step guard verified correct). Added duplicate breakpoint shading to lunion_grid.
+
+### Phase 6: Test 08 complete → 18/18 BIT-IDENTICAL
+
+Root cause discovered: Fortran lunion processes MF=12 LO=1 sections (photon multiplicities) alongside MF=3. The Julia was only reading MF=3. MF=12 MT=102 for Ni-61 has histogram interpolation (INT=1) at breakpoints 0.0253, 4000, 100000, 250000, 500000, 750000, 2000000, 5000000 eV. The Fortran's two-pass histogram shading mechanism (reconr.f90:2050-2064) replaces each interior breakpoint with a {sigfig(E,7,-1), sigfig(E,7,+1)} pair.
+
+Four changes achieved 18/18:
+1. `reconr_types.jl`: Added `read_mf12_lo1_sections` to read MF=12 LO=1 TAB1 data
+2. `reconr.jl`: Read MF=12 sections and pass to lunion_grid alongside MF=3
+3. `reconr_grid.jl`: Histogram breakpoint shading for sections with INT=1 — interior breakpoints → shaded pairs, exact values removed
+4. `pendf_writer.jl`: Pseudo-threshold skip for redundant MT=4 (skip leading zeros)

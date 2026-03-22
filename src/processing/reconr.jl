@@ -258,14 +258,22 @@ function reconr(endf_file::AbstractString;
             end
         end
 
-        # Build full union grid from MF3 sections (matching Fortran lunion)
+        # Read MF=12 LO=1 sections (photon multiplicities) — Fortran lunion
+        # processes these alongside MF=3 (reconr.f90:1868,1878-1881).
+        # Their breakpoints contribute to the union grid and histogram
+        # interpolation triggers shading at shared breakpoints.
+        mf12_sections = read_mf12_lo1_sections(io, actual_mat)
+
+        # Build full union grid from MF3 + MF12 sections (matching Fortran lunion)
         mf2_nodes = Float64[]
         _add_mf2_nodes!(mf2_nodes, mf2)
         # Add URR table energy nodes (matching Fortran rdf2u1 enode)
         if urr_table !== nothing
             append!(mf2_nodes, urr_table.energies)
         end
-        bg_grid = lunion_grid(mf3_sections, err;
+        all_lunion_sections = isempty(mf12_sections) ?
+            mf3_sections : vcat(mf3_sections, mf12_sections)
+        bg_grid = lunion_grid(all_lunion_sections, err;
                               nodes=mf2_nodes, awr=mf2.AWR,
                               eresl=eresl, eresr=eresr, eresh=eresh)
 

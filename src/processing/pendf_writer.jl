@@ -468,6 +468,14 @@ function _get_legacy_section(result, mt::Int)
             push!(sec_xs, round_sigfig(total_inel, 7))
         end
         isempty(sec_e) && return nothing
+        # Pseudo-threshold: skip leading zero values (matching Fortran
+        # recout ith tracking — start at the point before first nonzero)
+        first_nz = findfirst(>(0.0), sec_xs)
+        if first_nz !== nothing && first_nz > 1
+            sec_e = sec_e[first_nz-1:end]
+            sec_xs = sec_xs[first_nz-1:end]
+        end
+        isempty(sec_e) && return nothing
         return sec_e, sec_xs, 0.0, qi_4
     elseif mt == 2
         return energies, result.elastic, qm, qi
