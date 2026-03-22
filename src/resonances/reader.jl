@@ -105,14 +105,24 @@ function read_mf2(io::IO)
                 params = _read_sammy_params(io, NAPS)
                 push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
 
+            elseif LRU == 2 && LRF <= 1 && LFW == 1
+                # Unresolved resonances, mode=11 (LRF=1, LFW=1)
+                # Energy-dependent fission widths
+                params = _read_urr_lfw1(io, Int(NRO), Int(NAPS))
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
+
             else
-                # Unsupported formalisms (Adler-Adler, URR, etc.)
-                # Skip by reading lines until the next range or end of section.
-                # We use a simple approach: read lines until we hit a SEND record
-                # (MF=0) or the next section. For unresolved (LRU=2), we need to
-                # consume the rest of this range's data.
+                # Unsupported formalisms (Adler-Adler, other URR variants, etc.)
                 _skip_unsupported_range(io)
-                # Don't push anything to ranges -- just skip
+                # Push a placeholder so _resonance_bounds sees the EL/EH
+                params = SLBWParameters(
+                    Int32(0), 0.0, 0.0,
+                    Int32[], Float64[], Float64[], Int32[],
+                    Vector{Float64}[], Vector{Float64}[],
+                    Vector{Float64}[], Vector{Float64}[],
+                    Vector{Float64}[], Vector{Float64}[]
+                )
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
             end
         end
 
@@ -575,4 +585,70 @@ function _skip_unsupported_range(io::IO)
 
         # Otherwise keep consuming this line (it's part of this range)
     end
+end
+
+"""
+Read LRU=2, LRF<=1, LFW=1 unresolved data (mode=11 with energy-dependent
+fission widths). Matches Fortran rdf2u1 (reconr.f90:1312-1425).
+
+The data is a LIST record: header has SPI, AP, LSSF in C1/C2/L1,
+NE (energy count) in N1, NLS (l-value count) in N2. Body has NE energies.
+Then per-l CONT + per-J LIST records follow.
+"""
+function _read_urr_lfw1(io::IO, NRO::Int, NAPS::Int)
+    # LIST record: C1=SPI, C2=AP, L1=LSSF, L2=0, N1=NE, N2=NLS
+    # Matching Fortran rdf2u1 line 1355: call listio → ne=n1h, nls=n2h
+    list_cont = read_cont(io)
+    SPI = list_cont.C1
+    AP = list_cont.C2
+    LSSF = Int(list_cont.L1)
+    NE = Int(list_cont.N1)    # number of fission width energy nodes
+    NLS = Int(list_cont.N2)   # number of l-values
+
+    # LIST body: NE fission-width energy nodes
+    energies = _read_list_data(io, NE)
+
+    # For each l-value: CONT + per-J LIST records
+    sequences = URRSequence[]
+    awri_val = 0.0
+    for _ in 1:NLS
+        lcont = read_cont(io)
+        awri_val = lcont.C1   # AWRI
+        ll = Int(lcont.L1)     # L value
+        NJS = Int(lcont.N1)    # number of J values
+
+        for _ in 1:NJS
+            # LIST: C1=0, C2=0, L1=L, L2=MUF, N1=NPL, N2=0
+            jcont = read_cont(io)
+            MUF = Int(jcont.L2)
+            NPL = Int(jcont.N1)
+            jdata = _read_list_data(io, NPL)
+            # jdata layout: D, AJ, AMUN, GN0, GG, 0, GF(1)..GF(NE)
+            # For LFW=1: GX=0 (no competitive width), GF values start at index 7
+            D    = jdata[1]
+            AJ   = jdata[2]
+            AMUN = jdata[3]
+            GN0  = jdata[4]
+            GG   = jdata[5]
+            gf_vals = length(jdata) >= 7 ? jdata[7:min(end, 6 + NE)] : Float64[]
+            push!(sequences, URRSequence(ll, AJ, D, AMUN, GN0, GG, 0.0, MUF, gf_vals))
+        end
+    end
+
+    URRData(0.0, 0.0, SPI, AP, awri_val, LSSF, 1, NAPS, NRO, energies, sequences)
+end
+
+"""Read N floating-point values from LIST body (6 values per line)."""
+function _read_list_data(io::IO, n::Int)
+    vals = Float64[]
+    while length(vals) < n
+        line = readline(io)
+        p = rpad(line, 80)
+        for k in 0:5
+            length(vals) >= n && break
+            field = p[k*11+1 : k*11+11]
+            push!(vals, parse_endf_float(field))
+        end
+    end
+    vals
 end

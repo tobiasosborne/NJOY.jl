@@ -240,22 +240,39 @@ function reconr(endf_file::AbstractString;
                     mf2=mf2, mf3_sections=mf3_sections)
         end
 
-        # Build full union grid from MF3 sections (matching Fortran lunion,
-        # which runs BEFORE resxs — reconr.f90:358)
+        # Build unresolved XS table FIRST (needed for lunion grid + xs_fn)
+        urr_table = nothing
+        eresu = Inf
+        for iso in mf2.isotopes
+            for rng in iso.ranges
+                if Int(rng.LRU) == 2 && rng.parameters isa URRData
+                    urr_data = rng.parameters::URRData
+                    urr_full = URRData(rng.EL, rng.EH, urr_data.SPI, urr_data.AP,
+                                       urr_data.AWRI, urr_data.LSSF, urr_data.LFW,
+                                       urr_data.NAPS, urr_data.NRO,
+                                       urr_data.energies, urr_data.sequences)
+                    urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections)
+                    eresu = min(eresu, rng.EL)
+                end
+            end
+        end
+
+        # Build full union grid from MF3 sections (matching Fortran lunion)
         mf2_nodes = Float64[]
         _add_mf2_nodes!(mf2_nodes, mf2)
+        # Add URR table energy nodes (matching Fortran rdf2u1 enode)
+        if urr_table !== nothing
+            append!(mf2_nodes, urr_table.energies)
+        end
         bg_grid = lunion_grid(mf3_sections, err;
                               nodes=mf2_nodes, awr=mf2.AWR,
                               eresl=eresl, eresr=eresr, eresh=eresh)
 
-        # Filter union grid to resonance range for adaptive reconstruction.
-        # Fortran resxs skips below eresl, stops at eresh (reconr.f90:2335,2370).
-        # The lunion grid already has shaded boundary points (e.g. sigfig(EL,7,+1)),
-        # so we do NOT add exact eresl/eresh — those were removed by boundary filtering.
+        # Filter to full resonance range for adaptive reconstruction
         res_grid = filter(e -> e >= eresl && e < eresh, bg_grid)
         isempty(res_grid) && error("reconr: no grid points in resonance range [$eresl, $eresh)")
 
-        # Build cross section function: combine MF2 + RML evaluators
+        # Build cross section function: resolved (SLBW) + unresolved (URR table)
         xs_fn = if rml_data !== nothing
             rml_eval = build_rml_evaluator(rml_data)
             function(E)
@@ -270,28 +287,45 @@ function reconr(endf_file::AbstractString;
 
         # For adaptive convergence, test only partials (elastic, fission, capture)
         # matching Fortran resxs which tests j=1..nsig-1 = partials, NOT total.
-        # Total makes convergence stricter, producing extra grid points.
-        xs_partials = E -> let xs = xs_fn(E)
+        # Include unresolved contribution for energies in [eresu, eresh).
+        xs_partials = function(E)
+            xs = xs_fn(E)
+            if urr_table !== nothing && E >= eresu && E < eresh
+                urr = eval_unresolved(urr_table, E)
+                return (xs.elastic + urr[2], xs.fission + urr[3], xs.capture + urr[4])
+            end
             (xs.elastic, xs.fission, xs.capture)
         end
 
-        # Adaptive reconstruction in resonance range (matching Fortran resxs)
+        # Adaptive reconstruction in full resonance range (matching Fortran resxs)
+        # Force convergence at resonance boundaries (reconr.f90:2353-2355)
+        boundaries = Float64[]
+        eresr > 0 && eresr < eresh && push!(boundaries, eresr)
         config = AdaptiveConfig(err; errmax=errmax_val, errint=errint_val,
-                                step_guard_limit = eresr > 0.0 ? eresr : Inf)
+                                step_guard_limit = eresr > 0.0 ? eresr : Inf,
+                                force_boundaries = boundaries)
         res_energies, _ = adaptive_reconstruct(xs_partials, res_grid, config)
 
-        # Merge: lunion grid (outside resonance) + adaptive grid (inside resonance)
-        # Fortran emerge merges bg grid (outside [eresl, eresh)) with resxs grid
+        # Merge: lunion grid (outside resonance) + adaptive grid (inside)
         bg_outside = filter(e -> e < eresl || e >= eresh, bg_grid)
         all_energies = sort!(vcat(bg_outside, res_energies))
         _dedup_tol!(all_energies)
 
-        # Evaluate resonance XS at all grid points
+        # Evaluate resonance XS at all grid points.
+        # Fortran sigma evaluates resolved (< eresr) + unresolved ([eresu, eresh)).
         n_pts = length(all_energies)
         res_xs = Vector{CrossSections{Float64}}(undef, n_pts)
         for i in 1:n_pts
             e = all_energies[i]
-            res_xs[i] = (e >= eresl && e < eresh) ? xs_fn(e) : CrossSections()
+            # Resolved contribution (SLBW)
+            xs = (e >= eresl && e < eresr) ? xs_fn(e) : CrossSections()
+            # Unresolved contribution (matching Fortran sigma:2659-2665)
+            if urr_table !== nothing && e >= eresu && e < eresh
+                urr = eval_unresolved(urr_table, e)
+                xs = CrossSections(xs.total + urr[1], xs.elastic + urr[2],
+                                   xs.fission + urr[3], xs.capture + urr[4])
+            end
+            res_xs[i] = xs
         end
 
         merged_xs = merge_background_legacy(all_energies, res_xs, mf3_sections;

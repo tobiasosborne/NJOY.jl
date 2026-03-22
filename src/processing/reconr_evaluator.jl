@@ -183,7 +183,7 @@ function sigma_mf2(E::Real, mf2::MF2Data)
     for iso in mf2.isotopes
         abn = iso.ABN
         for rng in iso.ranges
-            if E_f >= rng.EL && E_f < rng.EH && Int(rng.LRU) > 0
+            if E_f >= rng.EL && E_f < rng.EH && Int(rng.LRU) == 1
                 try
                     sigp = cross_section(E_f, rng)
                     total = max(0.0, sigp.total)

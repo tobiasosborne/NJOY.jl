@@ -42,6 +42,7 @@ struct AdaptiveConfig
     thermal_threshold::Float64
     thermal_factor::Float64
     step_guard_limit::Float64
+    force_boundaries::Vector{Float64}  # panels crossing these energies → forced convergence
 end
 
 function AdaptiveConfig(err::Real;
@@ -50,10 +51,11 @@ function AdaptiveConfig(err::Real;
                         max_depth::Int = 30,
                         thermal_threshold::Real = 0.4999,
                         thermal_factor::Real = 5.0,
-                        step_guard_limit::Real = Inf)
+                        step_guard_limit::Real = Inf,
+                        force_boundaries::Vector{Float64} = Float64[])
     AdaptiveConfig(Float64(err), Float64(errmax), Float64(errint),
                    max_depth, Float64(thermal_threshold), Float64(thermal_factor),
-                   Float64(step_guard_limit))
+                   Float64(step_guard_limit), force_boundaries)
 end
 
 # ==========================================================================
@@ -232,7 +234,20 @@ function _process_panel!(f, ws::AdaptiveWorkspace{N}, out_e, out_v, config,
     local_last_e = last_accepted_e
     local_n_acc = n_accepted
 
+    # Boundary-crossing forced convergence (reconr.f90:2353-2355).
+    # Panels straddling resonance boundaries are forced to converge.
+    _crosses_boundary = !isempty(config.force_boundaries)
+
     while i >= 2
+        # Force convergence for panels crossing resonance boundaries
+        if _crosses_boundary
+            for eb in config.force_boundaries
+                if sx[i] < eb && sx[i-1] > eb
+                    @goto converged
+                end
+            end
+        end
+
         xm = 0.5 * (sx[i] + sx[i-1])
         dx = sx[i-1] - sx[i]
 
