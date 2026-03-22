@@ -1110,9 +1110,10 @@ function merge_background_legacy(energies::Vector{Float64},
                 interpolate(tab, e)
             end
             bg == 0.0 && continue
-            # Round to 7 significant figures matching Fortran emerge
-            # (reconr.f90:4836: sn=sigfig(sn,7,0))
-            bg = round_sigfig(bg, 7)
+            # Fortran emerge: sn = gety1(bg) + resonance, then sigfig(sn,7,0).
+            # Primary channels add UNROUNDED bg to resonance (the combined
+            # value is rounded to 7 sigfigs only at output and for the total).
+            # Non-primary channels round bg before accumulating into other_bg.
             if mt == 2
                 elastic += bg
             elseif mt == 18 || mt == 19 || mt == 20 || mt == 21 || mt == 38
@@ -1120,14 +1121,20 @@ function merge_background_legacy(energies::Vector{Float64},
             elseif mt == 102
                 capture += bg
             else
-                other_bg += bg
+                other_bg += round_sigfig(bg, 7)
             end
         end
         if elastic <= 1.0e-8
             elastic = 1.0e-8
         end
-        # Fortran emerge: sig(1) = sig(1) + sig(2) + sig(3) + sig(4)
-        total = other_bg + elastic + fission + capture
+        # Fortran emerge (line 4832): sn = sigfig(sn, 7, 0) applied to each
+        # section's combined (bg + resonance) value before output AND before
+        # accumulating into the total. Round primary channels to match.
+        elastic = round_sigfig(elastic, 7)
+        fission = round_sigfig(fission, 7)
+        capture = round_sigfig(capture, 7)
+        # Recout (line 5308) applies a final sigfig(total, 7, 0).
+        total = round_sigfig(other_bg + elastic + fission + capture, 7)
         result[i] = CrossSections(total, elastic, fission, capture)
     end
     return result

@@ -274,18 +274,28 @@ Adds intermediate points from egridu between energy nodes when the
 step ratio exceeds 1.26 (matching rdf2u1 lines 1383-1425).
 """
 function build_unresolved_table(urr::URRData, abn::Float64,
-                                 mf3_sections::Vector{MF3Section})
-    # Build dense energy grid matching Fortran rdf2u1
+                                 mf3_sections::Vector{MF3Section};
+                                 eresr::Float64 = 0.0)
+    # Build dense energy grid matching Fortran rdf2u1 + rdfil2 boundary nodes.
+    # rdfil2 (lines 754-776) adds sigfig(EL,7,±1) and sigfig(EH,7,±1) to eunr.
+    # Entries below eresr are marked negative (resolved-unresolved overlap,
+    # rdfil2 lines 864: bg suppressed in genunr for negative-signed energies).
     energies = Float64[]
+
+    # rdfil2 boundary nodes for EL (if EL is not at elow=1e-5)
+    el_down = round_sigfig(urr.EL, 7, -1)
+    el_up   = round_sigfig(urr.EL, 7, +1)
+    push!(energies, el_down < eresr ? -el_down : el_down)
+    push!(energies, el_up   < eresr ? -el_up   : el_up)
+
+    # rdf2u1 fission-width energy nodes + egridu intermediates
     wide = 1.26
     raw_e = urr.energies
-    # Match Fortran rdf2u1 loop: ener.ge.el.and.ener.lt.eh
     for n in 1:length(raw_e)
         ener = raw_e[n]
         ener < urr.EL && continue
-        ener >= urr.EH && continue  # strict < EH, matching Fortran
+        ener >= urr.EH && continue
         push!(energies, round_sigfig(ener, 7, 0))
-        # Add egridu intermediate points if step is too wide
         if n < length(raw_e)
             enex = raw_e[n + 1]
             if enex > wide * ener
@@ -300,8 +310,29 @@ function build_unresolved_table(urr::URRData, abn::Float64,
             end
         end
     end
-    # Add extra grid at top: sigfig(EH, 7, -1) (reconr.f90:1416-1419)
+
+    # rdfil2 boundary nodes for EH
     push!(energies, round_sigfig(urr.EH, 7, -1))
+    push!(energies, round_sigfig(urr.EH, 7, +1))
+
+    # Sort by absolute value (Fortran rdfil2 line 856: call order(eunr,nunr))
+    sort!(energies, by=abs)
+
+    # Deduplicate matching Fortran rdfil2 lines 857-869: skip entries
+    # too close to the previous one (within sigfig(abs(e), 7, +1)).
+    eps_tol = 1.0e-10
+    eresu = urr.EL
+    deduped = Float64[]
+    prev_abs = 0.0
+    for e in energies
+        ae = abs(e)
+        ae <= (1 - eps_tol) * eresu && continue
+        ae >= (1 + eps_tol) * urr.EH && continue
+        ae < prev_abs && continue
+        push!(deduped, e)
+        prev_abs = round_sigfig(ae, 7, +1)
+    end
+    energies = deduped
     ne = length(energies)
     total = zeros(ne)
     elastic = zeros(ne)

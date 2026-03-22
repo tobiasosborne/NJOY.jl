@@ -136,27 +136,7 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 |------|----------|-----------|-----|------|--------|
 | Test 84 | H-2 (deuterium) | LRU=0 | 4/4 | 769 pts exact | **BIT-IDENTICAL** |
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 | 1033 pts exact | **BIT-IDENTICAL** |
-| Test 02 | Pu-238 | SLBW + URR | 14/17 | 3567 pts exact | **14/17 PERFECT** |
-
-Test 02 PERFECT MTs: 4, 16, 17, 18, 51, 52, 53, 54, 55, 56, 57, 58, 59, 91
-
-### Test 02 remaining diffs (3 MTs)
-
-**MT=1 (total): 753 XS diffs (±1 in 7th sigfig)**
-
-Root cause: Julia recomputes total as `other_bg + elastic + fission + capture` (sum of individually rounded components). Fortran emerge processes MT=1 using MF3/MT=1 background + resonance total (`res(1)`) directly. The sum of rounded components differs by ±1 from the pre-summed MF3/MT=1 value.
-
-The fix is tricky: simply using MF3/MT=1 drops contributions from non-primary MTs (MT=51-91 etc.) that go through `other_bg`. The Fortran handles this because MT=1 in the ENDF file already includes all partial contributions. But switching to MF3/MT=1 requires ensuring the `other_bg` contributions are redundant with MT=1, which they are in principle but might not be numerically.
-
-An attempted fix (using `total = res_total + total_bg` where total_bg = MF3/MT=1) broke Test 01 because it dropped `other_bg`. The correct approach may be: for MT=1 output in `_get_legacy_section`, use MF3/MT=1 background interpolated at each energy + resonance total, instead of the recomputed sum. This separates the output computation from the merge computation.
-
-**MT=2 (elastic): 1 XS diff at 200.0001 eV**
-
-44.83975 vs 44.83976. This is at the resolved/unresolved boundary. The URR table gives 44.83976 at E=200.0, but log-log interpolation at 200.0001 gives 44.83975. The Fortran might compute this differently (e.g., evaluating csunr1 directly at 200.0001 in resxs rather than interpolating from the table).
-
-**MT=102 (capture): 1 XS diff at 191.58 eV**
-
-3.227129 vs 3.227130. SLBW evaluation at a specific energy rounds to one side of a boundary. May require additional intermediate `sigfig` rounding (like the `sigfig(sigp(2),8,0)` fix for elastic, but for capture or total).
+| Test 02 | Pu-238 | SLBW + URR | 17/17 | 3567 pts exact | **BIT-IDENTICAL** |
 
 ---
 
@@ -241,11 +221,11 @@ An attempted fix (using `total = res_total + total_bg` where total_bg = MF3/MT=1
 
 10. **Threshold interpolation uses MF3's own law** — Near thresholds, the first breakpoint is modified to (thrxx, 0.0) and the section's own interpolation law (LinLog, LogLog, etc.) is used — NOT hardcoded linear. Implemented via `_threshold_interp()`.
 
-11. **Float accumulation order** — `total = other_bg + elastic + fission + capture` (matching Fortran: `sig(1) = sig(1) + sig(2) + sig(3) + sig(4)` where sig(1) already holds other_bg). Float non-associativity causes 8th-sigfig differences visible in the extended format.
+11. **Total = sum of sigfig'd sections, NOT component sum** — Fortran `lunion` skips MT=1 (line 1882), so emerge never processes MT=1. The total is accumulated from all non-redundant sections, each `sigfig(sn,7,0)`'d. Then `recout` applies a final `sigfig(total,7,0)`. In Julia: `round_sigfig` each primary channel before summing, then `round_sigfig` the total. MF3 backgrounds for primary channels (MT=2,18,102) must be added UNROUNDED to the resonance value — the combined value is then rounded. Non-primary backgrounds are rounded individually.
 
 12. **ENDF float format has two modes** — The Fortran `a11` uses 9-sigfig fixed-point for values in (0.1, 1e7) with genuine precision, otherwise 7-sigfig scientific. Falls back to scientific when trailing zeros indicate only 7 sigfigs. Only applied to energy values (odd positions), not XS values (even positions in data pairs). See `pair_data` parameter in `_write_data_values`.
 
-13. **URR table needs egridu intermediate points** — The Fortran `rdf2u1` adds points from a standard 78-point energy grid between fission-width energy nodes when the step ratio > 1.26. It also adds `sigfig(EH, 7, -1)` as the last node. Without these, log-log interpolation of the URR table gives wrong values.
+13. **URR table needs rdfil2 boundary nodes** — The Fortran `rdfil2` adds `sigfig(EL,7,-1)` (negative, overlap marker) and `sigfig(EL,7,+1)` to `eunr`, then sorts and deduplicates. This means the URR table has a node at `sigfig(EL,7,+1)` (e.g., 200.0001) NOT at `sigfig(EL,7,0)` (200.0). The `sigfig(EL,7,0)` entry is removed by dedup (too close to previous). Without this, sigunr interpolates at boundary energies instead of returning the exact table value, causing ±1 diffs. Also adds egridu intermediate points when step ratio > 1.26.
 
 14. **lunion skips MT=251-300** — Line 1892: `if ((mth.ge.251.and.mth.le.300).and.mth.ne.261) go to 150`. These are non-cross-section quantities (mubar, xi, gamma). They do NOT contribute grid points.
 
@@ -255,23 +235,13 @@ An attempted fix (using `total = res_total + total_bg` where total_bg = MF3/MT=1
 
 ## Immediate Next Steps
 
-### Priority 1: Fix Test 02 MT=1 (753 ±1 diffs)
+### Priority 1: Grind Test 03 or another SLBW/MLBW/Reich-Moore test
 
-This is the largest remaining diff. The root cause is understood: Julia recomputes total from components, Fortran uses MF3/MT=1 directly.
+Tests 84, 01, 02 are all bit-identical. Try another material with a different formalism (MLBW, Reich-Moore). Look at tests in `njoy-reference/tests/` and check their input decks. Generate the oracle first: `julia --project=. test/validation/diagnose_harness.jl <test_number>`.
 
-**Approach**: In `_get_legacy_section` (pendf_writer.jl), for MT=1, instead of returning `result.total`, compute: interpolate MF3/MT=1 at each energy + add resonance total from `res_xs`. This separates the PENDF output from the internal merge computation, matching how Fortran emerge processes MT=1 (itype=0). The `_write_legacy_mf3` function calls `_get_legacy_section` which returns (energies, xs_values) — you can override the MT=1 case.
+### Priority 2: Grind BROADR
 
-### Priority 2: Fix Test 02 MT=2 and MT=102 (1 diff each)
-
-These might require more intermediate sigfig rounding in the SLBW or URR evaluation. Compare the Julia and Fortran values at the exact energy of the diff to find the divergence point.
-
-### Priority 3: Grind Test 03 or another SLBW test
-
-After Test 02, try another material with a different formalism (MLBW, Reich-Moore). Look at tests in `njoy-reference/tests/` and check their input decks.
-
-### Priority 4: Grind BROADR
-
-The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next module in the processing chain.
+The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next module in the processing chain (Doppler broadening).
 
 ---
 
@@ -281,7 +251,7 @@ The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next 
 |------|-----|-----------|-----|-----------|-------|--------|
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→... | RECONR **BIT-IDENTICAL** |
-| 02 | 1050 | t404 | 0.005 | SLBW+URR | RECONR→BROADR→UNRESR→... | RECONR **14/17 PERFECT** |
+| 02 | 1050 | t404 | 0.005 | SLBW+URR | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
 
 ---
 
@@ -307,3 +277,13 @@ Built `lunion_grid`, fixed 17 bugs in grid construction, XS evaluation, threshol
 - Partials-only adaptive convergence
 - Boundary-crossing forced convergence (`force_boundaries`)
 - Expanded adaptive range to [eresl, eresh) for full resonance + unresolved coverage
+
+### Phase 5: Final 3 diffs → 17/17 BIT-IDENTICAL
+
+Three fixes to achieve 100% bit agreement on Test 02:
+
+1. **MT=1 total (753 diffs → 0)**: Fortran `lunion` skips MT=1 — the total is accumulated from all non-redundant sections, each `sigfig(sn,7,0)`'d, with a final `sigfig(total,7,0)` in recout. Fixed `merge_background_legacy` to `round_sigfig` each primary channel before summing, then `round_sigfig` the total. MF3 backgrounds for primary channels are now added UNROUNDED to the resonance value (matching Fortran where `gety1` bg is added to resonance before `sigfig`).
+
+2. **MT=102 capture (1 diff → 0)**: At E=191.58 eV, the combined (bg + resonance) value was at a `sigfig(7)` rounding boundary. `format_endf_float` uses `@sprintf` (round-half-to-even) while Fortran's `sigfig` has a tiny upward bias (`10^(ndig-11)`). Fixed by applying `round_sigfig(elastic/fission/capture, 7)` explicitly in `merge_background_legacy` before storing, matching Fortran emerge line 4832.
+
+3. **MT=2 elastic (1 diff → 0)**: At E=200.0001 eV (resolved/unresolved boundary), the URR table's first node was at `sigfig(200,7,0)=200.00000000002` but the Fortran table had `sigfig(200,7,+1)=200.0001` (from rdfil2 boundary nodes). The `sigfig(200,7,0)` entry was removed by Fortran's dedup. Fixed `build_unresolved_table` to include rdfil2 boundary nodes (`sigfig(EL,7,±1)` with overlap marking, `sigfig(EH,7,±1)`), then sort and deduplicate matching Fortran rdfil2 lines 856-869.

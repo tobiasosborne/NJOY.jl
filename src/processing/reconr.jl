@@ -251,7 +251,8 @@ function reconr(endf_file::AbstractString;
                                        urr_data.AWRI, urr_data.LSSF, urr_data.LFW,
                                        urr_data.NAPS, urr_data.NRO,
                                        urr_data.energies, urr_data.sequences)
-                    urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections)
+                    urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections;
+                                                        eresr=eresr)
                     eresu = min(eresu, rng.EL)
                 end
             end
