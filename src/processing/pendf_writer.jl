@@ -159,13 +159,19 @@ function _write_cont_line(io::IO, c1, c2, l1, l2, n1, n2,
     ns[] += 1
 end
 
-function _write_data_values(io::IO, vals, mat::Int, mf::Int, mt::Int, ns::Ref{Int})
+function _write_data_values(io::IO, vals, mat::Int, mf::Int, mt::Int, ns::Ref{Int};
+                            pair_data::Bool=false)
     n = length(vals)
     i = 1
     while i <= n
         for j in 1:6
             if i <= n
-                write(io, format_endf_float(Float64(vals[i])))
+                # For (E, XS) pair data: odd positions are energies (may use 9-sigfig
+                # extended format), even positions are XS (always 7-sigfig scientific).
+                # Matching Fortran a11 behavior where only energies from round_sigfig(x,9)
+                # have genuine 9-sigfig precision.
+                ext = !pair_data || isodd(i)
+                write(io, format_endf_float(Float64(vals[i]); extended=ext))
                 i += 1
             else
                 write(io, "           ")
@@ -205,7 +211,7 @@ function _write_mf3_from_matrix(io::IO, mat::Int, mt::Int,
         push!(data, energies[i])
         push!(data, xs[i, col])
     end
-    _write_data_values(io, data, mat, 3, mt, ns)
+    _write_data_values(io, data, mat, 3, mt, ns; pair_data=true)
 
     # SEND with continuous sequence numbering
     _write_record_sep(io, mat, 3, 0; ns=ns)
@@ -397,7 +403,7 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
             push!(data, sec_e[i])
             push!(data, sec_xs[i])
         end
-        _write_data_values(io, data, Int(mat), 3, Int(mt), ns)
+        _write_data_values(io, data, Int(mat), 3, Int(mt), ns; pair_data=true)
 
         # SEND (NS=99999 per ENDF convention)
         _write_send(io, Int(mat), 3)
@@ -450,8 +456,7 @@ function _get_legacy_section(result, mt::Int)
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
                     if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
                        e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
-                        frac = (e - s_thrxx) / (sec.tab.x[2] - s_thrxx)
-                        bg = frac * sec.tab.y[2]
+                        bg = _threshold_interp(sec.tab, e, s_thrxx)
                     end
                     if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-9 * s_thrxx
                         bg = 0.0
@@ -497,12 +502,10 @@ function _get_legacy_section(result, mt::Int)
             if thrxx > 0.0 && thrxx - e > 1.0e-9 * thrxx
                 continue  # below threshold
             end
-            # Near threshold, interpolate using adjusted first energy (thrxx)
-            # instead of original tab.x[1], matching Fortran (line 1936)
+            # Near threshold, modify first breakpoint to (thrxx, 0) and interpolate
+            # using the MF3 interpolation law (Fortran emerge:1936 + gety1)
             bg = if thrxx > 0.0 && e >= thrxx && e < sec.tab.x[2] && sec.tab.x[1] < thrxx
-                # Linear interpolation from (thrxx, 0) to (tab.x[2], tab.y[2])
-                frac = (e - thrxx) / (sec.tab.x[2] - thrxx)
-                frac * sec.tab.y[2]
+                _threshold_interp(sec.tab, e, thrxx)
             else
                 interpolate(sec.tab, e)
             end
@@ -550,4 +553,21 @@ function _pendf_parse_int(s::AbstractString)
     t = strip(s)
     isempty(t) && return 0
     return parse(Int, t)
+end
+
+"""
+    _threshold_interp(tab, e, thrxx)
+
+Threshold-adjusted interpolation: temporarily modify the first breakpoint
+to (thrxx, 0.0) and interpolate using the MF3's own interpolation law.
+Matches Fortran emerge line 1936 (modify ex(1)) + gety1.
+"""
+function _threshold_interp(tab::TabulatedFunction, e::Float64, thrxx::Float64)
+    saved_x, saved_y = tab.x[1], tab.y[1]
+    tab.x[1] = thrxx
+    tab.y[1] = 0.0
+    result = interpolate(tab, e)
+    tab.x[1] = saved_x
+    tab.y[1] = saved_y
+    return result
 end

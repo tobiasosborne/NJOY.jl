@@ -240,92 +240,62 @@ function reconr(endf_file::AbstractString;
                     mf2=mf2, mf3_sections=mf3_sections)
         end
 
-        res_grid = filter(e -> e >= eresl && e <= eresh, initial_grid)
-        if isempty(res_grid) || res_grid[1] > eresl
-            pushfirst!(res_grid, eresl)
-        end
-        if res_grid[end] < eresh
-            push!(res_grid, eresh)
-        end
-        sort!(res_grid)
-        unique!(res_grid)
+        # Build full union grid from MF3 sections (matching Fortran lunion,
+        # which runs BEFORE resxs — reconr.f90:358)
+        mf2_nodes = Float64[]
+        _add_mf2_nodes!(mf2_nodes, mf2)
+        bg_grid = lunion_grid(mf3_sections, err;
+                              nodes=mf2_nodes, awr=mf2.AWR,
+                              eresl=eresl, eresr=eresr, eresh=eresh)
+
+        # Filter union grid to resonance range for adaptive reconstruction.
+        # Fortran resxs skips below eresl, stops at eresh (reconr.f90:2335,2370).
+        # The lunion grid already has shaded boundary points (e.g. sigfig(EL,7,+1)),
+        # so we do NOT add exact eresl/eresh — those were removed by boundary filtering.
+        res_grid = filter(e -> e >= eresl && e < eresh, bg_grid)
+        isempty(res_grid) && error("reconr: no grid points in resonance range [$eresl, $eresh)")
 
         # Build cross section function: combine MF2 + RML evaluators
         xs_fn = if rml_data !== nothing
             rml_eval = build_rml_evaluator(rml_data)
             function(E)
-                sig_mf2 = sigma_mf2(E, mf2)
+                sig = sigma_mf2(E, mf2)
                 rml_xs = rml_eval(Float64(E))
-                CrossSections(sig_mf2.total + rml_xs[1],
-                              sig_mf2.elastic + rml_xs[2],
-                              sig_mf2.fission + rml_xs[3],
-                              sig_mf2.capture + rml_xs[4])
+                CrossSections(sig.total + rml_xs[1], sig.elastic + rml_xs[2],
+                              sig.fission + rml_xs[3], sig.capture + rml_xs[4])
             end
         else
             E -> sigma_mf2(E, mf2)
         end
 
+        # Adaptive reconstruction in resonance range (matching Fortran resxs)
         config = AdaptiveConfig(err; errmax=errmax_val, errint=errint_val,
                                 step_guard_limit = eresr > 0.0 ? eresr : Inf)
-        energies, values = adaptive_reconstruct(xs_fn, res_grid, config)
+        res_energies, _ = adaptive_reconstruct(xs_fn, res_grid, config)
 
-        # Extend grid to include MF3 energies outside the resonance range.
-        # Fortran RECONR covers the full MF3 energy span, not just the
-        # resonance region. Points outside [eresl, eresh] get zero resonance
-        # cross sections but still receive MF3 backgrounds.
-        mf3_extra = Float64[]
-        for sec in mf3_sections
-            mt = Int(sec.mt)
-            (mt == 1 || mt == 3 || mt == 101) && continue
-            for e in sec.tab.x
-                if e > 0.0 && (e < eresl || e > eresh)
-                    push!(mf3_extra, e)
-                end
-            end
-        end
-        if !isempty(mf3_extra)
-            sort!(mf3_extra)
-            unique!(mf3_extra)
-            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
-            # Linearize the extension grid for 1/v representation
-            linearize_one_over_v!(mf3_extra, err)
-            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
-            n_extra = length(mf3_extra)
-            extra_values = zeros(n_extra, 4)
-            # Combine: put extra points before or after the resonance grid
-            all_energies = vcat(mf3_extra, energies)
-            all_values = vcat(extra_values, values)
-            perm = sortperm(all_energies)
-            energies = all_energies[perm]
-            values = all_values[perm, :]
-            # Remove duplicates
-            mask = trues(length(energies))
-            for i in 2:length(energies)
-                if energies[i] == energies[i-1]
-                    mask[i] = false
-                end
-            end
-            if !all(mask)
-                energies = energies[mask]
-                values = values[mask, :]
-            end
-        end
+        # Merge: lunion grid (outside resonance) + adaptive grid (inside resonance)
+        # Fortran emerge merges bg grid (outside [eresl, eresh)) with resxs grid
+        bg_outside = filter(e -> e < eresl || e >= eresh, bg_grid)
+        all_energies = sort!(vcat(bg_outside, res_energies))
+        _dedup_tol!(all_energies)
 
-        n_pts = length(energies)
+        # Evaluate resonance XS at all grid points
+        n_pts = length(all_energies)
         res_xs = Vector{CrossSections{Float64}}(undef, n_pts)
         for i in 1:n_pts
-            res_xs[i] = CrossSections(values[i, 1], values[i, 2],
-                                       values[i, 3], values[i, 4])
+            e = all_energies[i]
+            res_xs[i] = (e >= eresl && e < eresh) ? xs_fn(e) : CrossSections()
         end
 
-        merged_xs = merge_background_legacy(energies, res_xs, mf3_sections)
+        merged_xs = merge_background_legacy(all_energies, res_xs, mf3_sections;
+                                            awr=mf2.AWR)
 
         total_arr = [xs.total for xs in merged_xs]
         elastic_arr = [xs.elastic for xs in merged_xs]
         fission_arr = [xs.fission for xs in merged_xs]
         capture_arr = [xs.capture for xs in merged_xs]
 
-        return (energies=energies, total=total_arr, elastic=elastic_arr,
+        return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                 fission=fission_arr, capture=capture_arr,
                 mf2=mf2, mf3_sections=mf3_sections)
     end

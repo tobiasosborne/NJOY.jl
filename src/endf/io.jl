@@ -22,15 +22,28 @@ function parse_endf_float(s::AbstractString)
 end
 
 """
-    format_endf_float(x::Real) -> String
+    format_endf_float(x) -> String
 
-Format a number as an 11-character ENDF float field (matching NJOY's `a11`).
+Format a number as an 11-character ENDF field matching Fortran `a11` (endf.f90:882-981).
+Extended 9-sigfig fixed-point for positive x in (0.1, 1e7) with enough precision;
+otherwise 7-sigfig scientific notation.
 """
-function format_endf_float(x::Real)
-    x == 0.0 && return " 0.000000+0"
-    ax = abs(Float64(x))
+function format_endf_float(x::Real; extended::Bool=true)
+    x_f = Float64(x)
+    x_f == 0.0 && return " 0.000000+0"
+
+    # Extended 9-sigfig form for positive x in (0.1, 1e7)
+    # Matching Fortran a11 (endf.f90:882-981). Only used for values with
+    # genuine 9-sigfig precision (e.g. energies from round_sigfig(x, 9)).
+    if extended && x_f > 0.1 && x_f < 9.99999999e6
+        hx = _a11_extended(x_f)
+        hx !== nothing && return hx
+    end
+
+    # Normal 7-sigfig scientific notation
+    ax = abs(x_f)
     n = floor(Int, log10(ax))
-    f = x / 10.0^n
+    f = x_f / 10.0^n
     esign, en = n >= 0 ? ('+', n) : ('-', -n)
     if abs(f) >= 9.9999995
         f /= 10.0
@@ -42,6 +55,36 @@ function format_endf_float(x::Real)
     elseif en < 100; return @sprintf("%8.5f", f) * esign * string(en)
     else;            return @sprintf("%7.4f", f) * esign * string(en)
     end
+end
+
+"""Try extended 9-sigfig fixed-point format. Returns `nothing` if trailing zeros indicate low precision."""
+function _a11_extended(x::Float64)
+    n = floor(Int, log10(x))
+
+    if x < 0.999999999  # x in [0.1, 1.0)
+        hx = @sprintf("%11.8f", x)
+        return hx[end] == '0' ? nothing : hx
+    end
+
+    # x in [1.0, 1e7): mantissa rollover check
+    f = x / 10.0^n
+    if f >= 9.999999995
+        f /= 10.0
+        n += 1
+        n > 6 && return nothing  # rolled past 1e7 → scientific
+    end
+
+    # Write x with (8-n) decimal places in width 11
+    hx = n == 0 ? @sprintf("%11.8f", x) :
+         n == 1 ? @sprintf("%11.7f", x) :
+         n == 2 ? @sprintf("%11.6f", x) :
+         n == 3 ? @sprintf("%11.5f", x) :
+         n == 4 ? @sprintf("%11.4f", x) :
+         n == 5 ? @sprintf("%11.3f", x) :
+         n == 6 ? @sprintf("%11.2f", x) : return nothing
+
+    # Trailing zeros → not enough precision for 9 sigfigs, fall back to scientific
+    return hx[10:11] == "00" ? nothing : hx
 end
 
 # --- Line parsing ---

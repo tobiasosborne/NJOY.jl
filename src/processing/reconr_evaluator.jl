@@ -1040,6 +1040,17 @@ function build_rml_evaluator(rml::RMLData)
     return evaluator
 end
 
+"""Threshold-adjusted interpolation: modify first breakpoint to (thrxx, 0) and use the correct law."""
+function _threshold_interp_legacy(tab::TabulatedFunction, e::Float64, thrxx::Float64)
+    saved_x, saved_y = tab.x[1], tab.y[1]
+    tab.x[1] = thrxx
+    tab.y[1] = 0.0
+    result = interpolate(tab, e)
+    tab.x[1] = saved_x
+    tab.y[1] = saved_y
+    return result
+end
+
 function merge_background_legacy(energies::Vector{Float64},
                                   res_xs::Vector{<:CrossSections},
                                   mf3_sections::Vector{MF3Section};
@@ -1089,13 +1100,12 @@ function merge_background_legacy(energies::Vector{Float64},
                 continue  # sn=0 at threshold
             end
 
-            # Near threshold, interpolate using adjusted threshold
-            # (matching Fortran lunion line 1936 which modifies first breakpoint)
+            # Near threshold, modify first breakpoint to (thrx, 0) and interpolate
+            # using the MF3 interpolation law (Fortran emerge:1936 + gety1)
             tab = sec.tab
             bg = if thrx > 1.0 && e >= thrx && length(tab.x) >= 2 &&
                     e < tab.x[2] && tab.x[1] < thrx
-                frac = (e - thrx) / (tab.x[2] - thrx)
-                frac * tab.y[2]
+                _threshold_interp_legacy(tab, e, thrx)
             else
                 interpolate(tab, e)
             end
@@ -1116,7 +1126,10 @@ function merge_background_legacy(energies::Vector{Float64},
         if elastic <= 1.0e-8
             elastic = 1.0e-8
         end
-        total = elastic + fission + capture + other_bg
+        # Fortran emerge: sig(1) = sig(1) + sig(2) + sig(3) + sig(4)
+        # where sig(1) already holds other_bg. Match this exact order
+        # to avoid float non-associativity differences in the 8th sigfig.
+        total = other_bg + elastic + fission + capture
         result[i] = CrossSections(total, elastic, fission, capture)
     end
     return result
