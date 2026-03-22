@@ -1089,7 +1089,16 @@ function merge_background_legacy(energies::Vector{Float64},
                 continue  # sn=0 at threshold
             end
 
-            bg = interpolate(sec.tab, e)
+            # Near threshold, interpolate using adjusted threshold
+            # (matching Fortran lunion line 1936 which modifies first breakpoint)
+            tab = sec.tab
+            bg = if thrx > 1.0 && e >= thrx && length(tab.x) >= 2 &&
+                    e < tab.x[2] && tab.x[1] < thrx
+                frac = (e - thrx) / (tab.x[2] - thrx)
+                frac * tab.y[2]
+            else
+                interpolate(tab, e)
+            end
             bg == 0.0 && continue
             # Round to 7 significant figures matching Fortran emerge
             # (reconr.f90:4836: sn=sigfig(sn,7,0))

@@ -437,21 +437,58 @@ function _get_legacy_section(result, mt::Int)
             thrxx = round_sigfig(thrx, 7, +1)
         end
 
-        # Filter to points at or above threshold
-        # (matching Fortran emerge line 4792: thresh-eg > test → skip)
+        # Build the section output matching Fortran emerge:
+        # 1. Skip points below threshold (line 4792)
+        # 2. Pseudo-threshold skip: skip zero-XS panels (lines 1973-1976)
+        # 3. Set xs=0 at threshold energy (line 4795)
         sec_e = Float64[]
         sec_xs = Float64[]
-        for e in energies
+        found_nonzero = false
+        for (idx, e) in enumerate(energies)
             if thrxx > 0.0 && thrxx - e > 1.0e-9 * thrxx
                 continue  # below threshold
             end
-            bg = interpolate(sec.tab, e)
-            # Set xs=0 at threshold (matching Fortran emerge line 4795)
-            if thrxx > 0.0 && abs(thrxx - e) < 1.0e-7 * thrxx
+            # Near threshold, interpolate using adjusted first energy (thrxx)
+            # instead of original tab.x[1], matching Fortran (line 1936)
+            bg = if thrxx > 0.0 && e >= thrxx && e < sec.tab.x[2] && sec.tab.x[1] < thrxx
+                # Linear interpolation from (thrxx, 0) to (tab.x[2], tab.y[2])
+                frac = (e - thrxx) / (sec.tab.x[2] - thrxx)
+                frac * sec.tab.y[2]
+            else
+                interpolate(sec.tab, e)
+            end
+            bg = round_sigfig(bg, 7)
+
+            # Pseudo-threshold skip: if current xs ≈ 0, check if we've
+            # reached non-zero data yet. Skip leading zero-XS panels.
+            if !found_nonzero
+                if abs(bg) < 1.0e-30
+                    # Look ahead: is the NEXT point also zero?
+                    next_idx = idx + 1
+                    while next_idx <= length(energies)
+                        next_e = energies[next_idx]
+                        if thrxx > 0.0 && thrxx - next_e > 1.0e-9 * thrxx
+                            next_idx += 1; continue
+                        end
+                        break
+                    end
+                    if next_idx <= length(energies)
+                        next_bg = round_sigfig(interpolate(sec.tab, energies[next_idx]), 7)
+                        if abs(next_bg) < 1.0e-30
+                            continue  # both zero → skip
+                        end
+                    end
+                end
+                found_nonzero = true
+            end
+
+            # Set xs=0 at threshold (line 4795)
+            if thrxx > 0.0 && abs(thrxx - e) < 1.0e-9 * thrxx
                 bg = 0.0
             end
+
             push!(sec_e, e)
-            push!(sec_xs, round_sigfig(bg, 7))
+            push!(sec_xs, bg)
         end
 
         isempty(sec_e) && return nothing
