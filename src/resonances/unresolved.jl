@@ -41,6 +41,35 @@ struct URRData <: AbstractResonanceFormalism
     sequences::Vector{URRSequence}
 end
 
+"""One (l, J) spin sequence for mode=12 (LRF=2): ALL widths energy-dependent."""
+struct URR2Sequence
+    l::Int
+    J::Float64
+    INT::Int           # interpolation law for parameters (2=linear)
+    AMUX::Float64      # DOF for competitive width (lambda)
+    AMUN::Float64      # DOF for neutron width (mu)
+    AMUF::Float64      # DOF for fission width (nu)
+    energies::Vector{Float64}
+    D::Vector{Float64}         # level spacing at each node
+    GX::Vector{Float64}        # competitive width
+    GNO::Vector{Float64}       # reduced neutron width
+    GG::Vector{Float64}        # gamma width
+    GF::Vector{Float64}        # fission width
+end
+
+"""Unresolved data for LRU=2/LRF=2 (mode=12, all widths energy-dependent)."""
+struct URR2Data <: AbstractResonanceFormalism
+    EL::Float64
+    EH::Float64
+    SPI::Float64
+    AP::Float64
+    AWRI::Float64
+    LSSF::Int
+    NAPS::Int
+    NRO::Int
+    sequences::Vector{URR2Sequence}
+end
+
 """Pre-computed unresolved XS table (from genunr)."""
 struct URRTable
     energies::Vector{Float64}    # energy nodes
@@ -253,6 +282,107 @@ function _csunr1(E::Float64, urr::URRData)
     (total, sig_e, sig_f, sig_c)
 end
 
+# ─── Cross section evaluation (csunr2, mode=12) ─────────────────────
+
+"""
+Evaluate unresolved average cross sections at energy `E` for LRF=2
+(mode=12, all widths energy-dependent). Matches Fortran `csunr2`
+(reconr.f90:4079-4317).
+
+Returns (total, elastic, fission, capture).
+"""
+function _csunr2(E::Float64, urr::URR2Data)
+    C = PhysicsConstants
+    cwaven = sqrt(2 * C.amassn * C.amu * C.ev) * 1e-12 / C.hbar
+
+    awri = urr.AWRI
+    rat = awri / (awri + 1)
+    aw = awri * C.amassn
+    aa = urr.NAPS == 0 ? _RC1 * aw^_THIRD_URR + _RC2 : urr.AP
+    ay = urr.AP
+    spi = urr.SPI
+    cnst = (2 * C.pi^2) / (cwaven * rat)^2
+
+    e2 = sqrt(E)
+    k = cwaven * rat * e2
+    rho = k * aa
+    rhoc = k * ay
+
+    sig_e = 0.0; sig_f = 0.0; sig_c = 0.0; spot = 0.0
+    prev_l = -1; j_in_l = 0
+
+    for seq in urr.sequences
+        ll = seq.l
+        if ll != prev_l
+            j_in_l = 0
+            prev_l = ll
+        end
+        j_in_l += 1
+
+        ne = length(seq.energies)
+        ne < 2 && continue
+
+        # Interpolate ALL parameters at energy E (Fortran lines 4231-4242)
+        i1 = 1
+        while i1 + 1 < ne && seq.energies[i1 + 1] <= E - 1e-8
+            i1 += 1
+        end
+        i2 = i1 + 1
+        e1, e2v = seq.energies[i1], seq.energies[i2]
+        dx   = e1 == e2v ? seq.D[i1]   : seq.D[i1]   + (seq.D[i2]   - seq.D[i1])   * (E - e1) / (e2v - e1)
+        gxx  = e1 == e2v ? seq.GX[i1]  : seq.GX[i1]  + (seq.GX[i2]  - seq.GX[i1])  * (E - e1) / (e2v - e1)
+        gnox = e1 == e2v ? seq.GNO[i1] : seq.GNO[i1] + (seq.GNO[i2] - seq.GNO[i1]) * (E - e1) / (e2v - e1)
+        ggx  = e1 == e2v ? seq.GG[i1]  : seq.GG[i1]  + (seq.GG[i2]  - seq.GG[i1])  * (E - e1) / (e2v - e1)
+        gfx  = e1 == e2v ? seq.GF[i1]  : seq.GF[i1]  + (seq.GF[i2]  - seq.GF[i1])  * (E - e1) / (e2v - e1)
+
+        # Clamp small values (Fortran lines 4243-4244)
+        gxx < 1e-8 && (gxx = 0.0)
+        gfx < 1e-8 && (gfx = 0.0)
+
+        gj = (2 * seq.J + 1) / (4 * spi + 2)
+        mu = Int(seq.AMUN)
+        nu = Int(seq.AMUF)
+        lamda = Int(seq.AMUX)
+
+        vl, ps = _unfac(ll, rho, rhoc, seq.AMUN)
+        vl *= e2
+
+        # Potential scattering (once per l, j<=1 — Fortran line 4249)
+        if j_in_l <= 1
+            spot_l = 4 * C.pi * (2ll + 1) * (sin(ps) / k)^2
+            spot += spot_l
+        end
+
+        gnx = gnox * vl
+        diff = gxx
+        den = E * dx
+        temp = cnst * gj * gnx / den
+        terg = temp * ggx
+        ters = temp * gnx
+        terf = temp * gfx
+
+        gs  = _gnrl(gnx, gfx, ggx, mu, nu, lamda, diff, 1)
+        gc  = _gnrl(gnx, gfx, ggx, mu, nu, lamda, diff, 2)
+        gff = _gnrl(gnx, gfx, ggx, mu, nu, lamda, diff, 3)
+
+        gc  *= terg
+        gff *= terf
+        gs  *= ters
+
+        # Interference correction (Fortran lines 4271-4273)
+        add = cnst * gj * 2 * gnx * sin(ps)^2 / den
+        gs -= add
+
+        sig_e += gs
+        sig_f += gff
+        sig_c += gc
+    end
+
+    sig_e += spot
+    total = sig_e + sig_f + sig_c
+    (total, sig_e, sig_f, sig_c)
+end
+
 # ─── Table builder (genunr) ──────────────────────────────────────────
 
 # Standard energy grid from Fortran rdf2u1 (reconr.f90:1326-1338)
@@ -383,6 +513,106 @@ function build_unresolved_table(urr::URRData, abn::Float64,
     URRTable(energies, total, elastic, fission, capture, 5)
 end
 
+"""
+Build unresolved XS table for mode=12 (LRF=2, all widths energy-dependent).
+Same structure as mode=11 but uses `_csunr2` and different grid generation.
+"""
+function build_unresolved_table(urr::URR2Data, abn::Float64,
+                                 mf3_sections::Vector{MF3Section};
+                                 eresr::Float64 = 0.0)
+    energies = Float64[]
+
+    # rdfil2 boundary nodes for EL
+    el_down = round_sigfig(urr.EL, 7, -1)
+    el_up   = round_sigfig(urr.EL, 7, +1)
+    push!(energies, el_down < eresr ? -el_down : el_down)
+    push!(energies, el_up   < eresr ? -el_up   : el_up)
+
+    # rdf2u2 energy nodes + egridu intermediates
+    # Uses first sequence's energy grid (Fortran: n==1, l==1)
+    wide = 1.26
+    raw_e = isempty(urr.sequences) ? Float64[] : urr.sequences[1].energies
+    for n in 1:length(raw_e)
+        ener = raw_e[n]
+        ener < urr.EL && continue
+        ener >= urr.EH && continue
+        push!(energies, round_sigfig(ener, 7, 0))
+        if n < length(raw_e)
+            enex = raw_e[n + 1]
+            if enex > wide * ener
+                # Gap filling: rdf2u2 uses ener/1000 threshold (vs rdf2u1's enut/100)
+                enut = ener
+                while true
+                    idx = findfirst(e -> e > enut + enut / 1000, _EGRIDU)
+                    idx === nothing && break
+                    enut = _EGRIDU[idx]
+                    enut >= enex && break
+                    push!(energies, enut)
+                end
+            end
+        end
+    end
+
+    # rdfil2 boundary nodes for EH
+    push!(energies, round_sigfig(urr.EH, 7, -1))
+    push!(energies, round_sigfig(urr.EH, 7, +1))
+
+    sort!(energies, by=abs)
+
+    # Deduplicate (matching Fortran rdfil2 lines 857-869)
+    eps_tol = 1.0e-10
+    deduped = Float64[]
+    prev_abs = 0.0
+    for e in energies
+        ae = abs(e)
+        ae <= (1 - eps_tol) * urr.EL && continue
+        ae >= (1 + eps_tol) * urr.EH && continue
+        ae < prev_abs && continue
+        push!(deduped, e)
+        prev_abs = round_sigfig(ae, 7, +1)
+    end
+    energies = deduped
+
+    ne = length(energies)
+    total = zeros(ne); elastic = zeros(ne); fission = zeros(ne); capture = zeros(ne)
+
+    # Evaluate at each node using csunr2
+    for i in 1:ne
+        E = abs(energies[i])
+        if E >= urr.EL && E < urr.EH
+            sig = _csunr2(E, urr)
+            total[i]   = round_sigfig(abn * sig[1], 7)
+            elastic[i] = round_sigfig(abn * sig[2], 7)
+            fission[i] = round_sigfig(abn * sig[3], 7)
+            capture[i] = round_sigfig(abn * sig[4], 7)
+        end
+    end
+
+    # Add MF3 backgrounds (matching genunr lines 1695-1731)
+    for sec in mf3_sections
+        mt = Int(sec.mt)
+        (mt != 1 && mt != 2 && mt != 18 && mt != 102) && continue
+        for i in 1:ne
+            E = energies[i]
+            E < 0 && continue
+            bkg = interpolate(sec.tab, E)
+            if     mt == 1;   total[i]   = round_sigfig(total[i]   + bkg, 7)
+            elseif mt == 2;   elastic[i] = round_sigfig(elastic[i] + bkg, 7)
+            elseif mt == 18;  fission[i] = round_sigfig(fission[i] + bkg, 7)
+            elseif mt == 102; capture[i] = round_sigfig(capture[i] + bkg, 7)
+            end
+        end
+    end
+
+    for i in 1:ne
+        total[i] = round_sigfig(elastic[i] + fission[i] + capture[i], 7)
+    end
+
+    # Determine interpolation law from first sequence's INT
+    intlaw = isempty(urr.sequences) ? 2 : urr.sequences[1].INT
+    URRTable(energies, total, elastic, fission, capture, intlaw)
+end
+
 # ─── Table interpolation (sigunr) ───────────────────────────────────
 
 """
@@ -407,8 +637,20 @@ function eval_unresolved(table::URRTable, E::Float64)
     E < e1 && return (0.0, 0.0, 0.0, 0.0)
     E > e2 && return (0.0, 0.0, 0.0, 0.0)
 
-    # Log-log interpolation (terp1 with intlaw=5)
-    if e1 > 0 && e2 > 0 && e1 != e2
+    e1 == e2 && return (table.total[i1], table.elastic[i1], table.fission[i1], table.capture[i1])
+
+    if table.intlaw == 2
+        # Linear interpolation (mode=12, LRF=2)
+        frac = (E - e1) / (e2 - e1)
+        _lin(a, b) = a + (b - a) * frac
+        return (_lin(table.total[i1], table.total[i2]),
+                _lin(table.elastic[i1], table.elastic[i2]),
+                _lin(table.fission[i1], table.fission[i2]),
+                _lin(table.capture[i1], table.capture[i2]))
+    end
+
+    # Log-log interpolation (terp1 with intlaw=5, mode=11)
+    if e1 > 0 && e2 > 0
         logr = log(E / e1) / log(e2 / e1)
         t = _loglog_interp(table.total[i1],   table.total[i2],   logr)
         el = _loglog_interp(table.elastic[i1], table.elastic[i2], logr)

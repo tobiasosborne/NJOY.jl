@@ -254,6 +254,15 @@ function reconr(endf_file::AbstractString;
                     urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections;
                                                         eresr=eresr)
                     eresu = min(eresu, rng.EL)
+                elseif Int(rng.LRU) == 2 && rng.parameters isa URR2Data
+                    urr_data = rng.parameters::URR2Data
+                    urr_full = URR2Data(rng.EL, rng.EH, urr_data.SPI, urr_data.AP,
+                                        urr_data.AWRI, urr_data.LSSF,
+                                        urr_data.NAPS, urr_data.NRO,
+                                        urr_data.sequences)
+                    urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections;
+                                                        eresr=eresr)
+                    eresu = min(eresu, rng.EL)
                 end
             end
         end

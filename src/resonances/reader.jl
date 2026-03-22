@@ -111,6 +111,12 @@ function read_mf2(io::IO)
                 params = _read_urr_lfw1(io, Int(NRO), Int(NAPS))
                 push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
 
+            elseif LRU == 2 && LRF == 2
+                # Unresolved resonances, mode=12 (LRF=2)
+                # All widths energy-dependent
+                params = _read_urr_lrf2(io, Int(NRO), Int(NAPS))
+                push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
+
             else
                 # Unsupported formalisms (Adler-Adler, other URR variants, etc.)
                 _skip_unsupported_range(io)
@@ -636,6 +642,90 @@ function _read_urr_lfw1(io::IO, NRO::Int, NAPS::Int)
     end
 
     URRData(0.0, 0.0, SPI, AP, awri_val, LSSF, 1, NAPS, NRO, energies, sequences)
+end
+
+"""
+Read LRU=2, LRF=2 unresolved data (mode=12, all widths energy-dependent).
+Matches Fortran rdf2u2 (reconr.f90:1428-1540).
+
+Each (l,J) sequence has a LIST record containing 6 header words
+[0, 0, AMUX, AMUN, AMUG, AMUF] followed by NE sets of
+[E, D, GX, GNO, GG, GF].
+"""
+function _read_urr_lrf2(io::IO, NRO::Int, NAPS::Int)
+    # Skip NRO TAB1 if present (energy-dependent scattering radius)
+    if NRO == 1
+        _skip_tab1(io)
+    end
+
+    # CONT: SPI, AP, LSSF, 0, NLS, 0
+    cont = read_cont(io)
+    SPI = cont.C1
+    AP = cont.C2
+    LSSF = Int(cont.L1)
+    NLS = Int(cont.N1)
+
+    sequences = URR2Sequence[]
+    awri_val = 0.0
+
+    for _ in 1:NLS
+        # CONT: AWRI, 0, L, 0, NJS, 0
+        lcont = read_cont(io)
+        awri_val = lcont.C1
+        ll = Int(lcont.L1)
+        NJS = Int(lcont.N1)
+
+        for _ in 1:NJS
+            # LIST: AJ, 0, INT, 0, NPL, NE; [0, 0, AMUX, AMUN, AMUG, AMUF, E1, D1, ...]
+            jcont = read_cont(io)
+            AJ = jcont.C1
+            INT_val = Int(jcont.L1)
+            NPL = Int(jcont.N1)
+            NE = Int(jcont.N2)
+            body = _read_list_data(io, NPL)
+
+            # First 6 words: DOF parameters
+            AMUX = body[3]   # DOF for competitive width (lambda)
+            AMUN = body[4]   # DOF for neutron width (mu)
+            # body[5] = AMUG (not used in csunr2)
+            AMUF = body[6]   # DOF for fission width (nu)
+
+            # Remaining NE×6 words: energy-dependent parameters
+            ene = Vector{Float64}(undef, NE)
+            D   = Vector{Float64}(undef, NE)
+            GX  = Vector{Float64}(undef, NE)
+            GNO = Vector{Float64}(undef, NE)
+            GG  = Vector{Float64}(undef, NE)
+            GF  = Vector{Float64}(undef, NE)
+            for ie in 1:NE
+                off = 6 + (ie - 1) * 6
+                ene[ie] = body[off + 1]
+                D[ie]   = body[off + 2]
+                GX[ie]  = body[off + 3]
+                GNO[ie] = body[off + 4]
+                GG[ie]  = body[off + 5]
+                GF[ie]  = body[off + 6]
+            end
+
+            push!(sequences, URR2Sequence(ll, AJ, INT_val, AMUX, AMUN, AMUF,
+                                           ene, D, GX, GNO, GG, GF))
+        end
+    end
+
+    URR2Data(0.0, 0.0, SPI, AP, awri_val, LSSF, NAPS, NRO, sequences)
+end
+
+"""Skip a TAB1 record (header + interpolation table + data pairs)."""
+function _skip_tab1(io::IO)
+    cont = read_cont(io)
+    NR = Int(cont.N1)
+    NP = Int(cont.N2)
+    # Skip interpolation table lines: ceil(2*NR/6) lines
+    nlines_interp = cld(2 * NR, 6)
+    for _ in 1:nlines_interp; readline(io); end
+    # Skip data pair lines: ceil(2*NP/6) lines
+    nlines_data = cld(2 * NP, 6)
+    for _ in 1:nlines_data; readline(io); end
 end
 
 """Read N floating-point values from LIST body (6 values per line)."""
