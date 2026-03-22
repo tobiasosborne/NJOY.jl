@@ -120,23 +120,32 @@ julia --project=. test/validation/diagnose_test.jl 2   # diagnose test 02
 julia --project=. test/validation/diagnose_test.jl 7   # diagnose test 07
 ```
 
-## Current state: HONEST ASSESSMENT (updated after Grind Phase 1)
+## Current state: HONEST ASSESSMENT (updated after Grind Phase 2)
 
 | What works | What doesn't |
 |------------|-------------|
-| All 13,360 unit tests pass | ~1/85 NJOY tests fully pass (Test 84) |
-| Constants now CGS (matching Fortran phys.f90 exactly) | MF3 backgrounds missing 200-10,000 eV for resonance materials |
-| cwaven = 0.002197 matching Fortran | RECONR only outputs 4 columns (should output ALL MF3 sections) |
-| find_section filters by MAT (multi-material tapes work) | No redundant reaction generation (MT=1,3,4,101) |
-| Test 84 (H-2) RECONR PASS (0.01% error) | BROADR introduces 100% elastic error (Test 1) |
-| Test 1 (C-nat) RECONR PASS (0.03% error) | `merge_background_legacy` is wrong architecture |
-| Test 2 (Pu-238) peak matches Fortran exactly | UNRESR/PURR/GROUPR not fully executed |
-| NJOY2016 Fortran binary built as oracle | Need proper `emerge` port for bit-identical output |
-| Per-module diagnostic harness with A/B comparison | |
+| **Test 84 (H-2) RECONR: 4/4 MTs BIT-IDENTICAL** | MF1/MF2 PENDF headers not yet matching Fortran format |
+| **Test 01 (C-nat) RECONR: 29/29 MTs BIT-IDENTICAL** | MF12/MT=102 photon production section not output |
+| lunion_grid matches Fortran lunion exactly | BROADR not yet validated against oracle |
+| All MF3 data (energies + XS) matches byte-for-byte | Test 02 (Pu-238/U-234) not yet tested in grind phase |
+| Threshold adjustment, pseudo-threshold skip working | UNRESR/PURR/GROUPR/HEATR/THERMR not validated |
+| MT=4 redundant inelastic sum computed correctly | Unit tests may need updating to match Fortran behavior |
+| PENDF writer outputs all MTs in ENDF file order | |
+| Constants CGS, cwaven correct, MAT filtering works | |
 
 ## CRITICAL: What to do next (priority order)
 
-### Step 0: Port Fortran `emerge` to Julia (HIGHEST PRIORITY — approved plan exists)
+### Step 0: Continue Grind Phase — next tests to validate
+
+**What was done in Grind Phase 2:** Fixed 16 RECONR bugs achieving bit-identical MF3 output for Test 84 (H-2, 4 MTs) and Test 01 (C-nat, 29 MTs). Key fixes: lunion_grid with unified DFS, arithmetic midpoints, threshold adjustment, pseudo-threshold skip, sigfig rounding, tolerance-based dedup.
+
+**Next test: Test 02 (Pu-238/U-234)** — multi-material tape, resolved resonances (SLBW). Generate Fortran oracle with `test/validation/diagnose_harness.jl 2`, compare RECONR module output.
+
+**After Test 02:** Pick tests with different formalisms (MLBW, Reich-Moore, SAMMY/LRF=7). Then validate BROADR using the per-module oracle.
+
+### Step 0 (previous): Port Fortran `emerge` to Julia
+
+**Status: LARGELY DONE** — The `lunion_grid` + `_get_legacy_section` + `merge_background_legacy` combination now produces bit-identical output for LRU=0 materials. The `emerge` port is effectively complete for the LRU=0 case. For materials WITH resonances, the resonance XS are added by `adaptive_reconstruct` + `merge_background_legacy`.
 
 **Plan:** `.claude/plans/zesty-baking-snowflake.md`
 
