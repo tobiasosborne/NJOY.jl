@@ -146,16 +146,21 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 
 MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
 
-**Root causes of 15 failing MTs:**
+**Root causes of 15 failing MTs (deeply investigated):**
 
-1. **Grid difference near thermal (MT=1, 2, 102)**: 1582 diffs each. The Fortran has ~41 extra grid points, many clustered near 0.0253 eV. The Fortran adaptive reconstruction adds dense points near thermal because the **capture cross section** follows 1/v (changes within each panel). The Julia also handles 1/v via the adaptive reconstruction, but produces a slightly different grid. The grid diverges at index 82 (E=0.0253 eV): Julia has 1 point, Fortran has ~6 shaded points. Root cause likely in how `resxs` handles the thermal enode point vs how `adaptive_reconstruct` handles it.
+1. **Grid difference: 41 extra Fortran points** (affects MT=1, 2, 102 — 1582 diffs each). Split: 17 extra below 1 eV, 24 extra above 1 eV. The Julia `adaptive_reconstruct` has the correct thermal tightening (err/5 below 0.4999 eV), step guard (estp=4.1), and sigfig midpoint rounding. The convergence test at the critical panel [0.0253, 0.028387] was verified: capture error 0.0030 < threshold 0.00485 → correctly converges. Yet the Fortran subdivides further. Likely cause: the Fortran's cumulative lunion grid (each MF3 section processed sequentially, merging into the previous grid) produces slightly different grid points than the Julia's all-at-once approach. The difference propagates through the step guard (est = 4.1 × (current_E - last_accepted_E)), causing cascading differences.
 
-2. **Threshold boundary shading (MT=4, 51-58, 91, 103, 107)**: ~192-864 diffs each. The Fortran output for threshold reactions starts with `sigfig(thrxx, 7, -1)` and `sigfig(thrxx, 7, +1)` as the first two energies. For example, MT=4 starts at 69999.99 and 70000.01 in Fortran but at 68136.5 in Julia. This is a PENDF writer issue — `_get_legacy_section` doesn't generate shaded threshold boundaries.
+   **Key diagnostic**: Grid diverges at index 82 (E=0.0253). Julia: [0.0253, 0.028387], Fortran: [0.02529999, 0.02530001, 0.02530006, ..., 0.028387]. XS values match at common grid points.
+
+2. **Pseudo-threshold skip** (affects MT=4, 51-58, 91, 103, 107 — 192-864 diffs each). The Fortran `emerge` tracks `ith` — the first grid point where sn > 0 — and only outputs from that point. For MT=4, this means output starts at E=69999.99 (resonance boundary, where the first nonzero inelastic background appears). The Julia `_get_legacy_section` for MT=4 starts at the computed physical threshold of the first inelastic level (E=68136.5), which includes leading zeros that Fortran skips.
+
+3. **Threshold boundary shading**: The Fortran starts threshold sections with sigfig(thrxx, 7, -1) (XS=0) and sigfig(thrxx, 7, +1). The Julia uses the unshaded threshold.
 
 **What's verified working:**
 - Reich-Moore reader (`_read_rm_params`) parses correctly
-- Reich-Moore evaluator (`cross_section_rm`) produces correct XS (errors are grid-based, not formula-based)
-- Grid construction (`lunion_grid`) works but doesn't exactly match Fortran resxs adaptive refinement
+- Reich-Moore evaluator (`cross_section_rm`) produces correct XS — bit-identical at 50+ compared grid points near 70000 eV boundary
+- MF3 interpolation at discontinuities (duplicate breakpoints) works correctly
+- Thermal tightening, step guard, sigfig rounding all implemented correctly
 - Oracle cache generated at `test/validation/oracle_cache/test08/`
 
 ### Not Yet Attempted
