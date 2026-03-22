@@ -280,8 +280,20 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                            e_hi, tab.y[k+1], is_nonlinear, law, stpmax, err, elim)
         end
 
-        # Add section breakpoints + linearisation points to grid
-        append!(grid, tab.x)
+        # Add section breakpoints with singularity shading.
+        # Fortran lunion (lines 1930-1937): when consecutive MF3 breakpoints
+        # are very close (duplicates encoding discontinuities), shade them to
+        # sigfig(x, 7, -1) and sigfig(x, 7, +1) to prevent singularities.
+        for k in 1:npts
+            e = tab.x[k]
+            if k < npts && abs(tab.x[k+1] - e) < 1.0e-9 * abs(e)
+                push!(grid, round_sigfig(e, 7, -1))
+            elseif k > 1 && abs(e - tab.x[k-1]) < 1.0e-9 * abs(e)
+                push!(grid, round_sigfig(e, 7, +1))
+            else
+                push!(grid, e)
+            end
+        end
         append!(grid, new_points)
 
         # Add computed threshold only when:
