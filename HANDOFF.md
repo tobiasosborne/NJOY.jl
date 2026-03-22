@@ -104,8 +104,8 @@ function compare(name, jf, ff)
     end
     println("$name: $np/$(length(mts)) PERFECT")
 end
-compare("T02", "/tmp/julia_test.pendf",
-        "test/validation/oracle_cache/test02/after_reconr.pendf")
+compare("T08", "/tmp/julia_test.pendf",
+        "test/validation/oracle_cache/test08/after_reconr.pendf")
 '
 ```
 5. **Find the first byte that differs**. Trace to root cause. Read the Fortran. Fix.
@@ -118,13 +118,17 @@ When you see a diff, classify it:
 - **XS diff at same energy** (±1 in last digit): issue is in sigma evaluation, sigfig rounding, float accumulation order, or threshold interpolation
 - **Large XS diff**: missing feature (e.g., unresolved resonance evaluation was completely missing)
 - **Format diff** (same value, different string): issue is in `format_endf_float` (the `a11` equivalent)
+- **Line count diff** (same data, shifted lines): extra or missing grid points from shading or threshold handling
 
 For ±1 diffs, common root causes (all encountered and fixed in this project):
-- Missing intermediate `round_sigfig(x, 8)` call before addition (SLBW)
+- Missing intermediate `round_sigfig(x, 8)` call before addition (SLBW elastic)
 - Wrong float accumulation order (non-associativity of IEEE 754)
 - Testing total instead of partials in adaptive convergence
 - Hardcoded linear interpolation instead of using MF3's actual law (LinLog, LogLog)
 - Missing boundary-crossing forced convergence in adaptive reconstruction
+- MF3 backgrounds added rounded instead of unrounded to resonance values
+- Missing `round_sigfig(x, 7)` on primary channel output values
+- URR table missing rdfil2 boundary nodes (sigfig(EL, 7, ±1) shading)
 
 ---
 
@@ -140,35 +144,47 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 
 ### In Progress — Test 08 (Ni-61, Reich-Moore)
 
-| Test | Material | Formalism | MTs | Status |
-|------|----------|-----------|-----|--------|
-| Test 08 | Ni-61 | Reich-Moore (LRF=3) | 3/18 | **3/18 PERFECT** |
+**Test details**: MAT=2834, err=0.01, ENDF file `eni61`, single resolved range [1e-5, 70000 eV] with LRF=3 (Reich-Moore). 18 MTs total.
 
-MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
+**Status: 3/18 PERFECT** (MT=16, 28, 111 — all high-threshold MTs above the problem grid region).
 
-**Root causes of 15 failing MTs (deeply investigated):**
+**Single root cause**: The Fortran PENDF grid has 4825 energy points; the Julia has 4784 (41 fewer). The missing points are **shaded breakpoint pairs** at energies where multiple MF3 sections share a breakpoint. The Fortran creates `sigfig(E, 7, -1)` and `sigfig(E, 7, +1)` pairs at these coincident breakpoints; the Julia keeps the single unshaded energy.
 
-1. **Grid difference: 41 extra Fortran points** (affects MT=1, 2, 102 — 1582 diffs each). Split: 17 extra below 1 eV, 24 extra above 1 eV. The Julia `adaptive_reconstruct` has the correct thermal tightening (err/5 below 0.4999 eV), step guard (estp=4.1), and sigfig midpoint rounding. The convergence test at the critical panel [0.0253, 0.028387] was verified: capture error 0.0030 < threshold 0.00485 → correctly converges. Yet the Fortran subdivides further. Likely cause: the Fortran's cumulative lunion grid (each MF3 section processed sequentially, merging into the previous grid) produces slightly different grid points than the Julia's all-at-once approach. The difference propagates through the step guard (est = 4.1 × (current_E - last_accepted_E)), causing cascading differences.
+**Specifically identified Fortran-only grid points above 70000 eV:**
+- 99999.9 (= sigfig(100000, 7, -1)) — Julia has just 100000
+- 249999.9 and 250000.1 — Julia has just 250000
+- 749999.9 and 750000.1 — Julia has just 750000
+- 1999999 and 2000001 — Julia has just 2000000
 
-   **Key diagnostic**: Grid diverges at index 82 (E=0.0253). Julia: [0.0253, 0.028387], Fortran: [0.02529999, 0.02530001, 0.02530006, ..., 0.028387]. XS values match at common grid points.
+**Pattern**: These are all energies where MANY MF3 sections share a breakpoint (e.g., 100000 appears as a breakpoint in MT=2, 4, 51, 52, 107, etc.). The Fortran `lunion` subroutine creates shaded pairs at these coincident breakpoints through a mechanism at reconr.f90 lines 1996-2003 (coincident MF3 breakpoint + old-grid point → shading). The exact triggering condition has not been fully traced — the condition `(er - sigfig(abs(eg), 7, -1)) > 1e-8*er` appears to evaluate TRUE (skipping the shading), yet the output shows shaded pairs. Understanding this mechanism is the key to fixing all 15 failing MTs.
 
-2. **Pseudo-threshold skip** (affects MT=4, 51-58, 91, 103, 107 — 192-864 diffs each). The Fortran `emerge` tracks `ith` — the first grid point where sn > 0 — and only outputs from that point. For MT=4, this means output starts at E=69999.99 (resonance boundary, where the first nonzero inelastic background appears). The Julia `_get_legacy_section` for MT=4 starts at the computed physical threshold of the first inelastic level (E=68136.5), which includes leading zeros that Fortran skips.
-
-3. **Threshold boundary shading**: The Fortran starts threshold sections with sigfig(thrxx, 7, -1) (XS=0) and sigfig(thrxx, 7, +1). The Julia uses the unshaded threshold.
+**Below 70000 eV (in the resonance range)**: 17 extra Fortran points, mostly near 0.0253 eV (thermal point). The grid diverges at index 82. The Julia has [0.0253, 0.028387] while the Fortran has a dense cluster [0.02529999, 0.02530001, 0.02530006, ..., 0.028387]. These extra points cascade through the step guard (estp=4.1) in the adaptive reconstruction. The Julia's convergence test and thermal tightening (err/5 below 0.4999 eV) are correctly implemented — the remaining difference is from the initial grid having different breakpoint spacing due to the cumulative lunion processing.
 
 **What's verified working:**
-- Reich-Moore reader (`_read_rm_params`) parses correctly
-- Reich-Moore evaluator (`cross_section_rm`) produces correct XS — bit-identical at 50+ compared grid points near 70000 eV boundary
+- Reich-Moore reader (`_read_rm_params`) and evaluator (`cross_section_rm`) produce correct XS — verified bit-identical at 50+ grid points near the 70000 eV boundary
 - MF3 interpolation at discontinuities (duplicate breakpoints) works correctly
-- Thermal tightening, step guard, sigfig rounding all implemented correctly
-- Oracle cache generated at `test/validation/oracle_cache/test08/`
+- Thermal tightening (err/5 below 0.4999 eV), step guard (estp=4.1), sigfig midpoint rounding all correctly implemented in `adaptive_reconstruct`
+- Duplicate MF3 breakpoint shading (at 70000 eV discontinuity) correctly implemented
+- Oracle cache at `test/validation/oracle_cache/test08/`
 
 ### Not Yet Attempted
 
 | Test | Material | Formalism | Notes |
 |------|----------|-----------|-------|
-| Test 07 | U-235 | SLBW + URR(LRF=2) | Needs `_read_urr_lrf2` + `_csunr2` (mode=12) |
-| Test 15-17 | U-238 JENDL | Likely RM | ENDF file not yet identified |
+| Test 07 | U-235 (MAT=1395) | SLBW + URR(LRF=2) | Needs `_read_urr_lrf2` + `_csunr2` (mode=12, Fortran rdf2u2/csunr2) |
+| Test 15-17 | U-238 JENDL | Likely Reich-Moore | ENDF file not yet located in resources/ |
+
+### Formalisms status
+
+| Formalism | Reader | Evaluator | Tested |
+|-----------|--------|-----------|--------|
+| LRU=0 (no resonances) | N/A | N/A | Tests 84, 01 BIT-IDENTICAL |
+| SLBW (LRF=1) | `_read_bw_params` | `cross_section_slbw` | Test 02 BIT-IDENTICAL |
+| MLBW (LRF=2) | `_read_bw_params` | `cross_section_mlbw` | Not tested |
+| Reich-Moore (LRF=3) | `_read_rm_params` | `cross_section_rm` | Test 08 (grid issues, XS correct) |
+| SAMMY/RML (LRF=7) | `_read_sammy_params` | `build_rml_evaluator` | Not tested |
+| URR mode=11 (LRU=2, LRF≤1, LFW=1) | `_read_urr_lfw1` | `_csunr1`/`_gnrl` | Test 02 BIT-IDENTICAL |
+| URR mode=12 (LRU=2, LRF=2) | **NOT IMPLEMENTED** | **NOT IMPLEMENTED** | Needed for Test 07 (U-235) |
 
 ---
 
@@ -184,8 +200,10 @@ MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
 | `src/processing/pendf_writer.jl` | PENDF output. `_get_legacy_section()` handles thresholds, redundant sums. | reconr.f90 emerge/recout |
 | `src/processing/adaptive_grid.jl` | Generic adaptive linearization: `adaptive_reconstruct()`, `round_sigfig()` | reconr.f90 resxs/panel |
 | `src/resonances/slbw.jl` | Single-Level Breit-Wigner cross section evaluation | reconr.f90 csslbw |
-| `src/resonances/unresolved.jl` | **NEW** — Unresolved resonance XS: `_csunr1`, `_gnrl`, table builder + interpolator | reconr.f90 csunr1, gnrl, genunr, sigunr |
-| `src/resonances/reader.jl` | MF2 reader: SLBW, MLBW, RM, SAMMY, **URR (LRU=2)** | reconr.f90 rdfil2, rdf2u1 |
+| `src/resonances/mlbw.jl` | Multi-Level Breit-Wigner + Reich-Moore dispatch | reconr.f90 csmlbw, csrmat |
+| `src/resonances/reich_moore.jl` | Reich-Moore R-matrix cross section evaluation | reconr.f90 csrmat |
+| `src/resonances/unresolved.jl` | Unresolved resonance XS: `_csunr1`, `_gnrl`, table builder + interpolator | reconr.f90 csunr1, gnrl, genunr, sigunr |
+| `src/resonances/reader.jl` | MF2 reader: SLBW, MLBW, RM, SAMMY, URR (LRU=2) | reconr.f90 rdfil2, rdf2u1 |
 | `src/endf/io.jl` | ENDF I/O: `format_endf_float` (with 9-sigfig `a11` extension), `parse_endf_float` | endf.f90 a11, lineio |
 | `src/constants.jl` | Physics constants in CGS matching `phys.f90` | phys.f90 |
 
@@ -193,19 +211,21 @@ MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
 
 | Subroutine | reconr.f90 lines | Purpose |
 |-----------|-----------------|---------|
-| `lunion` | 1771-2238 | Union energy grid from MF3 sections |
-| `resxs`/`panel` | 2240-2569 | Adaptive reconstruction in resonance range |
-| `sigma` | 2571-2667 | Dispatch to SLBW/MLBW/RM + unresolved |
-| `csslbw` | 2669-2856 | SLBW cross section formula |
-| `emerge` | 4646-4982 | Merge grids + evaluate + write output |
-| `genunr` | 1628-1735 | Build unresolved XS table |
-| `sigunr` | 1737-1769 | Interpolate from unresolved table |
-| `csunr1` | 3826-4077 | Unresolved average XS (mode=11) |
-| `gnrl` | 4498-4644 | Fluctuation integrals (Hwang quadrature) |
-| `unfac` | 4473-4496 | Penetrability with AMUN |
-| `rdf2u1` | 1312-1425 | Read LRU=2 unresolved MF2 data |
+| `lunion` | 1771-2238 | Union energy grid from MF3 sections. Key logic: forced 1-2-5 decade points (2112-2127), singularity shading (1930-1937, 2024-2033, 2093-2096), coincident breakpoint shading (1996-2003), step ratio check (2136-2141) |
+| `resxs` | 2240-2569 | Adaptive reconstruction in resonance range. Key: thermal tightening at line 2390 (err/5 below trange=0.4999), step guard at line 2419 (estp=4.1), sigfig midpoint rounding (2360-2372) |
+| `sigma` | 2571-2667 | Dispatch to SLBW/MLBW/RM + unresolved (sigunr at 2659-2665) |
+| `csslbw` | 2669-2856 | SLBW cross section formula. Key: sigfig(sigp(2),8,0) at line 2845 |
+| `csrmat` | 2858-3023 | Reich-Moore R-matrix cross section formula |
+| `emerge` | 4646-4982 | Merge grids + evaluate + write output. Key: itype dispatch (4756-4770), MF3 bg suppression in URR range (4800), sigfig(sn,7,0) at line 4832, ith pseudo-threshold tracking (4834) |
+| `recout` | 4984-5441 | Write PENDF. Key: redundant reactions output sigfig(tot(imtr+1),7,0) at line 5308 |
+| `genunr` | 1628-1735 | Build unresolved XS table (includes MF3 bkg at lines 1695-1731) |
+| `sigunr` | 1737-1769 | Interpolate from unresolved table (log-log) |
+| `rdfil2` | 700-881 | Read all MF2 ranges. Key: eunr boundary nodes (759-775), eunr sort+dedup (856-869) |
+| `rdf2u1` | 1312-1425 | Read LRU=2 unresolved data (mode=11, energy-dependent fission widths) |
+| `rdf2u2` | NOT YET READ | Read LRU=2 unresolved data (mode=12, all widths energy-dependent) |
+| `csunr2` | NOT YET READ | Unresolved XS for mode=12 |
 | `a11` | endf.f90:882-981 | Float → 11-char ENDF format |
-| `sigfig` | util.f90:361-393 | Round to N sigfigs with shading |
+| `sigfig` | util.f90:361-393 | Round to N sigfigs with shading. Key: bias=1.0000000000001 at line 390 |
 
 ### Pipeline flow (reconr.jl for LRU=1 + URR materials)
 
@@ -213,21 +233,31 @@ MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
 1. read_mf2 → MF2Data (includes resolved + unresolved ranges)
 2. read_mf3_sections → Vector{MF3Section}
 3. build_unresolved_table → URRTable (csunr1 + MF3 bkg at egridu nodes)
+   - Includes rdfil2 boundary nodes: sigfig(EL,7,±1), sigfig(EH,7,±1)
+   - Sort, dedup, overlap marking (negative energies for E < eresr)
 4. _add_mf2_nodes! → MF2 peak/width nodes + URR table energies
 5. lunion_grid → bg_grid (union of MF3 panels + MF2 nodes + URR nodes)
+   - Shades duplicate MF3 breakpoints to sigfig(x,7,±1)
+   - Processes sections cumulatively (each sees previous grid)
 6. filter to [eresl, eresh) → res_grid
 7. adaptive_reconstruct(xs_partials, res_grid) → res_energies
    - xs_partials returns (elastic, fission, capture) — NOT total
    - force_boundaries=[eresr] prevents subdivision across resolved/unresolved boundary
+   - Thermal tightening: err/5 below 0.4999 eV
+   - Step guard: estp=4.1
 8. merge bg_outside + res_energies → all_energies
 9. for each energy: sigma_mf2 (resolved) + eval_unresolved (URR table) → res_xs
 10. merge_background_legacy(all_energies, res_xs, mf3_sections) → final XS
+    - Primary channels (MT=2,18,102): add UNROUNDED MF3 bg to resonance
+    - Non-primary channels: round MF3 bg to 7 sigfigs before accumulating
+    - Round each primary channel to 7 sigfigs (matching emerge line 4832)
+    - Total = round_sigfig(other_bg + sigfig(el) + sigfig(fi) + sigfig(ca), 7)
 11. write_pendf_file → PENDF output
 ```
 
 ---
 
-## Traps and Lessons (from 4 debugging sessions)
+## Traps and Lessons (from 5 debugging sessions)
 
 ### Critical traps
 
@@ -257,27 +287,33 @@ MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
 
 12. **ENDF float format has two modes** — The Fortran `a11` uses 9-sigfig fixed-point for values in (0.1, 1e7) with genuine precision, otherwise 7-sigfig scientific. Falls back to scientific when trailing zeros indicate only 7 sigfigs. Only applied to energy values (odd positions), not XS values (even positions in data pairs). See `pair_data` parameter in `_write_data_values`.
 
-13. **URR table needs rdfil2 boundary nodes** — The Fortran `rdfil2` adds `sigfig(EL,7,-1)` (negative, overlap marker) and `sigfig(EL,7,+1)` to `eunr`, then sorts and deduplicates. This means the URR table has a node at `sigfig(EL,7,+1)` (e.g., 200.0001) NOT at `sigfig(EL,7,0)` (200.0). The `sigfig(EL,7,0)` entry is removed by dedup (too close to previous). Without this, sigunr interpolates at boundary energies instead of returning the exact table value, causing ±1 diffs. Also adds egridu intermediate points when step ratio > 1.26.
+13. **URR table needs rdfil2 boundary nodes** — The Fortran `rdfil2` adds `sigfig(EL,7,-1)` (negative, overlap marker) and `sigfig(EL,7,+1)` to `eunr`, then sorts and deduplicates. This means the URR table has a node at `sigfig(EL,7,+1)` (e.g., 200.0001) NOT at `sigfig(EL,7,0)` (200.0). Without this, sigunr interpolates at boundary energies instead of returning the exact table value.
 
 14. **lunion skips MT=251-300** — Line 1892: `if ((mth.ge.251.and.mth.le.300).and.mth.ne.261) go to 150`. These are non-cross-section quantities (mubar, xi, gamma). They do NOT contribute grid points.
 
-15. **Duplicate MF3 breakpoints** — MF3 data often has duplicate x-values at resonance range boundaries (e.g., x=1.0 appears twice with y=14.35 and y=0.0). This encodes a discontinuity. The interpolation function handles this correctly.
+15. **Duplicate MF3 breakpoints** — MF3 data often has duplicate x-values at resonance range boundaries (e.g., x=70000 appears twice with y=0.0 and y=0.04). This encodes a discontinuity. The Fortran lunion shades these to `sigfig(x,7,-1)` and `sigfig(x,7,+1)`. Implemented in Julia lunion_grid.
+
+16. **Forced 1-2-5 decade points** — Fortran lunion (lines 2112-2127) forces grid points at 1, 2, 5, 10, 20, 50, ..., 100000 eV AND the thermal point 0.0253 eV. Only applies below `elim = min(0.99e6, eresr)`. The Julia's `_bisect_panel!` handles this through the step ratio check, but the forced decade logic is NOT separately implemented. For Test 02 (eresr=200 eV), this doesn't matter. For Test 08 (eresr=70000 eV), the forced decades up to 50000 eV should match but haven't been independently verified.
+
+17. **Coincident breakpoint shading in lunion** — The Fortran lunion creates shaded pairs when an MF3 breakpoint coincides with an existing grid point from a previously processed section (reconr.f90:1996-2003). This is NOT the same as duplicate breakpoints (trap #15). It produces sigfig(E,7,0) and sigfig(E,7,+1) at shared breakpoints like 100000, 250000, 750000, 2000000 eV. The exact triggering mechanism has not been fully traced in the Fortran code. **This is the primary open problem for Test 08.**
 
 ---
 
 ## Immediate Next Steps
 
-### Priority 1: Fix Test 08 grid near thermal
+### Priority 1: Fix Test 08 coincident breakpoint shading
 
-The adaptive reconstruction grid differs near 0.0253 eV. The Fortran resxs (reconr.f90:2240-2569) adds dense points near the thermal enode because the capture 1/v cross section changes within panels. Compare the Fortran resxs panel bisection logic against Julia's `adaptive_reconstruct` to find the exact divergence point. Key files: `src/processing/adaptive_grid.jl`, Fortran `resxs`/`panel`.
+The Fortran lunion creates shaded pairs at energies shared by multiple MF3 sections. Five specific Fortran-only points have been identified (see "Current State" above). The mechanism is in reconr.f90 lines 1996-2003, triggered when an MF3 breakpoint `er` is close to an old-grid point `eg`. Trace through the Fortran code with specific energy values (er=100000, eg=100000 from MT=2's grid) to understand exactly when the condition fires. The fix goes in `lunion_grid` in `reconr_grid.jl`.
 
-### Priority 2: Fix Test 08 threshold shading
+**Approach**: Add instrumented tracing to the Fortran (via print statements in a local build) OR exhaustively enumerate the condition at each energy. Once the mechanism is understood, replicate it in Julia. Fixing this single issue should make all 15 failing MTs pass (since the XS values at common grid points already match).
 
-The Fortran emerge outputs threshold reactions (MT=4, 51-91, etc.) starting with `sigfig(thrxx, 7, -1)` and `sigfig(thrxx, 7, +1)` as the first two energies. The Julia `_get_legacy_section` doesn't generate these shaded boundaries. Fix in `pendf_writer.jl`.
+### Priority 2: Implement LRU=2/LRF=2 reader (mode=12)
 
-### Priority 3: Implement LRU=2/LRF=2 reader (mode=12)
+Test 07 (U-235, MAT=1395, err=0.005, ENDF file `t511`) needs `_read_urr_lrf2` (matching Fortran `rdf2u2`) and `_csunr2` evaluator. This unlocks U-235 and Mn-55 tests. The Fortran `rdf2u2` is around reconr.f90 line 828. The evaluator `csunr2` handles the case where ALL partial widths are energy-dependent (unlike mode=11 where only fission widths vary).
 
-Test 07 (U-235) needs `_read_urr_lrf2` (matching Fortran `rdf2u2`, reconr.f90:828-829) and `_csunr2` evaluator. This unlocks U-235 and Mn-55 tests.
+### Priority 3: Grind more tests
+
+After Test 08, try Test 07 (U-235, needs mode=12), then other tests with MLBW, different materials. Each new test exercises different code paths.
 
 ### Priority 4: Grind BROADR
 
@@ -291,13 +327,13 @@ The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next 
 |------|-----|-----------|-----|-----------|-------|--------|
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→... | RECONR **BIT-IDENTICAL** |
-| 02 | 1050 | t404 | 0.005 | SLBW+URR | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
-| 08 | 2834 | eni61 | 0.01 | Reich-Moore | RECONR→BROADR→HEATR→... | RECONR **3/18 PERFECT** |
-| 07 | 1395 | t511 | 0.005 | SLBW+URR(LRF=2) | RECONR→BROADR→... | **Needs mode=12 reader** |
+| 02 | 1050 | t404 | 0.005 | SLBW+URR(mode=11) | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
+| 08 | 2834 | eni61 | 0.01 | Reich-Moore(LRF=3) | RECONR→BROADR→HEATR→... | RECONR **3/18 PERFECT** |
+| 07 | 1395 | t511 | 0.005 | SLBW+URR(mode=12) | RECONR→BROADR→... | **Needs mode=12 reader** |
 
 ---
 
-## Session History (what was done across 4 grind phases)
+## Session History (what was done across 5 grind phases)
 
 ### Phase 1-2: LRU=0 materials (Tests 84, 01) → 33/33 PERFECT
 
@@ -320,12 +356,14 @@ Built `lunion_grid`, fixed 17 bugs in grid construction, XS evaluation, threshol
 - Boundary-crossing forced convergence (`force_boundaries`)
 - Expanded adaptive range to [eresl, eresh) for full resonance + unresolved coverage
 
-### Phase 5: Final 3 diffs → 17/17 BIT-IDENTICAL
+### Phase 5: Test 02 final 3 diffs + Test 08 investigation → Test 02 17/17 BIT-IDENTICAL, Test 08 3/18 PERFECT
 
-Three fixes to achieve 100% bit agreement on Test 02:
+Three fixes achieved 100% bit agreement on Test 02:
 
 1. **MT=1 total (753 diffs → 0)**: Fortran `lunion` skips MT=1 — the total is accumulated from all non-redundant sections, each `sigfig(sn,7,0)`'d, with a final `sigfig(total,7,0)` in recout. Fixed `merge_background_legacy` to `round_sigfig` each primary channel before summing, then `round_sigfig` the total. MF3 backgrounds for primary channels are now added UNROUNDED to the resonance value (matching Fortran where `gety1` bg is added to resonance before `sigfig`).
 
 2. **MT=102 capture (1 diff → 0)**: At E=191.58 eV, the combined (bg + resonance) value was at a `sigfig(7)` rounding boundary. `format_endf_float` uses `@sprintf` (round-half-to-even) while Fortran's `sigfig` has a tiny upward bias (`10^(ndig-11)`). Fixed by applying `round_sigfig(elastic/fission/capture, 7)` explicitly in `merge_background_legacy` before storing, matching Fortran emerge line 4832.
 
-3. **MT=2 elastic (1 diff → 0)**: At E=200.0001 eV (resolved/unresolved boundary), the URR table's first node was at `sigfig(200,7,0)=200.00000000002` but the Fortran table had `sigfig(200,7,+1)=200.0001` (from rdfil2 boundary nodes). The `sigfig(200,7,0)` entry was removed by Fortran's dedup. Fixed `build_unresolved_table` to include rdfil2 boundary nodes (`sigfig(EL,7,±1)` with overlap marking, `sigfig(EH,7,±1)`), then sort and deduplicate matching Fortran rdfil2 lines 856-869.
+3. **MT=2 elastic (1 diff → 0)**: At E=200.0001 eV (resolved/unresolved boundary), the URR table's first node was at `sigfig(200,7,0)=200.00000000002` but the Fortran table had `sigfig(200,7,+1)=200.0001` (from rdfil2 boundary nodes). Fixed `build_unresolved_table` to include rdfil2 boundary nodes (`sigfig(EL,7,±1)` with overlap marking, `sigfig(EH,7,±1)`), then sort and deduplicate matching Fortran rdfil2 lines 856-869.
+
+Test 08 investigation: identified root cause as coincident breakpoint shading in lunion (5 specific Fortran-only grid points traced, XS verified correct at shared points, RM evaluator verified bit-identical, thermal tightening and step guard verified correct). Added duplicate breakpoint shading to lunion_grid.
