@@ -1127,8 +1127,6 @@ function merge_background_legacy(energies::Vector{Float64},
             elastic = 1.0e-8
         end
         # Fortran emerge: sig(1) = sig(1) + sig(2) + sig(3) + sig(4)
-        # where sig(1) already holds other_bg. Match this exact order
-        # to avoid float non-associativity differences in the 8th sigfig.
         total = other_bg + elastic + fission + capture
         result[i] = CrossSections(total, elastic, fission, capture)
     end
