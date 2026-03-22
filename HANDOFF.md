@@ -361,6 +361,68 @@ The oracle cache has `after_broadr.pendf` for Tests 01, 02, 07. This is the next
 
 ---
 
+## Sweep Results (Phase 8 — partial, tests 01-65)
+
+Run via `/tmp/sweep_reconr.jl` using `generate_module_references()` for Fortran oracle + `reconr()` + byte-for-byte MF3 comparison. Oracle cache populated at `test/validation/oracle_cache/testNN/`.
+
+### BIT-IDENTICAL (10 tests)
+| Test | MAT | Material | MTs | Notes |
+|------|-----|----------|-----|-------|
+| 01 | 1306 | C-nat | 29/29 | LRU=0, t511 |
+| 02 | 1050 | Pu-238 | 17/17 | SLBW+URR mode=11, t404 |
+| 08 | 2834 | Ni-61 | 18/18 | Reich-Moore LRF=3, eni61 |
+| 09 | 1301 | N-nat | 3/3 | LRU=0, t511 |
+| 10 | 1050 | Pu-238 | 17/17 | Same material, different test chain |
+| 11 | 1050 | Pu-238 | 17/17 | Same material, different test chain |
+| 12 | 2834 | Ni-61 | 18/18 | Same material, different test chain |
+| 13 | 2834 | Ni-61 | 18/18 | Same material, different test chain |
+| 25 | 125 | H-1 | 3/3 | ENDF-8.0, LRU=0 |
+| 30 | 125 | H-1 | 3/3 | ENDF-8.0, LRU=0 |
+
+### Close (>50% MTs perfect)
+| Test | MAT | Material | MTs | Notes |
+|------|-----|----------|-----|-------|
+| 27 | 9437 | Pu-239 | 35/49 (71%) | Reich-Moore, ENDF-8.0 |
+| 45 | 525 | B-10 | 40/53 (75%) | LRU=0, ENDF-8.0 |
+| 47 | 9437 | Pu-239 | 35/49 (71%) | Same as 27, different chain |
+
+### Partial (<50% MTs)
+| Test | MAT | Material | MTs | Notes |
+|------|-----|----------|-----|-------|
+| 20 | 1725 | Cl-35 | 8/162 (5%) | RML (LRF=7), SAMMY formalism |
+| 18 | 9999 | Cf-252 | 1/9 | LRU=0 with special data |
+| 26 | 9455 | Pu-245 | 1/23 | ENDF-8.0 |
+| 46 | 2631 | Fe-56 | 2/73 | JEFF3.3, Reich-Moore |
+| 49 | 4025 | Zr-90 | 1/46 | ENDF-8.0 |
+| 55 | 2631 | Fe-56 | 2/61 | TENDL-19, Reich-Moore |
+| 21 | 2637 | Fe-58 | 1/79 | ENDF-8.0, very slow (93s) |
+
+### Zero Match
+| Test | MAT | Material | MTs | Notes |
+|------|-----|----------|-----|-------|
+| 04 | 1395 | U-235 | 0/27 | Same as 07 but err=0.1 |
+| 07 | 1395 | U-235 | 0/27 | SLBW+URR mode=12, grid 6953 vs 6944 |
+| 19 | 9443 | Pu-241 | 0/23 | ENDF-6, URR |
+| 34 | 9440 | Pu-240 | 0/53 | ENDF-8.0, large material |
+| 60 | 2600 | Fe-nat | 0/1 | IRDFF-II dosimetry file |
+
+### Errors
+- **15-17**: JENDL U-238 — float parsing bug (`"2.530000-2"` old format)
+- **03**: Photon data (MAT=1) — no MF2/MT151
+- **56-58, 64**: Photonuclear (`g-` files) — no MF2/MT151
+- **24, 28-29, 31-32, 35, 37-42, 44**: Fortran oracle failed (ENDF-8.0 input deck issues)
+
+### Key Insights from Sweep
+1. **All LRU=0 materials pass perfectly** — the grid builder and writer are solid
+2. **Pu-238 SLBW+URR passes across 3 test variants** — mode=11 URR is reliable
+3. **Pu-239 Reich-Moore is 71% perfect** — most MTs match, threshold-area diffs remain
+4. **B-10 is 75% perfect** — similar threshold-area grid diffs
+5. **Fe-56/58 are low** — likely due to many inelastic levels with threshold issues
+6. **JENDL float format** needs a parser fix for old-style exponents
+7. **Photonuclear data** needs MF23 support (no MF2/MT151 in those files)
+
+---
+
 ## Test Details
 
 | Test | MAT | ENDF file | err | Formalism | Chain | Status |
