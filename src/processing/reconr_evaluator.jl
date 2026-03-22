@@ -1042,7 +1042,8 @@ end
 
 function merge_background_legacy(energies::Vector{Float64},
                                   res_xs::Vector{<:CrossSections},
-                                  mf3_sections::Vector{MF3Section})
+                                  mf3_sections::Vector{MF3Section};
+                                  awr::Float64 = 0.0)
     # MTs to skip entirely (redundant sums or non-cross-section quantities):
     #   MT=1   : total (redundant — recomputed from partials)
     #   MT=3   : nonelastic (redundant — total - elastic)
@@ -1055,6 +1056,20 @@ function merge_background_legacy(energies::Vector{Float64},
     _skip(mt::Int) = mt == 1 || mt == 3 || mt == 4 || mt == 27 || mt == 101 ||
                      (mt >= 46 && mt <= 49) || mt > 200
 
+    # Pre-compute physical thresholds for each section, shaded up to match
+    # the grid point (matching Fortran lunion line 1925: thrxx=sigfig(thrx,7,+1)
+    # and emerge line 4795: sn=0 at threshold)
+    thresholds = Dict{Int, Float64}()
+    for sec in mf3_sections
+        mt = Int(sec.mt)
+        qx = sec.QI
+        if qx < 0.0 && mt != 2 && mt != 18 && mt != 19 && mt != 102
+            thrx = awr > 0.0 ? -qx * (awr + 1) / awr : -qx
+            thrxx = round_sigfig(thrx, 7, +1)  # shade up, matching grid point
+            thresholds[mt] = thrxx
+        end
+    end
+
     n = length(energies)
     result = Vector{CrossSections{Float64}}(undef, n)
     for i in 1:n
@@ -1066,8 +1081,19 @@ function merge_background_legacy(energies::Vector{Float64},
         for sec in mf3_sections
             mt = Int(sec.mt)
             _skip(mt) && continue
+
+            # Suppress at threshold (Fortran emerge line 4795:
+            # if thresh>1 and |thresh-eg|<test*thresh → sn=0)
+            thrx = get(thresholds, mt, 0.0)
+            if thrx > 1.0 && abs(thrx - e) < 1.0e-7 * thrx
+                continue  # sn=0 at threshold
+            end
+
             bg = interpolate(sec.tab, e)
             bg == 0.0 && continue
+            # Round to 7 significant figures matching Fortran emerge
+            # (reconr.f90:4836: sn=sigfig(sn,7,0))
+            bg = round_sigfig(bg, 7)
             if mt == 2
                 elastic += bg
             elseif mt == 18 || mt == 19 || mt == 20 || mt == 21 || mt == 38

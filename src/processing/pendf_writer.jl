@@ -96,9 +96,10 @@ function write_pendf(io::IO, result::NamedTuple;
     # MF3 sections
     _write_legacy_mf3(io, result, actual_mat, reactions, ns)
 
-    # Terminators
-    _write_record_sep(io, 0, 0, 0)
-    _write_record_sep(io, -1, 0, 0)
+    # MEND and TEND (NS=0 matching Fortran)
+    _write_fend_zero(io, 0)   # MEND: MAT=0, MF=0, MT=0, NS=0
+    blanks = repeat(" ", 66)
+    @printf(io, "%s%4d%2d%3d%5d\n", blanks, -1, 0, 0, 0)  # TEND
 end
 
 """
@@ -135,6 +136,18 @@ end
 function _write_fend(io::IO, mat::Int; ns::Union{Ref{Int}, Nothing}=nothing)
     # FEND only: each MT section writes its own SEND; no extra SEND here
     _write_record_sep(io, mat, 0, 0; ns=ns)
+end
+
+"""Write SEND record with NS=99999 (matching Fortran convention)."""
+function _write_send(io::IO, mat::Int, mf::Int)
+    blanks = repeat(" ", 66)
+    @printf(io, "%s%4d%2d%3d%5d\n", blanks, mat, mf, 0, 99999)
+end
+
+"""Write FEND record with NS=0 (matching Fortran convention)."""
+function _write_fend_zero(io::IO, mat::Int)
+    blanks = repeat(" ", 66)
+    @printf(io, "%s%4d%2d%3d%5d\n", blanks, mat, 0, 0, 0)
 end
 
 function _write_cont_line(io::IO, c1, c2, l1, l2, n1, n2,
@@ -279,18 +292,17 @@ end
 # ==========================================================================
 
 function _collect_reactions(result)
+    # Collect reactions in ENDF file order (matching Fortran emerge).
+    # MT=1 (total) always first. Then non-redundant MTs from MF3 in file order.
     reactions = Tuple{Int32, String}[]
     push!(reactions, (Int32(1), "total"))
-    push!(reactions, (Int32(2), "elastic"))
-    if any(x -> x > 0.0, result.fission)
-        push!(reactions, (Int32(18), "fission"))
-    end
-    push!(reactions, (Int32(102), "capture"))
+
     for sec in result.mf3_sections
         mt = Int(sec.mt)
-        if mt != 1 && mt != 2 && mt != 18 && mt != 19 && mt != 102
-            push!(reactions, (Int32(mt), "MT$mt"))
-        end
+        # Skip truly redundant MTs (never output by Fortran)
+        (mt == 1 || mt == 3 || mt == 4 || mt == 101 || mt == 120 ||
+         mt == 151 || mt == 27 || (mt >= 251 && mt <= 300 && mt != 261)) && continue
+        push!(reactions, (Int32(mt), "MT$mt"))
     end
     return reactions
 end
@@ -313,8 +325,8 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                          Int(mat), 1, 451, ns)
     end
 
-    _write_record_sep(io, Int(mat), 1, 0)
-    _write_record_sep(io, Int(mat), 0, 0)
+    _write_send(io, Int(mat), 1)
+    _write_fend_zero(io, Int(mat))
 end
 
 function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
@@ -336,51 +348,114 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
         _write_cont_line(io, spi, ap, 0, 0, 0, 0, Int(mat), 2, 151, ns)
     end
 
-    _write_record_sep(io, Int(mat), 2, 0)
-    _write_record_sep(io, Int(mat), 0, 0)
+    _write_send(io, Int(mat), 2)
+    _write_fend_zero(io, Int(mat))
 end
 
 function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
     energies = result.energies
-    n = length(energies)
+    awr = result.mf2.AWR
+    za = result.mf2.ZA
 
-    # Continuous sequence numbering across all MF3 sections
-    ns[] = 1
     for (mt, _) in reactions
-        xs_data = _get_legacy_xs(result, Int(mt))
-        xs_data === nothing && continue
+        ns[] = 1  # Restart sequence per section (matching Fortran)
 
-        _write_cont_line(io, result.mf2.ZA, result.mf2.AWR, 0, 99, 0, 0,
+        # Get xs data and determine threshold
+        sec_data = _get_legacy_section(result, Int(mt))
+        sec_data === nothing && continue
+
+        sec_e, sec_xs, qm, qi = sec_data
+
+        # HEAD: ZA, AWR, 0, LR, 0, 0
+        # LR=99 only for MT=1 (total), matching Fortran emerge
+        lr = mt == 1 ? 99 : 0
+        _write_cont_line(io, za, awr, 0, lr, 0, 0,
                          Int(mat), 3, Int(mt), ns)
-        _write_cont_line(io, 0.0, 0.0, 0, 0, 1, n,
+
+        # TAB1: QM, QI, 0, 0, NR=1, NP
+        np = length(sec_e)
+        _write_cont_line(io, qm, qi, 0, 0, 1, np,
                          Int(mat), 3, Int(mt), ns)
 
-        vals = Float64[Float64(n), 2.0]
-        _write_data_values(io, vals, Int(mat), 3, Int(mt), ns)
+        # Interpolation table: NBT, INT as integers (Fortran format)
+        @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n",
+                np, 2, "", Int(mat), 3, Int(mt), ns[])
+        ns[] += 1
 
+        # Data pairs
         data = Float64[]
-        sizehint!(data, 2 * n)
-        for i in 1:n
-            push!(data, energies[i])
-            push!(data, xs_data[i])
+        sizehint!(data, 2 * np)
+        for i in 1:np
+            push!(data, sec_e[i])
+            push!(data, sec_xs[i])
         end
         _write_data_values(io, data, Int(mat), 3, Int(mt), ns)
 
-        # SEND with continuous sequence numbering
-        _write_record_sep(io, Int(mat), 3, 0; ns=ns)
+        # SEND (NS=99999 per ENDF convention)
+        _write_send(io, Int(mat), 3)
     end
 
-    # FEND with continuous sequence numbering
-    _write_record_sep(io, Int(mat), 0, 0; ns=ns)
+    # FEND (MAT, MF=0, MT=0, NS=0)
+    _write_fend_zero(io, Int(mat))
 end
 
-function _get_legacy_xs(result, mt::Int)
-    mt == 1 && return result.total
-    mt == 2 && return result.elastic
-    (mt == 18 || mt == 19) && return result.fission
-    mt == 102 && return result.capture
+"""Get energies, XS, QM, QI for a given MT, handling thresholds."""
+function _get_legacy_section(result, mt::Int)
+    energies = result.energies
+    awr = result.mf2.AWR
+
+    # Look up QM/QI from the MF3 section data
+    qm, qi = 0.0, 0.0
     for sec in result.mf3_sections
-        Int(sec.mt) == mt && return [interpolate(sec.tab, e) for e in result.energies]
+        if Int(sec.mt) == mt
+            qm, qi = sec.QM, sec.QI
+            break
+        end
+    end
+
+    if mt == 1
+        return energies, result.total, 0.0, 0.0
+    elseif mt == 2
+        return energies, result.elastic, qm, qi
+    elseif mt == 18 || mt == 19
+        return energies, result.fission, qm, qi
+    elseif mt == 102
+        return energies, result.capture, qm, qi
+    end
+
+    # Non-primary MT: find the MF3 section
+    for sec in result.mf3_sections
+        Int(sec.mt) != mt && continue
+
+        qm = sec.QM
+        qi = sec.QI
+
+        # Compute threshold for reactions with Q < 0
+        thrxx = 0.0
+        if qi < 0.0
+            thrx = awr > 0.0 ? -qi * (awr + 1) / awr : -qi
+            thrxx = round_sigfig(thrx, 7, +1)
+        end
+
+        # Filter to points at or above threshold
+        # (matching Fortran emerge line 4792: thresh-eg > test → skip)
+        sec_e = Float64[]
+        sec_xs = Float64[]
+        for e in energies
+            if thrxx > 0.0 && thrxx - e > 1.0e-9 * thrxx
+                continue  # below threshold
+            end
+            bg = interpolate(sec.tab, e)
+            # Set xs=0 at threshold (matching Fortran emerge line 4795)
+            if thrxx > 0.0 && abs(thrxx - e) < 1.0e-7 * thrxx
+                bg = 0.0
+            end
+            push!(sec_e, e)
+            push!(sec_xs, round_sigfig(bg, 7))
+        end
+
+        isempty(sec_e) && return nothing
+        return sec_e, sec_xs, qm, qi
     end
     return nothing
 end

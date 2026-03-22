@@ -216,26 +216,26 @@ function reconr(endf_file::AbstractString;
 
         # Handle materials with no resonances (LRU=0 only, e.g. H-2)
         if (isinf(eresl) || eresh == 0.0) && rml_data === nothing
-            # No resonance range -- use MF3 energies directly with zero resonance XS
-            # Build grid from MF3 breakpoints only
-            all_energies = Float64[]
-            for sec in mf3_sections
-                append!(all_energies, sec.tab.x)
+            # For LRU=0, Fortran sets eresl/eresr/eresh from MF2 range bounds
+            # (reconr.f90:304-322). Extract EH from MF2 for boundary filtering.
+            elow = 1.0e-5
+            ehigh = 0.0
+            for iso in mf2.isotopes
+                for rng in iso.ranges
+                    ehigh = max(ehigh, rng.EH)
+                end
             end
-            if isempty(all_energies)
-                push!(all_energies, 1.0e-5)
-                push!(all_energies, 2.0e7)
-            end
-            sort!(all_energies)
-            unique!(all_energies)
-            filter!(e -> e > 0.0, all_energies)
+            if ehigh <= 0.0; ehigh = 2.0e7; end
 
-            # Linearize for 1/v: add midpoints, decade points, thermal point
-            linearize_one_over_v!(all_energies, err)
+            # Build union grid matching Fortran lunion (reconr.f90:1771-2238).
+            all_energies = lunion_grid(mf3_sections, err;
+                                       eresl=elow, eresr=ehigh, eresh=ehigh,
+                                       awr=mf2.AWR)
 
             n_pts = length(all_energies)
             res_xs = [CrossSections() for _ in 1:n_pts]
-            merged_xs = merge_background_legacy(all_energies, res_xs, mf3_sections)
+            merged_xs = merge_background_legacy(all_energies, res_xs, mf3_sections;
+                                                awr=mf2.AWR)
 
             total_arr = [xs.total for xs in merged_xs]
             elastic_arr = [xs.elastic for xs in merged_xs]

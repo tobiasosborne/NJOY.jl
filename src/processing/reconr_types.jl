@@ -82,7 +82,7 @@ function read_mf3_sections(io::IO, mat::Integer)
                 head = read_cont(io)
                 tab1 = read_tab1(io)
                 tf = TabulatedFunction(tab1)
-                push!(sections, MF3Section(Int32(mt), head.C1, tab1.C2, tf))
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf))
                 # Skip to SEND
                 _skip_to_send(io)
             catch e

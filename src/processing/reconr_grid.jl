@@ -3,6 +3,11 @@
 # Step 2 of the RECONR pipeline: build_grid creates the initial energy grid
 # for adaptive reconstruction by taking the union of MF2 resonance nodes
 # and MF3 energy breakpoints.
+#
+# The lunion_grid function matches Fortran RECONR's `lunion` subroutine
+# (reconr.f90:1771-2238): for each MF3 section, panels are processed with a
+# unified DFS that simultaneously forces decade points, checks ratios
+# (linear sections), and checks interpolation errors (nonlinear sections).
 
 # ==========================================================================
 # Step 2: Build initial energy grid
@@ -29,7 +34,7 @@ function build_grid(mf2::MF2Data, mf3_sections::Vector{MF3Section};
 
     # Add MF3 breakpoints (filtered: skip redundant MT=1, MT=3)
     # Also linearize non-linear interpolation regions (log-log, lin-log)
-    # matching Fortran lunion's 1/v linearization behaviour.
+    # matching Fortran lunion's 1/v linearisation behaviour.
     for sec in mf3_sections
         mt = Int(sec.mt)
         (mt == 1 || mt == 3 || mt == 101) && continue
@@ -187,6 +192,232 @@ function _add_decade_points!(nodes::Vector{Float64})
 end
 
 # ==========================================================================
+# lunion_grid -- unified grid builder matching Fortran reconr.f90:1771-2238
+# ==========================================================================
+
+"""
+    lunion_grid(mf3_sections, err; nodes=Float64[], elim=1e6) -> Vector{Float64}
+
+Build the union energy grid for RECONR by processing each MF3 section
+through a unified bisection loop that simultaneously:
+1. Forces decade points (1, 2, 5 × 10^n eV and thermal 0.0253 eV)
+2. Checks energy ratio for linear interpolation (ratio ≤ stpmax)
+3. Checks interpolation error for nonlinear sections (|true-linear| ≤ errn·|true|)
+
+This matches Fortran RECONR's `lunion` subroutine (reconr.f90:1771-2238).
+Each MF3 section is processed sequentially; its panels are checked with
+a stack-based DFS and accepted points are added to the cumulative grid.
+"""
+function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
+                     nodes::Vector{Float64} = Float64[],
+                     elim::Float64 = 0.99e6,  # Fortran: reconr.f90:1797
+                     eresl::Float64 = 0.0,
+                     eresr::Float64 = 0.0,
+                     eresh::Float64 = 0.0,
+                     awr::Float64 = 0.0)  # AWR for threshold computation
+    stpmax = 1.0 + sqrt(5.3 * err)
+
+    # Cumulative grid starts from initial nodes
+    grid = copy(nodes)
+    sort!(grid); unique!(grid)
+
+    for sec in mf3_sections
+        mt = Int(sec.mt)
+        # Skip redundant reactions (matching Fortran reconr.f90:1882-1901)
+        (mt == 1 || mt == 3 || mt == 101) && continue
+        mt == 4 && continue   # inelastic total (redundant)
+        (mt >= 251 && mt <= 300 && mt != 261) && continue
+        mt == 120 && continue
+        mt == 151 && continue
+
+        tab = sec.tab
+        npts = length(tab.x)
+        npts < 2 && continue
+
+        # Compute physical threshold for reactions with Q < 0
+        # (matching Fortran lunion lines 1915-1936)
+        thrx = 0.0
+        qx = sec.QI
+        if qx < 0.0 && mt != 2 && mt != 18 && mt != 19 && mt != 102
+            thrx = if awr > 0.0
+                -qx * (awr + 1) / awr
+            else
+                -qx
+            end
+        end
+
+        # Process this section's panels through the bisection loop
+        new_points = Float64[]
+        sizehint!(new_points, 1024)
+
+        for k in 1:(npts - 1)
+            e_lo = tab.x[k]
+            e_hi = tab.x[k + 1]
+            e_hi <= e_lo && continue
+
+            y_lo = tab.y[k]
+            y_hi = tab.y[k + 1]
+
+            # Determine interpolation law
+            law = _law_for_interval(tab, k)
+            is_nonlinear = (law != LinLin && law != Histogram)
+
+            # Bisect this panel with the Fortran label-310 DFS
+            _bisect_panel!(new_points, tab, e_lo, y_lo, e_hi, y_hi,
+                           is_nonlinear, law, stpmax, err, elim)
+        end
+
+        # Add section breakpoints + linearisation points to grid
+        append!(grid, tab.x)
+        append!(grid, new_points)
+
+        # Add computed threshold if it differs from the raw MF3 breakpoint
+        # (Fortran adjusts the first point using sigfig(thrx,7,+1))
+        if thrx > 0.0
+            thrxx = round_sigfig(thrx, 7, +1)
+            push!(grid, thrxx)
+        end
+        sort!(grid); unique!(grid)
+        filter!(>(0.0), grid)
+    end
+
+    # Post-processing: remove interior points that coincide with resonance
+    # range boundaries (matching Fortran lunion lines 2196-2226).
+    # First and last points and points above emax=19 MeV are always kept.
+    small = 1.0e-9
+    emax = 19.0e6
+    boundaries = Float64[eresl, eresr, eresh]
+    filter!(>(0.0), boundaries)
+    if !isempty(boundaries) && length(grid) > 2
+        mask = trues(length(grid))
+        for i in 2:(length(grid) - 1)
+            eg = grid[i]
+            eg > emax && continue  # keep points above emax
+            for eb in boundaries
+                if abs(eg - eb) <= small * eb
+                    mask[i] = false
+                    break
+                end
+            end
+        end
+        grid = grid[mask]
+    end
+
+    grid
+end
+
+# Fortran constants (reconr.f90:1796-1806)
+const _STPMIN = 1.001
+const _UP = 1.001
+const _DN = 0.999
+const _THERM = 0.0253
+const _TRANGE = 0.4999
+const _SSMALL = 1.0e-30
+
+# Precomputed decade points: 1, 0.5, 0.2 × 10^ipwr for ipwr in -4:5
+const _DECADE_POINTS = let
+    pts = Float64[]
+    for ipwr in -4:5
+        base = 10.0^ipwr
+        push!(pts, base)
+        push!(pts, round_sigfig(base / 2, 1))
+        push!(pts, round_sigfig(base * 2 / 10, 1))
+    end
+    push!(pts, _THERM)
+    sort!(unique(pts))
+end
+
+"""
+    _bisect_panel!(out, tab, e_lo, y_lo, e_hi, y_hi, is_nonlinear, law,
+                   stpmax, err, elim)
+
+Stack-based DFS matching Fortran lunion label 310 (reconr.f90:2106-2174).
+
+For each sub-panel [lo, hi] on the stack:
+1. Skip if ratio < stpmin (panel too narrow)
+2. If lo < elim: check for forced decade points (1, 0.5, 0.2 × 10^n, thermal)
+3. For linear sections (lo < elim): check ratio ≤ stpmax
+4. For nonlinear sections: check |true - linear| ≤ errn·|true| + 1e-30
+5. Accept or bisect with arithmetic midpoint rounded to 7 significant figures
+
+Points are pushed into `out`; the caller adds them to the grid.
+"""
+function _bisect_panel!(out::Vector{Float64}, tab::TabulatedFunction,
+                        e_lo::Float64, y_lo::Float64,
+                        e_hi::Float64, y_hi::Float64,
+                        is_nonlinear::Bool, law,
+                        stpmax::Float64, err::Float64, elim::Float64)
+    # Stack entries: (x_lower, y_lower, x_upper, y_upper)
+    # Fortran stack has x(i)=lower, x(i-1)=upper (grows upward)
+    # We use a Julia vector with explicit tuples.
+    stack = NTuple{4, Float64}[(e_lo, y_lo, e_hi, y_hi)]
+    max_stack = 50  # Fortran ndim=50
+
+    while !isempty(stack)
+        xl, yl, xh, yh = pop!(stack)
+        length(stack) >= max_stack && continue
+
+        # Label 310: check if panel is too narrow
+        xh / xl < _STPMIN && continue
+
+        # Force decade points if lower < elim (reconr.f90:2113-2127)
+        forced = false
+        if xl <= elim
+            for dp in _DECADE_POINTS
+                if xh > _UP * dp && xl < _DN * dp
+                    xm = dp
+                    ym = _eval_at(tab, is_nonlinear, xl, yl, xh, yh, xm, law)
+                    push!(out, xm)
+                    # Push both sub-panels (upper first so lower is processed first)
+                    push!(stack, (xm, ym, xh, yh))
+                    push!(stack, (xl, yl, xm, ym))
+                    forced = true
+                    break
+                end
+            end
+        end
+        forced && continue
+
+        # Label 320: linear vs nonlinear check
+        if !is_nonlinear
+            # LINEAR (reconr.f90:2131-2140): ratio test
+            xl > elim && continue  # accept above elim
+            xh / xl <= stpmax && continue  # accept if ratio small enough
+            xm = round_sigfig((xl + xh) / 2, 7)
+            ym = _eval_at(tab, false, xl, yl, xh, yh, xm, law)
+        else
+            # NONLINEAR (reconr.f90:2142-2152): interpolation error test
+            xm = round_sigfig((xl + xh) / 2, 7)
+            ym = _eval_at(tab, true, xl, yl, xh, yh, xm, law)
+            yl_lin = yl + (yh - yl) * (xm - xl) / (xh - xl)
+            errn = xh < _TRANGE ? err / 5 : err
+            test = errn * abs(ym) + _SSMALL
+            abs(ym - yl_lin) <= test && continue  # accept
+        end
+
+        # Label 330: push midpoint and both sub-panels
+        xm <= xl && continue
+        xm >= xh && continue
+        push!(out, xm)
+        push!(stack, (xm, ym, xh, yh))
+        push!(stack, (xl, yl, xm, ym))
+    end
+end
+
+"""Evaluate cross section at xm: true interpolation for nonlinear, linear for linear."""
+function _eval_at(tab::TabulatedFunction, is_nonlinear::Bool,
+                  xl::Float64, yl::Float64, xh::Float64, yh::Float64,
+                  xm::Float64, law)
+    if is_nonlinear
+        # Use the original tabulated function to get the true value
+        interpolate(tab, xm)
+    else
+        # Linear interpolation between panel endpoints
+        yl + (yh - yl) * (xm - xl) / (xh - xl)
+    end
+end
+
+# ==========================================================================
 # 1/v linearization -- bisect step-ratio gaps and force decade points
 # ==========================================================================
 
@@ -196,31 +427,17 @@ end
 Refine `energies` so that the step ratio between consecutive points is small
 enough to represent 1/v behaviour to fractional tolerance `err`.
 
-This matches the logic of Fortran RECONR's `lunion` subroutine
-(reconr.f90:1771-2238):
-
-1. Force decade points (1, 2, 5 x 10^n) and the thermal point 0.0253 eV.
-2. Walk through sorted energies; where `e[i+1]/e[i] > stpmax`, insert the
-   geometric midpoint rounded to 7 significant figures.
-3. Apply 5x tighter tolerance below the thermal range (0.4999 eV), matching
-   Fortran's `trange` logic (line 2150).
-4. Only linearize below `elim` (default 1 MeV), matching Fortran's `elim`
-   (line 1811).
-
-The vector is sorted and deduplicated on exit.
+Matches Fortran lunion's LINEAR branch (reconr.f90:2131-2140) with forced
+decade points (lines 2113-2127). Uses arithmetic midpoints rounded to 7
+significant figures.
 """
 function linearize_one_over_v!(energies::Vector{Float64}, err::Float64;
-                               elim::Float64 = 1.0e6)
+                               elim::Float64 = 0.99e6)
     _inject_decade_and_thermal!(energies, elim)
     length(energies) < 2 && return energies
 
-    # Fortran constants (reconr.f90:1821, 2150)
-    trange     = 0.4999
-    stpmax     = 1.0 + sqrt(5.3 * err)
-    stpmax_lo  = 1.0 + sqrt(5.3 * err / 5.0)  # 5x tighter below trange
+    stpmax = 1.0 + sqrt(5.3 * err)
 
-    # Single-pass scan: inserting a midpoint re-checks the left sub-interval
-    # before advancing, so one pass suffices.
     i = 1
     while i < length(energies)
         lo, hi = energies[i], energies[i + 1]
@@ -228,9 +445,22 @@ function linearize_one_over_v!(energies::Vector{Float64}, err::Float64;
             i += 1; continue
         end
         hi_eff = min(hi, elim)
-        threshold = lo < trange ? stpmax_lo : stpmax
-        if hi_eff / lo > threshold
-            mid = round_sigfig(sqrt(lo * hi_eff), 7)
+
+        # Check for decade points first (matching Fortran label 310)
+        forced = false
+        for dp in _DECADE_POINTS
+            if hi_eff > _UP * dp && lo < _DN * dp
+                if dp > lo && dp < hi
+                    insert!(energies, i + 1, dp)
+                    forced = true
+                    break
+                end
+            end
+        end
+        forced && continue  # re-check from same i
+
+        if hi_eff / lo > stpmax
+            mid = round_sigfig((lo + hi_eff) / 2, 7)
             if mid > lo && mid < hi
                 insert!(energies, i + 1, mid)
             else
@@ -263,7 +493,7 @@ function _inject_decade_and_thermal!(energies::Vector{Float64}, elim::Float64)
 end
 
 # ==========================================================================
-# MF3 linearization -- add midpoints for non-linear interpolation
+# MF3 linearization -- kept for backward compatibility
 # ==========================================================================
 
 """
@@ -271,15 +501,13 @@ end
 
 For MF3 sections with non-linear interpolation (log-log, lin-log, etc.),
 add midpoints between existing breakpoints until the cross section is
-within `tol` of a linear interpolation. This ensures the 1/v shape is
-represented in the initial grid, matching Fortran lunion's behaviour.
+within `tol` of a linear interpolation.
 """
 function _linearize_mf3!(nodes::Vector{Float64}, sec::MF3Section, tol::Float64)
     tab = sec.tab
     npts = length(tab.x)
     npts < 2 && return
 
-    # Check if any interpolation region uses a non-linear law
     has_nonlinear = false
     for law in tab.interp.law
         if law != LinLin && law != Histogram
@@ -289,8 +517,7 @@ function _linearize_mf3!(nodes::Vector{Float64}, sec::MF3Section, tol::Float64)
     end
     has_nonlinear || return
 
-    # Process each interval, adding midpoints where needed
-    max_depth = 20  # prevent infinite recursion
+    max_depth = 20
     stack = Tuple{Float64, Float64, Float64, Float64, Int}[]
 
     for k in 1:(npts - 1)
@@ -298,14 +525,12 @@ function _linearize_mf3!(nodes::Vector{Float64}, sec::MF3Section, tol::Float64)
         x2 = tab.x[k + 1]
         x2 <= x1 && continue
 
-        # Determine the interpolation law for this interval
         law = _law_for_interval(tab, k)
         (law == LinLin || law == Histogram) && continue
 
         y1 = tab.y[k]
         y2 = tab.y[k + 1]
 
-        # Push the interval onto the stack for iterative subdivision
         push!(stack, (x1, y1, x2, y2, 0))
 
         while !isempty(stack)
@@ -313,13 +538,13 @@ function _linearize_mf3!(nodes::Vector{Float64}, sec::MF3Section, tol::Float64)
             depth >= max_depth && continue
             xb - xa <= xa * 1.0e-10 && continue
 
-            xm = 0.5 * (xa + xb)
+            xm = round_sigfig((xa + xb) / 2, 7)
             ym_true = interpolate(tab, xm)
-            ym_linear = 0.5 * (ya + yb)
+            ym_linear = ya + (yb - ya) * (xm - xa) / (xb - xa)
 
-            # Check if linear interpolation is within tolerance
-            ref = max(abs(ym_true), abs(ym_linear), 1.0e-30)
-            if abs(ym_true - ym_linear) > tol * ref
+            errn = xm < 0.4999 ? tol / 5 : tol
+            test = errn * abs(ym_true) + 1.0e-30
+            if abs(ym_true - ym_linear) > test
                 push!(nodes, xm)
                 push!(stack, (xa, ya, xm, ym_true, depth + 1))
                 push!(stack, (xm, ym_true, xb, yb, depth + 1))
