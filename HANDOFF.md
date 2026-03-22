@@ -54,12 +54,30 @@ Test 02 is the first resonance material (LRU=1, LRF=1 SLBW). The PERFECT MTs:
 
 ### What does NOT yet work for Test 02
 
-The 4 remaining MTs (MT=1, 2, 18, 102) share the same energy grid and have:
-1. **~11 grid point differences** in the adaptive reconstruction (resonance range 1-200 eV). The Fortran's `resxs/panel` produces slightly different grid points near resonance peaks (~18.28, ~18.40, ~69.98, ~70.04, ~82.62, ~109.67 eV). Root cause: the adaptive algorithm's midpoint rounding or convergence tests differ subtly.
-2. **1-unit XS differences** in the 7th significant digit at some energies. Root cause: either SLBW resonance XS evaluation (`sigma_mf2`) or float accumulation order in `merge_background_legacy`.
+**CRITICAL BLOCKER: Missing unresolved resonance evaluation (LRU=2)**
+
+The MF2 data for Pu-238 (MAT 1050) has TWO resonance ranges:
+- Range 1: EL=1.0, EH=200.0, **LRU=1**, LRF=1 (resolved SLBW) — ✓ PARSED
+- Range 2: EL=200.0, EH=10000.0, **LRU=2**, LRF=1 (unresolved) — ✗ SKIPPED
+
+The `read_mf2` function in `src/resonances/reader.jl` (line 108-116) skips LRU=2 ranges entirely. This causes:
+1. `eresh = 200` instead of 10000 — wrong grid extent
+2. Missing unresolved XS in [200, 10000] eV — Fortran's `sigunr` gives ~45 barns elastic at 200 eV, Julia gives 0
+3. Grid structure wrong above 200 eV (missing ~100 grid points)
+
+**To fix**: implement `sigunr` (unresolved resonance average XS evaluation) in Julia. The Fortran code is in `reconr.f90` subroutine `sigunr`. Also need to:
+- Parse LRU=2 MF2 data (ENDF/B-IV format with LRF=1, NLS l-values, average parameters)
+- Store unresolved parameters in a new type (or extend existing `UnresolvedParameters`)
+- Call `sigunr` in `sigma_mf2` for energies in [eresu, eresh)
+- The raw MF2 data for the unresolved range starts at line 1154 of `njoy-reference/tests/resources/t404`
+
+**Also fixed in this session** (resolved range improvements):
+- SLBW `sigfig(sigp(2),8,0)` rounding before adding potential scattering (reconr.f90:2845-2847)
+- Adaptive convergence now tests only partials (elastic, fission, capture), not total — matching Fortran resxs `j=1,nsig-1`
 
 ### Other items NOT yet done
 
+- **Unresolved resonance evaluation**: `sigunr` for LRU=2 materials (BLOCKING Test 02)
 - **PENDF headers**: MF1/MT451 format, MF2 EH value, MF12/MT=102 photon production not output
 - **BROADR, HEATR, THERMR**: Not validated against per-module oracle
 - **Unit tests**: May need updating — some test expectations were written against old (incorrect) behavior
