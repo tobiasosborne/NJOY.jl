@@ -36,7 +36,39 @@ These contain the Fortran source, 85 test problems with reference tapes, and 52 
 
 **CRITICAL:** The 85-test suite has ENDF evaluations baked in (the .endf files referenced by each test's CMakeLists.txt → `njoy-reference/tests/resources/`). Always use these exact files, never substitute newer versions from NNDC — evaluation revisions change resonance parameters.
 
-## What was done this session
+## What was done this session (Grind Phase 1)
+
+### Built: Per-Module Diagnostic Harness (6 new files, ~1100 lines)
+**Files:** `test/validation/{diagnose_harness,fortran_oracle,error_classifier,module_inspector,run_harness,test_classifier}.jl`
+
+Compiled NJOY2016 Fortran from source (`njoy-reference/build/njoy`). The harness runs Fortran with truncated input decks to produce per-module intermediate reference PENDFs, then compares Julia vs Fortran at each module boundary. Cached in `test/validation/oracle_cache/`.
+
+```bash
+julia --project=. test/validation/diagnose_harness.jl 1   # single test
+julia --project=. test/validation/run_harness.jl --tests 1,2,84  # batch
+```
+
+### Bug Fix 1: Constants CGS not SI (CRITICAL — reversed previous session's "fix")
+**File:** `src/constants.jl`, `src/resonances/sammy.jl`, `src/processing/reconr_evaluator.jl`
+
+The previous session INCORRECTLY changed constants from CGS to SI. The Fortran `phys.f90` uses CGS (ev in ergs, clight in cm/s, amu in grams, hbar in erg·s). All formulas including `cwaven = sqrt(2*m*amu*ev)*1e-12/hbar` are calibrated for CGS. Reverted to CGS. Also restored `clight/100` conversion in sammy.jl and reconr_evaluator.jl. cwaven now 0.002197 matching Fortran.
+
+### Bug Fix 2: find_section must filter by MAT
+**File:** `src/endf/io.jl`, `src/processing/reconr.jl`
+
+`find_section(io, 2, 151)` found the FIRST MF2/MT151 on tape regardless of MAT. Multi-material tapes (e.g. t404 with U-234+Pu-238+Am) returned wrong material's resonance parameters. Added `target_mat` keyword. Test 2 (Pu-238) peak now matches Fortran exactly (11,630 b at 18.56 eV).
+
+### Bug Fix 3: merge_background skip MT>200
+**File:** `src/processing/reconr_evaluator.jl`
+
+MT=251 (mubar), MT=252 (xi), MT=253 (gamma) are average quantities, not cross sections. Were being added to total. Now skipped, matching Fortran reconr.f90:4847.
+
+### Bug Fix 4: 1/v grid linearization for LRU=0
+**File:** `src/processing/reconr_grid.jl`, `src/processing/reconr.jl`
+
+LRU=0 path (no resonances) used raw MF3 breakpoints without linearization. Fortran `lunion` bisects where step ratio exceeds `1+sqrt(5.3*err)`. Added `linearize_one_over_v!()`. Test 84 (H-2) now PASS, Test 1 RECONR now PASS.
+
+## What was done previously
 
 ### Bug Fix 1: `parse_endf_float` (COMPLETED)
 **File:** `src/endf/io.jl:12-24`
@@ -88,20 +120,43 @@ julia --project=. test/validation/diagnose_test.jl 2   # diagnose test 02
 julia --project=. test/validation/diagnose_test.jl 7   # diagnose test 07
 ```
 
-## Current state: HONEST ASSESSMENT (updated)
+## Current state: HONEST ASSESSMENT (updated after Grind Phase 1)
 
 | What works | What doesn't |
 |------------|-------------|
-| All 13,360 unit tests pass | ~0/85 NJOY tests fully pass yet |
-| Constants now SI (was CGS — 10,000x bug fixed) | MF3 backgrounds missing above resonance range |
-| Pipeline chains reconr→broadr→heatr→thermr→gaspr→acer | Elastic/fission/capture go to zero above ~400 eV |
-| AWR correctly extracted and passed through | Resonance grid misses some narrow peaks |
-| Broadr sigma1 kernel verified correct vs Fortran | UNRESR/PURR/GROUPR not fully executed (pass-through) |
-| Diagnostic runner gives detailed per-test output | ReferenceTape29-type (GROUPR multigroup) miscompared as PENDF |
+| All 13,360 unit tests pass | ~1/85 NJOY tests fully pass (Test 84) |
+| Constants now CGS (matching Fortran phys.f90 exactly) | MF3 backgrounds missing 200-10,000 eV for resonance materials |
+| cwaven = 0.002197 matching Fortran | RECONR only outputs 4 columns (should output ALL MF3 sections) |
+| find_section filters by MAT (multi-material tapes work) | No redundant reaction generation (MT=1,3,4,101) |
+| Test 84 (H-2) RECONR PASS (0.01% error) | BROADR introduces 100% elastic error (Test 1) |
+| Test 1 (C-nat) RECONR PASS (0.03% error) | `merge_background_legacy` is wrong architecture |
+| Test 2 (Pu-238) peak matches Fortran exactly | UNRESR/PURR/GROUPR not fully executed |
+| NJOY2016 Fortran binary built as oracle | Need proper `emerge` port for bit-identical output |
+| Per-module diagnostic harness with A/B comparison | |
 
 ## CRITICAL: What to do next (priority order)
 
-### Step 1: Fix MF3 background merging above resonance range (HIGHEST PRIORITY)
+### Step 0: Port Fortran `emerge` to Julia (HIGHEST PRIORITY — approved plan exists)
+
+**Plan:** `.claude/plans/zesty-baking-snowflake.md`
+
+The entire `merge_background_legacy` function needs replacement with a proper port of Fortran's `emerge` subroutine (reconr.f90:4646-4982). This is the #1 blocker.
+
+**What `emerge` does:** For EACH MF3 section individually, walk the union grid, interpolate MF3 background, add resonance XS, accumulate redundant reactions. Produces ALL output MF3 sections (not just 4).
+
+**New functions needed:**
+1. `analyze_dictionary(mf3) → RedundantReactions` — port of `anlyzd`
+2. `build_union_grid(res_e, mf3, eresl, eresh, err)` — merge resonance + background grids
+3. `emerge!(union_e, res_e, res_v, mf3, mf2, redundant)` — the core algorithm
+
+**Follow the 3+1 workflow:** Dual proposals, orchestrator comparison, skeptical reviewer.
+
+**Verification:** Run `julia --project=. test/validation/diagnose_harness.jl 2` and check ALL MTs match.
+
+### Step 1 (was): Fix MF3 background merging above resonance range
+**SUBSUMED by Step 0.** The emerge port will fix this automatically — Fortran's emerge handles all energies correctly.
+
+### Step 1 (new): Fix BROADR elastic error
 **This is the #1 blocker for most tests.** After reconr, cross sections go to zero above ~400 eV because MF3 background data isn't being merged outside the resolved resonance range.
 
 **Symptoms (from Test 02 diagnostic):**
