@@ -166,26 +166,22 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 **Test details**: MAT=1395, err=0.005, ENDF file `t511`, resolved range [1, 82] eV (SLBW, LRF=1), unresolved range [82, 25000] eV (LRF=2, mode=12). 27 MTs total.
 
-**Status: 0/27 PERFECT** — but mode=12 reader (`_read_urr_lrf2`) and evaluator (`_csunr2`) are implemented. The code compiles, runs, and produces output. Oracle cache exists at `test/validation/oracle_cache/test07/`.
+**Status: 0/27 PERFECT** — fission values now correct, grid close (6953 vs 6944, 9 extra). Most diffs are ±1 in last digit or grid-point insertions at non-primary MT thresholds.
 
-**Grid analysis**: Julia has 6924 points, Fortran has 6944 (20 fewer). 114 total grid diffs. The diffs start at index 693 (~6.3 eV) — **inside the SLBW resolved range (1-82 eV)**, NOT in the URR region. The energies are very close but slightly different (e.g., Julia 6.2953 vs Fortran 6.295313), suggesting cascading differences from the initial grid.
+**What's been fixed for Test 07 (Phase 8):**
+1. **Fission doubling (FIXED)**: MT=18 MF3 background was being added alongside MT=19, exactly doubling fission XS. Now MT=18 is filtered from mf3_sections when MT=19 exists, matching Fortran `mtr18` flag (reconr.f90:557-561,1893). MT=18 PENDF output is now a computed redundant sum of MT=19+20+21+38.
+2. **GT peak nodes (FIXED)**: `_add_bw_peaks!` now uses GT/2 (total width from ENDF) instead of (|GN|+|GG|+|GF|)/2. Confirmed 4 peak nodes differ for U-235 but sigfig rounding washes them out at ndig=5-6.
+3. **merge_background_legacy (FIXED)**: MT=20/21/38 backgrounds no longer accumulated into primary fission channel — they go to `other_bg`, matching Fortran emerge `itype` dispatch.
+4. **MF=13 reader (ADDED)**: Photon production cross sections (MF=13) now included in lunion grid with forced histogram interpolation (Fortran reconr.f90:1868,1880). This added the missing 1.42e7 eV breakpoint.
+5. **MF3Section `mf` field (ADDED)**: lunion skip logic correctly bypasses MT redundancy checks for MF=12/13 sections, matching Fortran (reconr.f90:1881).
 
-**Root cause hypothesis**: The initial MF2 peak nodes for U-235's dense resonance structure (many narrow resonances in 1-82 eV) differ slightly between Julia and Fortran. This cascades through adaptive reconstruction. Test 02 (Pu-238) doesn't show this because its resonances are fewer and wider.
+**Grid analysis**: Julia has 6953 points, Fortran has 6944 (9 extra). The 9 extra points come from MF=13 histogram shading at breakpoints that already exist in the grid — a cascading effect of the MF=3 threshold handling differences described below.
 
-**What's been done for Test 07:**
-1. Implemented `_read_urr_lrf2` in `reader.jl` — reads LRU=2/LRF=2 LIST records with 6-word stride per energy
-2. Implemented `_csunr2` in `unresolved.jl` — interpolates ALL parameters (D, GX, GNO, GG, GF) at each energy, computes fluctuation integrals
-3. Added `URR2Sequence` and `URR2Data` types for mode=12 data
-4. Added dispatch in `read_mf2` for LRU=2 && LRF==2
-5. Added `build_unresolved_table(::URR2Data, ...)` with mode=12 grid generation (1/1000 gap threshold)
-6. Updated `eval_unresolved` to support linear interpolation (mode=12 INT=2) alongside log-log (mode=11)
-7. Fixed `elim = min(0.99e6, eresr)` — was using default 0.99e6 for all materials
-8. Checked: U-235 MF=12 sections (MT=4, 18, 102) all use linear interpolation (INT=2), NOT histogram — so MF=12 histogram shading is NOT a factor for Test 07
-
-**What needs debugging:**
-1. **Initial grid nodes** — Compare `_add_bw_peaks!` output for U-235 vs what Fortran's rdf2bw produces. U-235 has 130+ resonances in 1-82 eV; the `ndig` calculation for peak triplets might differ.
-2. **URR XS accuracy** — After fixing the grid, verify the mode=12 cross sections match. The `_csunr2` evaluator may need tuning (the interpolation bracketing loop, small-value clamping, etc.).
-3. **elim effects** — With elim=82 for U-235, lunion only forces decade points below 82 eV. Verify this is handled correctly.
+**Remaining issues for Test 07:**
+1. **Threshold handling in lunion_grid** — The Fortran `lunion` REPLACES the first MF3 breakpoint with the threshold energy in-place (reconr.f90:1936: `scr(l)=thrx`), then advances past leading-zero panels. Julia only APPENDS the threshold as a separate point. This causes ~20 missing grid points near non-primary MT thresholds (MT=51-66, 91). These 20 missing points then cascade through MF=13 bisection, creating 9 extra points (net: 9 extra = 29 added by MF=13 - 20 missing from MF=3 thresholds).
+2. **Label 220 singularity shading** — Fortran shades MF3 breakpoints that coincide with existing grid points (reconr.f90:1992-2005). Julia doesn't implement this check.
+3. **±1 XS diffs at URR boundary** — MT=18/19/102 have ±1 in last digit at 82.00001 eV (the resolved/unresolved boundary). Likely a rounding issue in `eval_unresolved` or boundary node interpolation.
+4. **Pseudo-threshold skip granularity** — Fortran advances breakpoint-by-breakpoint past leading zeros (label 205). Julia checks only the first two breakpoints.
 
 ### Not Yet Attempted
 
@@ -330,23 +326,30 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 21. **Mode=12 final XS interpolation uses per-J INT** — The INT variable in csunr2 is overwritten by each J-state (line 4219). The final terp1 call at line 4312 uses the LAST J-state's INT, typically 2 (linear). Mode=11 hardcodes log-log (intlaw=5).
 
+22. **MT=18 is redundant when MT=19 exists** — Fortran `anlyzd` sets `mtr18=1` when MT=19 is found (line 557-561). Then `lunion` skips MT=18 (line 1893), `emerge` never sees it, and `recout` outputs MT=18 as a computed sum of MT=19+20+21+38. Without this, fission XS is exactly 2x at low energies where MT=18 = MT=19.
+
+23. **SLBW/MLBW half-width uses GT from ENDF, not sum of partials** — Fortran `rdf2bw` uses `hw = res(jnow+2)/2` where `res(jnow+2)` is GT (total width stored directly in ENDF). The Julia was using `(|GN|+|GG|+|GF|)/2`. These differ because GT may include competitive width and floating-point rounding. Fixed by adding GT field to SLBWParameters/MLBWParameters.
+
+24. **MF=13 processed in lunion alongside MF=3** — Fortran lunion processes MF=3, MF=10, MF=12, MF=13, MF=23 sections (line 1868). MF=13 sections force histogram interpolation (line 1880: `if (mfh.eq.13) scr(5)=1`). Non-MF=3 sections bypass the MT skip checks (line 1881: `if (mfh.ne.3) go to 180`).
+
+25. **Primary fission channel is MT=19, not MT=18+19+20+21** — In `merge_background_legacy`, only MT=18 or MT=19 should be added to the fission accumulator (whichever is the primary). MT=20, 21, 38 are non-primary: their backgrounds go to `other_bg` with sigfig rounding, matching Fortran emerge `itype` dispatch (only MT=2, MT=18/19, MT=102 get `itype` assignments).
+
 ---
 
 ## Immediate Next Steps
 
-### Priority 1: Debug Test 07 grid diffs (SLBW resolved range)
+### Priority 1: Fix lunion_grid threshold handling
 
-The 114 grid diffs start at 6.3 eV (inside SLBW range 1-82 eV). The energies differ by tiny amounts (6.2953 vs 6.295313), suggesting the initial MF2 peak nodes differ.
+The root cause of the 9 extra grid points is that lunion_grid doesn't match Fortran's threshold replacement logic. The Fortran REPLACES the first MF3 breakpoint with the threshold in-place (reconr.f90:1936), while Julia only appends the threshold as a separate point. This causes ~20 missing grid points near non-primary MT thresholds, which cascades through MF=13 bisection to create 9 extra points.
 
-**Debugging approach:**
-1. Use a subagent to read Fortran `rdf2bw` (lines 884-1310) — specifically how it computes `ndig` for peak triplets and adds nodes to enode
-2. Use another subagent to extract Julia's `_add_bw_peaks!` output for U-235 (print all nodes added)
-3. Compare node-by-node: are the resonance peak triplets at the same energies?
-4. The Fortran rdf2bw uses `ndig = clamp(2 + log10(Er/hw), 5, 9)` — verify the Julia matches
+**Fix approach:**
+1. In the breakpoint addition loop, when a section has a threshold (thrx > 0), modify the processing to REPLACE `tab.x[1]` with `thrxx` (the shaded threshold) instead of just pushing thrxx as a separate point
+2. Implement the pseudo-threshold advancement: advance past leading-zero breakpoints until a non-zero pair is found (Fortran label 205, lines 1956-1976)
+3. Implement label 220 singularity check: when an MF3 breakpoint coincides with an existing grid point, apply sigfig(er,7,0) rounding instead of histogram shading (reconr.f90:1992-2005)
 
-### Priority 2: Verify mode=12 URR XS accuracy
+### Priority 2: Fix ±1 XS diffs at URR boundary
 
-Once the grid matches, check if the URR cross sections are correct. Compare the Julia URR table output (from `build_unresolved_table`) with the Fortran's at a few specific energies.
+MT=18/19/102 have ±1 in last digit at 82.00001 eV (resolved/unresolved boundary). Investigate whether this is from `eval_unresolved` interpolation or boundary node handling.
 
 ### Priority 3: Grind more tests
 
@@ -395,3 +398,13 @@ Fixed MT=1 total accumulation (round each channel before summing), MT=102 roundi
 ### Phase 7: Test 07 scaffolding → mode=12 reader + evaluator implemented
 
 Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim = min(0.99e6, eresr)`. Test runs but 0/27 — grid diffs cascade from initial MF2 peak nodes in the dense 1-82 eV SLBW resolved range.
+
+### Phase 8: Test 07 fission fix + MF=13 support → grid matches (6953 vs 6944)
+
+**Fission doubling fix**: Discovered that Julia was adding BOTH MT=18 and MT=19 MF3 backgrounds, exactly doubling the fission cross section. The Fortran's `mtr18` flag (set when MT=19 exists) causes MT=18 to be skipped in lunion and treated as a redundant sum of partials in recout. Implemented: filter MT=18 from mf3_sections, handle as redundant sum in PENDF writer, fix merge_background_legacy to only accumulate MT=18 or MT=19 (not MT=20/21/38) into primary fission.
+
+**GT peak nodes**: Added GT (total width from ENDF) to SLBWParameters/MLBWParameters. `_add_bw_peaks!` now uses GT/2 for half-width instead of (|GN|+|GG|+|GF|)/2. Confirmed 4 peak nodes differ for U-235 but sigfig rounding washes them out at ndig=5-6.
+
+**MF=13 support**: Added `read_mf13_sections` reader and `mf` field to MF3Section. MF=13 sections now included in lunion grid with forced histogram interpolation. Fixed lunion skip logic to bypass MT redundancy checks for non-MF=3 sections (matching Fortran line 1881). This added the missing 1.42e7 eV breakpoint from MF=13/MT=3.
+
+**Result**: Grid now 6953 pts (9 extra vs Fortran's 6944). The 9 extra points come from MF=13 histogram shading cascading with MF=3 threshold handling differences. Tests 02 and 08 remain BIT-IDENTICAL.
