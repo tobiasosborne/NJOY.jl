@@ -294,14 +294,22 @@ end
 function _collect_reactions(result)
     # Collect reactions in ENDF file order (matching Fortran emerge).
     # MT=1 (total) always first. Then non-redundant MTs from MF3 in file order.
+    # MT=4 is output as a computed redundant sum of MT=51-91.
     reactions = Tuple{Int32, String}[]
     push!(reactions, (Int32(1), "total"))
+
+    has_inelastic = any(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
 
     for sec in result.mf3_sections
         mt = Int(sec.mt)
         # Skip truly redundant MTs (never output by Fortran)
-        (mt == 1 || mt == 3 || mt == 4 || mt == 101 || mt == 120 ||
+        (mt == 1 || mt == 3 || mt == 101 || mt == 120 ||
          mt == 151 || mt == 27 || (mt >= 251 && mt <= 300 && mt != 261)) && continue
+        # MT=4: output as redundant sum if inelastic levels present
+        if mt == 4
+            has_inelastic && push!(reactions, (Int32(4), "inelastic"))
+            continue
+        end
         push!(reactions, (Int32(mt), "MT$mt"))
     end
     return reactions
@@ -415,6 +423,47 @@ function _get_legacy_section(result, mt::Int)
 
     if mt == 1
         return energies, result.total, 0.0, 0.0
+    elseif mt == 4
+        # Redundant sum: MT=4 = sum(MT=51-91)
+        # Use the grid from the first inelastic level
+        first_inel = findfirst(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
+        first_inel === nothing && return nothing
+        sec_first = result.mf3_sections[first_inel]
+        qi_4 = sec_first.QI  # Use QI from first inelastic level
+        thrx_4 = awr > 0.0 ? -qi_4 * (awr + 1) / awr : -qi_4
+        thrxx_4 = round_sigfig(thrx_4, 7, +1)
+        # Build grid: all energies at or above threshold
+        sec_e = Float64[]
+        sec_xs = Float64[]
+        for e in energies
+            thrxx_4 > 0.0 && thrxx_4 - e > 1.0e-9 * thrxx_4 && continue
+            # Sum all MT=51-91 at this energy
+            total_inel = 0.0
+            for sec in result.mf3_sections
+                smt = Int(sec.mt)
+                (smt < 51 || smt > 91) && continue
+                bg = interpolate(sec.tab, e)
+                # Threshold-adjusted interpolation for each level
+                s_qi = sec.QI
+                if s_qi < 0.0
+                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_thrxx = round_sigfig(s_thrx, 7, +1)
+                    if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
+                       e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
+                        frac = (e - s_thrxx) / (sec.tab.x[2] - s_thrxx)
+                        bg = frac * sec.tab.y[2]
+                    end
+                    if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-9 * s_thrxx
+                        bg = 0.0
+                    end
+                end
+                total_inel += round_sigfig(bg, 7)
+            end
+            push!(sec_e, e)
+            push!(sec_xs, round_sigfig(total_inel, 7))
+        end
+        isempty(sec_e) && return nothing
+        return sec_e, sec_xs, 0.0, qi_4
     elseif mt == 2
         return energies, result.elastic, qm, qi
     elseif mt == 18 || mt == 19
