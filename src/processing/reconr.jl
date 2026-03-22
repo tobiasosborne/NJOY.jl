@@ -282,8 +282,10 @@ function reconr(endf_file::AbstractString;
         end
         all_lunion_sections = isempty(mf12_sections) ?
             mf3_sections : vcat(mf3_sections, mf12_sections)
+        # Fortran: if (eresr.lt.elim) elim=eresr (reconr.f90:1811)
+        elim = min(0.99e6, eresr > 0.0 ? eresr : 0.99e6)
         bg_grid = lunion_grid(all_lunion_sections, err;
-                              nodes=mf2_nodes, awr=mf2.AWR,
+                              nodes=mf2_nodes, awr=mf2.AWR, elim=elim,
                               eresl=eresl, eresr=eresr, eresh=eresh)
 
         # Filter to full resonance range for adaptive reconstruction
