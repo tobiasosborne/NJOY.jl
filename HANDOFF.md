@@ -38,7 +38,7 @@ We work **module by module, test by test**:
 9. **Idiomatic Julia** — no Fortran transliterations. Multiple dispatch, broadcasting, clean types.
 10. **3+1 agent workflow** for significant architectural changes (dual proposals, orchestrator, reviewer)
 
-## Current State (after Grind Phase 2)
+## Current State (after Grind Phase 3)
 
 ### What WORKS — bit-identical
 
@@ -46,22 +46,47 @@ We work **module by module, test by test**:
 |------|----------|-----------|-----|------|-----------|
 | Test 84 | H-2 (deuterium) | LRU=0 | 4/4 PERFECT | 769 pts exact | All identical |
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 PERFECT | 1033 pts exact | All identical |
+| Test 02 | Pu-238 | SLBW | 13/17 PERFECT | ~3556 pts | 13 MTs identical |
 
-Both tests produce PENDF files where every MF3 data line (energies and cross sections, columns 1-66) matches the Fortran oracle byte-for-byte. This covers:
-- Primary reactions: MT=1 (total), MT=2 (elastic), MT=102 (capture)
-- Threshold reactions: MT=16 (n,2n), MT=51-68 (discrete inelastic), MT=91 (continuum)
-- Non-threshold: MT=103 (n,p), MT=104 (n,d), MT=107 (n,α)
-- Gas production: MT=203, MT=204, MT=207
+Test 02 is the first resonance material (LRU=1, LRF=1 SLBW). The PERFECT MTs:
+- Threshold reactions: MT=16 (n,2n), MT=17 (n,3n), MT=51-59 (discrete inelastic), MT=91 (continuum)
 - Redundant sums: MT=4 (inelastic total = sum MT=51-91)
 
-### What does NOT yet work
+### What does NOT yet work for Test 02
+
+The 4 remaining MTs (MT=1, 2, 18, 102) share the same energy grid and have:
+1. **~11 grid point differences** in the adaptive reconstruction (resonance range 1-200 eV). The Fortran's `resxs/panel` produces slightly different grid points near resonance peaks (~18.28, ~18.40, ~69.98, ~70.04, ~82.62, ~109.67 eV). Root cause: the adaptive algorithm's midpoint rounding or convergence tests differ subtly.
+2. **1-unit XS differences** in the 7th significant digit at some energies. Root cause: either SLBW resonance XS evaluation (`sigma_mf2`) or float accumulation order in `merge_background_legacy`.
+
+### Other items NOT yet done
 
 - **PENDF headers**: MF1/MT451 format, MF2 EH value, MF12/MT=102 photon production not output
-- **Resonance materials**: Test 02 (U-234 SLBW) not yet grind-tested. The `reconr()` LRU=1 path uses `adaptive_reconstruct` + `merge_background_legacy` which haven't been validated for bit agreement.
 - **BROADR, HEATR, THERMR**: Not validated against per-module oracle
 - **Unit tests**: May need updating — some test expectations were written against old (incorrect) behavior
 
-## What was done in Grind Phase 2 (this session)
+## What was done in Grind Phase 3 (this session)
+
+### 5 bugs fixed for SLBW resonance material support
+
+**Pipeline restructure (`src/processing/reconr.jl`):**
+
+1. **LRU=1 path now uses `lunion_grid`** — The old code used `build_grid` + `adaptive_reconstruct` + manual MF3 extension with `linearize_one_over_v!`. This produced too few grid points outside the resonance range. The new code matches the Fortran flow (reconr.f90:358): lunion → resxs → emerge. Specifically: `lunion_grid(mf3_sections, err; nodes=mf2_nodes)` builds the full union grid FIRST, then `adaptive_reconstruct` refines the resonance range, then results are merged. MF2 nodes (peaks, widths) seed the initial grid.
+
+2. **Don't add exact eresl/eresh to resonance grid** — Fortran resxs starts from the FIRST lunion grid point ≥ eresl (the shaded version from `sigfig(EL,7,+1)`), not the exact boundary. Adding exact boundaries created duplicate near-boundary points.
+
+**Threshold interpolation (`src/processing/pendf_writer.jl`, `reconr_evaluator.jl`):**
+
+3. **Use correct interpolation law for threshold adjustment** — The old code hardcoded linear interpolation (`frac * tab.y[2]`) for near-threshold cross sections. But MF3 sections can use LinLog, LogLog, etc. The fix temporarily modifies the first breakpoint to `(thrxx, 0.0)` and calls `interpolate(tab, e)` which respects the actual law. This matches Fortran emerge line 1936 + `gety1`. New `_threshold_interp()` helper in pendf_writer.jl and `_threshold_interp_legacy()` in reconr_evaluator.jl.
+
+**ENDF float formatting (`src/endf/io.jl`):**
+
+4. **Extended 9-sigfig format matching Fortran `a11`** — The Fortran `a11` subroutine (endf.f90:882-981) uses fixed-point format for values in (0.1, 1e7) when they have genuine 9-sigfig precision. For example, adaptive grid energies like 18.2814725 format as `" 18.2814725"` (9 sigfigs in 11 chars) instead of `" 1.828147+1"` (7 sigfigs). Falls back to scientific when trailing zeros indicate only 7 significant digits. Only applied to energy values (odd positions in data pairs) via the `pair_data` parameter.
+
+**Float accumulation order (`src/processing/reconr_evaluator.jl`):**
+
+5. **Match Fortran total XS accumulation** — Changed `total = elastic + fission + capture + other_bg` to `total = other_bg + elastic + fission + capture` to match Fortran emerge's `sig(1) = sig(1) + sig(2) + sig(3) + sig(4)`. This prevents 8th-sigfig differences from float non-associativity that the extended format would expose.
+
+## What was done in Grind Phase 2
 
 ### 16 RECONR bugs fixed
 
@@ -263,7 +288,7 @@ bd list
 |------|-----|-----------|-----|-----------|-------|--------|
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→HEATR→THERMR→GROUPR | RECONR **BIT-IDENTICAL**, rest untested |
-| 02 | 1050 | t404 | 0.001 | SLBW | RECONR→BROADR→UNRESR→GROUPR | **UNTESTED** in grind phase |
+| 02 | 1050 | t404 | 0.005 | SLBW | RECONR→BROADR→UNRESR→GROUPR | RECONR **13/17 PERFECT** (MT=1,2,18,102 have ~11 grid pt diffs) |
 
 ## Open beads issues
 
