@@ -255,8 +255,9 @@ function cross_section_slbw(E::Real, params::SLBWParameters,
             end
         end
 
-        # Add potential scattering
-        sig_elastic += spot
+        # Round resonance elastic and potential scattering to 8 sigfigs
+        # before adding, matching Fortran csslbw (reconr.f90:2845-2847)
+        sig_elastic = round_sigfig(sig_elastic, 8) + round_sigfig(spot, 8)
     end
 
     # Total = elastic + fission + capture + competitive

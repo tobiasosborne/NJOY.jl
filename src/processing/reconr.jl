@@ -268,10 +268,17 @@ function reconr(endf_file::AbstractString;
             E -> sigma_mf2(E, mf2)
         end
 
+        # For adaptive convergence, test only partials (elastic, fission, capture)
+        # matching Fortran resxs which tests j=1..nsig-1 = partials, NOT total.
+        # Total makes convergence stricter, producing extra grid points.
+        xs_partials = E -> let xs = xs_fn(E)
+            (xs.elastic, xs.fission, xs.capture)
+        end
+
         # Adaptive reconstruction in resonance range (matching Fortran resxs)
         config = AdaptiveConfig(err; errmax=errmax_val, errint=errint_val,
                                 step_guard_limit = eresr > 0.0 ? eresr : Inf)
-        res_energies, _ = adaptive_reconstruct(xs_fn, res_grid, config)
+        res_energies, _ = adaptive_reconstruct(xs_partials, res_grid, config)
 
         # Merge: lunion grid (outside resonance) + adaptive grid (inside resonance)
         # Fortran emerge merges bg grid (outside [eresl, eresh)) with resxs grid
