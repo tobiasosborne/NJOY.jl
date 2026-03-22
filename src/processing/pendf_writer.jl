@@ -301,10 +301,12 @@ function _collect_reactions(result)
     # Collect reactions in ENDF file order (matching Fortran emerge).
     # MT=1 (total) always first. Then non-redundant MTs from MF3 in file order.
     # MT=4 is output as a computed redundant sum of MT=51-91.
+    # MT=18 is output as a computed redundant sum of MT=19+20+21+38 when partials exist.
     reactions = Tuple{Int32, String}[]
     push!(reactions, (Int32(1), "total"))
 
     has_inelastic = any(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
+    has_partial_fission = any(s -> Int(s.mt) == 19, result.mf3_sections)
 
     for sec in result.mf3_sections
         mt = Int(sec.mt)
@@ -315,6 +317,10 @@ function _collect_reactions(result)
         if mt == 4
             has_inelastic && push!(reactions, (Int32(4), "inelastic"))
             continue
+        end
+        # MT=19: insert redundant MT=18 before it (matching Fortran recout order)
+        if mt == 19 && has_partial_fission
+            push!(reactions, (Int32(18), "fission"))
         end
         push!(reactions, (Int32(mt), "MT$mt"))
     end
@@ -479,7 +485,51 @@ function _get_legacy_section(result, mt::Int)
         return sec_e, sec_xs, 0.0, qi_4
     elseif mt == 2
         return energies, result.elastic, qm, qi
-    elseif mt == 18 || mt == 19
+    elseif mt == 18
+        # Redundant sum: MT=18 = MT=19 + MT=20 + MT=21 + MT=38
+        # (matching Fortran emerge accumulation lines 4886-4893)
+        has_partial = any(s -> Int(s.mt) == 19, result.mf3_sections)
+        if has_partial
+            # Get QM/QI from MT=19 (Fortran saves q18 from MT=19, line 1916)
+            for sec in result.mf3_sections
+                if Int(sec.mt) == 19
+                    qm, qi = sec.QM, sec.QI
+                    break
+                end
+            end
+            fission_sum = copy(result.fission)
+            for sec in result.mf3_sections
+                mt_sec = Int(sec.mt)
+                (mt_sec == 20 || mt_sec == 21 || mt_sec == 38) || continue
+                s_qi = sec.QI
+                s_thrxx = 0.0
+                if s_qi < 0.0
+                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_thrxx = round_sigfig(s_thrx, 7, +1)
+                end
+                for (i, e) in enumerate(energies)
+                    if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-7 * s_thrxx
+                        continue  # threshold suppression
+                    end
+                    bg = interpolate(sec.tab, e)
+                    if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
+                       e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
+                        bg = _threshold_interp(sec.tab, e, s_thrxx)
+                    end
+                    if bg != 0.0
+                        fission_sum[i] += round_sigfig(bg, 7)
+                    end
+                end
+            end
+            # Final sigfig on accumulated sum (Fortran recout line 5308)
+            for i in eachindex(fission_sum)
+                fission_sum[i] = round_sigfig(fission_sum[i], 7)
+            end
+            return energies, fission_sum, qm, qi
+        else
+            return energies, result.fission, qm, qi
+        end
+    elseif mt == 19
         return energies, result.fission, qm, qi
     elseif mt == 102
         return energies, result.capture, qm, qi

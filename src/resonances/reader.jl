@@ -86,7 +86,8 @@ function read_mf2(io::IO)
                     Int32[], Float64[], Float64[], Int32[],
                     Vector{Float64}[], Vector{Float64}[],
                     Vector{Float64}[], Vector{Float64}[],
-                    Vector{Float64}[], Vector{Float64}[]
+                    Vector{Float64}[], Vector{Float64}[],
+                    Vector{Float64}[]
                 )
                 push!(ranges, ResonanceRange(EL, EH, LRU, Int32(0), LFW, NRO, NAPS, params))
 
@@ -126,7 +127,8 @@ function read_mf2(io::IO)
                     Int32[], Float64[], Float64[], Int32[],
                     Vector{Float64}[], Vector{Float64}[],
                     Vector{Float64}[], Vector{Float64}[],
-                    Vector{Float64}[], Vector{Float64}[]
+                    Vector{Float64}[], Vector{Float64}[],
+                    Vector{Float64}[]
                 )
                 push!(ranges, ResonanceRange(EL, EH, LRU, LRF, LFW, NRO, NAPS, params))
             end
@@ -168,6 +170,7 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
     LRX_all = Int32[]
     Er_all = Vector{Float64}[]
     AJ_all = Vector{Float64}[]
+    GT_all = Vector{Float64}[]
     Gn_all = Vector{Float64}[]
     Gg_all = Vector{Float64}[]
     Gf_all = Vector{Float64}[]
@@ -190,6 +193,7 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
 
         Er = Float64[]
         AJ = Float64[]
+        GT_vec = Float64[]
         Gn = Float64[]
         Gg = Float64[]
         Gf = Float64[]
@@ -212,6 +216,7 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
 
             push!(Er, er)
             push!(AJ, aj)
+            push!(GT_vec, gt)
             push!(Gn, gn)
             push!(Gg, gg)
             push!(Gf, gf)
@@ -220,6 +225,7 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
 
         push!(Er_all, Er)
         push!(AJ_all, AJ)
+        push!(GT_all, GT_vec)
         push!(Gn_all, Gn)
         push!(Gg_all, Gg)
         push!(Gf_all, Gf)
@@ -229,12 +235,12 @@ function _read_bw_params(io::IO, LRF::Int32, NRO::Int32, NAPS::Int32)
     if LRF == Int32(1)
         params = SLBWParameters(Int32(NLS), SPI, AP,
                               l_values, AWRI_all, QX_all, LRX_all,
-                              Er_all, AJ_all,
+                              Er_all, AJ_all, GT_all,
                               Gn_all, Gg_all, Gf_all, Gx_all)
     else
         params = MLBWParameters(Int32(NLS), SPI, AP,
                               l_values, AWRI_all, QX_all, LRX_all,
-                              Er_all, AJ_all,
+                              Er_all, AJ_all, GT_all,
                               Gn_all, Gg_all, Gf_all, Gx_all)
     end
     return params, ap_tab

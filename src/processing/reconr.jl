@@ -200,6 +200,13 @@ function reconr(endf_file::AbstractString;
 
         mf3_sections = read_mf3_sections(io, actual_mat)
 
+        # Fortran mtr18: when partial fission (MT=19) exists, MT=18 is
+        # redundant — skip it from MF3 processing (reconr.f90:557-561,1893)
+        has_partial_fission = any(s -> Int(s.mt) == 19, mf3_sections)
+        if has_partial_fission
+            filter!(s -> Int(s.mt) != 18, mf3_sections)
+        end
+
         # Check for RML (LRF=7) data and build fallback evaluator
         rml_data = read_rml_data(io)
 
@@ -273,15 +280,19 @@ function reconr(endf_file::AbstractString;
         # interpolation triggers shading at shared breakpoints.
         mf12_sections = read_mf12_lo1_sections(io, actual_mat)
 
-        # Build full union grid from MF3 + MF12 sections (matching Fortran lunion)
+        # Read MF=13 sections (photon production cross sections) — Fortran
+        # lunion processes these alongside MF=3 (reconr.f90:1868,1880).
+        # Histogram interpolation is forced for MF=13 sections.
+        mf13_sections = read_mf13_sections(io, actual_mat)
+
+        # Build full union grid from MF3 + MF12 + MF13 sections (matching Fortran lunion)
         mf2_nodes = Float64[]
         _add_mf2_nodes!(mf2_nodes, mf2)
         # Add URR table energy nodes (matching Fortran rdf2u1 enode)
         if urr_table !== nothing
             append!(mf2_nodes, urr_table.energies)
         end
-        all_lunion_sections = isempty(mf12_sections) ?
-            mf3_sections : vcat(mf3_sections, mf12_sections)
+        all_lunion_sections = vcat(mf3_sections, mf12_sections, mf13_sections)
         # Fortran: if (eresr.lt.elim) elim=eresr (reconr.f90:1811)
         elim = min(0.99e6, eresr > 0.0 ? eresr : 0.99e6)
         bg_grid = lunion_grid(all_lunion_sections, err;

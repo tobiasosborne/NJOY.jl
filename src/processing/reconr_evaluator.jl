@@ -1116,7 +1116,7 @@ function merge_background_legacy(energies::Vector{Float64},
             # Non-primary channels round bg before accumulating into other_bg.
             if mt == 2
                 elastic += bg
-            elseif mt == 18 || mt == 19 || mt == 20 || mt == 21 || mt == 38
+            elseif mt == 18 || mt == 19
                 fission += bg
             elseif mt == 102
                 capture += bg

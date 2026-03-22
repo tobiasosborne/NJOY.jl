@@ -103,13 +103,11 @@ end
 
 # Dispatch on formalism type for resonance peak nodes
 function _add_peak_nodes!(nodes, params::SLBWParameters, el, eh)
-    _add_bw_peaks!(nodes, params.Er, params.Gn, params.Gg,
-                   params.Gf, params.NLS, el, eh)
+    _add_bw_peaks!(nodes, params.Er, params.GT, params.NLS, el, eh)
 end
 
 function _add_peak_nodes!(nodes, params::MLBWParameters, el, eh)
-    _add_bw_peaks!(nodes, params.Er, params.Gn, params.Gg,
-                   params.Gf, params.NLS, el, eh)
+    _add_bw_peaks!(nodes, params.Er, params.GT, params.NLS, el, eh)
 end
 
 function _add_peak_nodes!(nodes, params::ReichMooreParameters, el, eh)
@@ -133,15 +131,13 @@ function _add_peak_nodes!(nodes, ::AbstractResonanceFormalism, el, eh)
 end
 
 # Shared logic for Breit-Wigner peak nodes
-function _add_bw_peaks!(nodes, Er, Gn, Gg, Gf, NLS, el, eh)
+# Uses GT/2 (total width from ENDF) for half-width, matching Fortran rdf2bw
+function _add_bw_peaks!(nodes, Er, GT, NLS, el, eh)
     for il in 1:Int(NLS)
         for ir in eachindex(Er[il])
             er = Er[il][ir]
             (er <= el || er > eh) && continue
-            gn = Gn[il][ir]
-            gg = Gg[il][ir]
-            gf = Gf[il][ir]
-            hw = (abs(gn) + abs(gg) + abs(gf)) / 2.0
+            hw = GT[il][ir] / 2.0
             _push_peak_triplet!(nodes, er, hw, el, eh)
         end
     end
@@ -223,12 +219,16 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
 
     for sec in mf3_sections
         mt = Int(sec.mt)
-        # Skip redundant reactions (matching Fortran reconr.f90:1882-1901)
-        (mt == 1 || mt == 3 || mt == 101) && continue
-        mt == 4 && continue   # inelastic total (redundant)
-        (mt >= 251 && mt <= 300 && mt != 261) && continue
-        mt == 120 && continue
-        mt == 151 && continue
+        # Skip redundant reactions (matching Fortran reconr.f90:1881-1901)
+        # Only apply to MF=3 sections — MF=12/13 bypass these checks
+        # (Fortran line 1881: if (mfh.ne.3) go to 180)
+        if Int(sec.mf) == 3
+            (mt == 1 || mt == 3 || mt == 101) && continue
+            mt == 4 && continue   # inelastic total (redundant)
+            (mt >= 251 && mt <= 300 && mt != 261) && continue
+            mt == 120 && continue
+            mt == 151 && continue
+        end
 
         tab = sec.tab
         npts = length(tab.x)

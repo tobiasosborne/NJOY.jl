@@ -1449,6 +1449,7 @@ using LinearAlgebra
             [Int32(0)],    # LRX
             [[1.0]],       # Er
             [[0.5]],       # AJ
+            [[0.026]],     # GT (= Gn + Gg + Gf)
             [[0.001]],     # Gn
             [[0.025]],     # Gg
             [[0.0]],       # Gf
@@ -1510,6 +1511,7 @@ using LinearAlgebra
             [Int32(0)],    # LRX
             [[1.0]],       # Er
             [[0.5]],       # AJ
+            [[0.026]],     # GT (= Gn + Gg + Gf)
             [[0.001]],     # Gn
             [[0.025]],     # Gg
             [[0.0]],       # Gf

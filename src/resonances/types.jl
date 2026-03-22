@@ -71,6 +71,7 @@ struct SLBWParameters <: AbstractResonanceFormalism
     LRX::Vector{Int32}           # competitive width flag per l-group
     Er::Vector{Vector{Float64}}  # resonance energies per l-group
     AJ::Vector{Vector{Float64}} # spin J per l-group
+    GT::Vector{Vector{Float64}} # total widths (Gamma_total) — raw from ENDF
     Gn::Vector{Vector{Float64}} # neutron widths (Gamma_n)
     Gg::Vector{Vector{Float64}} # gamma widths (Gamma_gamma)
     Gf::Vector{Vector{Float64}} # fission widths (Gamma_f)
@@ -93,6 +94,7 @@ struct MLBWParameters <: AbstractResonanceFormalism
     LRX::Vector{Int32}           # competitive width flag per l-group
     Er::Vector{Vector{Float64}}
     AJ::Vector{Vector{Float64}}
+    GT::Vector{Vector{Float64}}  # total widths (Gamma_total) — raw from ENDF
     Gn::Vector{Vector{Float64}}
     Gg::Vector{Vector{Float64}}
     Gf::Vector{Vector{Float64}}
