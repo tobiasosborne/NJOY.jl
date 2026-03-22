@@ -16,6 +16,20 @@ const MT_FIELD_MAP = Dict{Int, Tuple{Symbol, String}}(
     18 => (:fission, "fission"), 102 => (:capture, "capture"),
 )
 
+# Extended MT names for diagnostics (covers all common NJOY reactions)
+const EXTENDED_MT_NAMES = Dict{Int, String}(
+    1 => "total", 2 => "elastic", 4 => "inelastic",
+    18 => "fission", 102 => "capture",
+    103 => "(n,p)", 104 => "(n,d)", 107 => "(n,a)",
+    203 => "H-prod", 204 => "D-prod", 207 => "a-prod",
+    221 => "free_therm", 229 => "sab_inel", 230 => "sab_el",
+    251 => "mubar", 252 => "xi", 253 => "gamma",
+    301 => "heating", 444 => "damage",
+)
+for mt in 51:91
+    EXTENDED_MT_NAMES[mt] = mt <= 68 ? "disc_inel_$(mt-50)" : (mt == 91 ? "cont_inel" : "MT$mt")
+end
+
 # =========================================================================
 # PENDF tape parser
 # =========================================================================
@@ -189,4 +203,94 @@ function summary_line(report::ComparisonReport)
     @sprintf("%-8s Test %02d  worst=%.3f%%  pts=%d/%d  (%.1fx)",
              st, report.test_number, w*100, report.n_ours_points,
              report.n_ref_total_points, report.grid_ratio)
+end
+
+# =========================================================================
+# Extended comparison (all MF3 MTs)
+# =========================================================================
+
+"""
+    compare_all_mts(our_e, our_xs_dict, ref_data, test_number)
+
+Compare all MF3 MTs present in the reference tape, not just the 4 primary ones.
+`our_xs_dict` maps MT => xs_array (all on the same energy grid `our_e`).
+"""
+function compare_all_mts(our_e::Vector{Float64},
+                         our_xs_dict::Dict{Int, Vector{Float64}},
+                         ref_data::Dict{Int, <:Any},
+                         test_number::Int)
+    reactions = ReactionComparison[]
+    for mt in sort(collect(keys(ref_data)))
+        haskey(our_xs_dict, mt) || continue
+        label = get(EXTENDED_MT_NAMES, mt, "MT$mt")
+        push!(reactions, compare_reaction(ref_data[mt], our_e, our_xs_dict[mt], mt, label))
+    end
+    nrt = haskey(ref_data, 1) ? ref_data[1].n_points : 0
+    no = length(our_e)
+    ratio = nrt > 0 ? no / nrt : 0.0
+    ov = isempty(reactions) ? :no_data :
+         all(r -> r.classification == :pass, reactions) ? :pass :
+         any(r -> r.classification == :fail, reactions) ? :fail : :marginal
+    ComparisonReport(test_number, "", reactions, ov, nrt, no, ratio)
+end
+
+"""
+    compare_bidirectional(our_e, our_xs, ref_e, ref_xs)
+
+Forward: interpolate Julia at reference energies (catches Julia missing data).
+Reverse: interpolate reference at Julia energies (catches spurious Julia peaks).
+Returns (fwd_max_rel_err, rev_max_rel_err).
+"""
+function compare_bidirectional(our_e::Vector{Float64}, our_xs::Vector{Float64},
+                               ref_e::Vector{Float64}, ref_xs::Vector{Float64})
+    # Forward
+    fwd_max = 0.0
+    for k in eachindex(ref_e)
+        (ref_e[k] <= 0 || abs(ref_xs[k]) < ABS_FLOOR) && continue
+        xo = _interp_at(our_e, our_xs, ref_e[k])
+        rel = abs(xo - ref_xs[k]) / max(abs(ref_xs[k]), 1e-30)
+        rel > fwd_max && (fwd_max = rel)
+    end
+
+    # Reverse
+    rev_max = 0.0
+    for k in eachindex(our_e)
+        (our_e[k] <= 0 || abs(our_xs[k]) < ABS_FLOOR) && continue
+        xr = _interp_at(ref_e, ref_xs, our_e[k])
+        abs(xr) < ABS_FLOOR && abs(our_xs[k]) >= ABS_FLOOR && (rev_max = max(rev_max, 1.0); continue)
+        rel = abs(our_xs[k] - xr) / max(abs(xr), 1e-30)
+        rel > rev_max && (rev_max = rel)
+    end
+
+    (fwd_max, rev_max)
+end
+
+"""Detect if a reference tape is GROUPR multigroup output (not PENDF)."""
+function is_groupr_tape(filename::AbstractString)
+    isfile(filename) || return false
+    lines = String[]
+    try
+        open(filename) do io
+            for _ in 1:50
+                eof(io) && break
+                push!(lines, readline(io))
+            end
+        end
+    catch
+        return false
+    end
+    # GROUPR output has MF=3 with unusual structure or MF=1 with igflag
+    # Simple heuristic: if we see MF >= 6 in the first 50 lines without MF=3, it's groupr
+    has_mf3 = false
+    has_high_mf = false
+    for line in lines
+        length(line) < 75 && continue
+        p = rpad(line, 80)
+        try
+            mf = NJOY._parse_int(p[71:72])
+            mf == 3 && (has_mf3 = true)
+            mf >= 6 && mf <= 16 && (has_high_mf = true)
+        catch; end
+    end
+    has_high_mf && !has_mf3
 end
