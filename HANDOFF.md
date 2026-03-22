@@ -4,338 +4,270 @@
 
 NJOY.jl is a Julia port of NJOY2016 — the standard nuclear data processing system used worldwide for reactor physics, criticality safety, and radiation transport. The original is 119,613 lines of Fortran 90. Our Julia version is ~14,000 lines.
 
-The goal: produce bit-compatible PENDF/ACE output that passes all 85 of NJOY's own reference test problems. The port must be idiomatic Julia — composable, differentiable, no global state — not a transliteration.
+The goal: produce **bit-identical** PENDF/ACE output matching all 85 of NJOY's own reference test problems. The port must be idiomatic Julia — composable, differentiable, no global state — not a transliteration.
 
 **Repo:** https://github.com/tobiasosborne/NJOY.jl (GPL-3.0)
 
-## What exists right now
+## MANDATORY RULES — READ FIRST
 
-### Source code (49 files, ~14,000 lines)
-All 23 NJOY2016 processing modules are implemented:
+### The Standard: 100% Bit Agreement
 
-| Category | Modules | Location |
-|----------|---------|----------|
-| Foundation | ENDF I/O, types, constants, interpolation | src/endf/ |
-| Resonances | SLBW, MLBW, Reich-Moore, SAMMY/LRF=7, Faddeeva | src/resonances/ |
-| Processing | RECONR, BROADR, HEATR, THERMR, UNRESR, PURR, GROUPR, ERRORR, GASPR, LEAPR, GAMINR, MIXR, MODER, RESXSR, COVR | src/processing/ |
-| Formats | ACER, CCCCR, MATXSR, WIMSR, DTFR, POWR | src/formats/ |
-| Visualization | plotr/viewr replacement (ASCII + PostScript + Makie recipe) | src/visualization/ |
+The **only** acceptable outcome is byte-for-byte identical MF3 output with the Fortran NJOY2016 reference. "Close" (0.01% error, last-digit rounding) is still a bug. If unit tests fail after a change that makes output match Fortran, **fix the tests** — the Fortran is canonical ground truth.
 
-### Tests
-- **Unit tests:** ~13,360 assertions in test/runtests.jl (all pass)
-- **Integration tests:** test/integration_tests.jl (3 tests, 1 pre-existing failure: Sr-88 SAMMY)
-- **Validation pipeline:** test/validation/ — full infrastructure for all 85 NJOY tests
-- **Diagnostic runner:** test/validation/diagnose_test.jl — verbose per-test diagnostics
+### The Grind Phase Method
 
-### Reference data (gitignored, available locally)
-```bash
-git clone https://github.com/njoy/NJOY2016.git ./njoy-reference
-git clone https://github.com/njoy/ENDFtk.git ./endftk-reference
-```
-These contain the Fortran source, 85 test problems with reference tapes, and 52 ENDF evaluation files. **Already cloned locally — do not re-clone.**
+We work **module by module, test by test**:
 
-**CRITICAL:** The 85-test suite has ENDF evaluations baked in (the .endf files referenced by each test's CMakeLists.txt → `njoy-reference/tests/resources/`). Always use these exact files, never substitute newer versions from NNDC — evaluation revisions change resonance parameters.
+1. Pick a test (start simple: LRU=0 → SLBW → MLBW → Reich-Moore → SAMMY)
+2. Run Fortran oracle to get ground-truth PENDF for each module in the chain
+3. Run Julia, write PENDF, compare MF3 data (first 66 chars of each line, ignoring sequence numbers)
+4. Find first byte that differs. Trace to root cause. Read the Fortran. Fix.
+5. Repeat until `diff` shows zero lines
+6. Move to next test
 
-## What was done this session (Grind Phase 1)
+### Operational Rules
 
-### Built: Per-Module Diagnostic Harness (6 new files, ~1100 lines)
-**Files:** `test/validation/{diagnose_harness,fortran_oracle,error_classifier,module_inspector,run_harness,test_classifier}.jl`
+1. **100% bit agreement with Fortran** — anything else = failure
+2. **Fortran is canonical truth** — if unit tests break after matching Fortran, fix the tests
+3. **No full test suite runs** — targeted tests only (full suite takes ages)
+4. **No parallel Julia processes** — precomp cache corruption. One process at a time. Always `rm -rf ~/.julia/compiled/v1.12/NJOY*` before running.
+5. **Module by module** — compare Fortran output vs Julia output for each processing step
+6. **Be skeptical of everything** — verify claims from HANDOFF/agents, don't trust without checking
+7. **Read the Fortran before writing Julia** — `njoy-reference/src/` is the authority
+8. **Use bundled ENDF files** from `njoy-reference/tests/resources/` only
+9. **Idiomatic Julia** — no Fortran transliterations. Multiple dispatch, broadcasting, clean types.
+10. **3+1 agent workflow** for significant architectural changes (dual proposals, orchestrator, reviewer)
 
-Compiled NJOY2016 Fortran from source (`njoy-reference/build/njoy`). The harness runs Fortran with truncated input decks to produce per-module intermediate reference PENDFs, then compares Julia vs Fortran at each module boundary. Cached in `test/validation/oracle_cache/`.
+## Current State (after Grind Phase 2)
 
-```bash
-julia --project=. test/validation/diagnose_harness.jl 1   # single test
-julia --project=. test/validation/run_harness.jl --tests 1,2,84  # batch
-```
+### What WORKS — bit-identical
 
-### Bug Fix 1: Constants CGS not SI (CRITICAL — reversed previous session's "fix")
-**File:** `src/constants.jl`, `src/resonances/sammy.jl`, `src/processing/reconr_evaluator.jl`
+| Test | Material | Formalism | MTs | Grid | XS Values |
+|------|----------|-----------|-----|------|-----------|
+| Test 84 | H-2 (deuterium) | LRU=0 | 4/4 PERFECT | 769 pts exact | All identical |
+| Test 01 | C-nat (carbon) | LRU=0 | 29/29 PERFECT | 1033 pts exact | All identical |
 
-The previous session INCORRECTLY changed constants from CGS to SI. The Fortran `phys.f90` uses CGS (ev in ergs, clight in cm/s, amu in grams, hbar in erg·s). All formulas including `cwaven = sqrt(2*m*amu*ev)*1e-12/hbar` are calibrated for CGS. Reverted to CGS. Also restored `clight/100` conversion in sammy.jl and reconr_evaluator.jl. cwaven now 0.002197 matching Fortran.
+Both tests produce PENDF files where every MF3 data line (energies and cross sections, columns 1-66) matches the Fortran oracle byte-for-byte. This covers:
+- Primary reactions: MT=1 (total), MT=2 (elastic), MT=102 (capture)
+- Threshold reactions: MT=16 (n,2n), MT=51-68 (discrete inelastic), MT=91 (continuum)
+- Non-threshold: MT=103 (n,p), MT=104 (n,d), MT=107 (n,α)
+- Gas production: MT=203, MT=204, MT=207
+- Redundant sums: MT=4 (inelastic total = sum MT=51-91)
 
-### Bug Fix 2: find_section must filter by MAT
-**File:** `src/endf/io.jl`, `src/processing/reconr.jl`
+### What does NOT yet work
 
-`find_section(io, 2, 151)` found the FIRST MF2/MT151 on tape regardless of MAT. Multi-material tapes (e.g. t404 with U-234+Pu-238+Am) returned wrong material's resonance parameters. Added `target_mat` keyword. Test 2 (Pu-238) peak now matches Fortran exactly (11,630 b at 18.56 eV).
+- **PENDF headers**: MF1/MT451 format, MF2 EH value, MF12/MT=102 photon production not output
+- **Resonance materials**: Test 02 (U-234 SLBW) not yet grind-tested. The `reconr()` LRU=1 path uses `adaptive_reconstruct` + `merge_background_legacy` which haven't been validated for bit agreement.
+- **BROADR, HEATR, THERMR**: Not validated against per-module oracle
+- **Unit tests**: May need updating — some test expectations were written against old (incorrect) behavior
 
-### Bug Fix 3: merge_background skip MT>200
-**File:** `src/processing/reconr_evaluator.jl`
+## What was done in Grind Phase 2 (this session)
 
-MT=251 (mubar), MT=252 (xi), MT=253 (gamma) are average quantities, not cross sections. Were being added to total. Now skipped, matching Fortran reconr.f90:4847.
+### 16 RECONR bugs fixed
 
-### Bug Fix 4: 1/v grid linearization for LRU=0
-**File:** `src/processing/reconr_grid.jl`, `src/processing/reconr.jl`
+**Grid construction (`src/processing/reconr_grid.jl`):**
 
-LRU=0 path (no resonances) used raw MF3 breakpoints without linearization. Fortran `lunion` bisects where step ratio exceeds `1+sqrt(5.3*err)`. Added `linearize_one_over_v!()`. Test 84 (H-2) now PASS, Test 1 RECONR now PASS.
+1. **New `lunion_grid()` function** — unified DFS matching Fortran `lunion` (reconr.f90:1771-2238). Single bisection loop that simultaneously forces decade points (1,2,5 × 10^n), checks energy ratios for linear sections, and checks interpolation error for nonlinear sections. This replaces the old separated approach (`_linearize_mf3!` + `linearize_one_over_v!`).
 
-## What was done previously
+2. **Arithmetic midpoints** — was `sqrt(lo*hi)` (geometric), now `(lo+hi)/2` (arithmetic) matching Fortran line 2138. Rounded to 7 sigfigs via `round_sigfig(mid, 7)`.
 
-### Bug Fix 1: `parse_endf_float` (COMPLETED)
-**File:** `src/endf/io.jl:12-24`
+3. **Single stpmax for linear sections** — was applying 5x tighter tolerance for ALL sections below 0.5 eV. Fortran only does this for NONLINEAR sections (line 2150).
 
-Fixed two bugs:
-1. **Spaces in exponents:** `"2.00300e+ 3"` → `filter(!isspace, s)` strips all whitespace, not just leading/trailing
-2. **Compact notation via regex:** Replaced manual backward loop with `replace(t, r"([\d.])([+-])(\d)" => s"\1e\2\3")`
+4. **elim = 0.99e6** — was 1.0e6. The Fortran constant is `0.99e6_kr` (line 1797), then `elim = min(0.99e6, eresr)`.
 
-Tests added in `test/runtests.jl` for spaces, D/d notation, multi-digit exponents. All 13,360 unit tests pass.
+5. **ehigh = 20e6 constant** — was using MF2 EH. The Fortran `ehigh` is a parameter `20.e6_kr` (line 144), NOT read from MF2.
 
-### Bug Fix 2: Physics Constants CGS→SI (COMPLETED — THE BIG ONE)
-**File:** `src/constants.jl`
+6. **Panel splitting at existing grid nodes** — `_bisect_panel!` now splits MF3 panels at existing grid points before bisection, matching Fortran lunion labels 210-280 which merge the existing grid into panel processing.
 
-**Root cause of 10,000x resonance cross-section errors.** The `PhysicsConstants` module used CGS units (ergs, grams, cm/s) but ALL formulas ported from NJOY2016 Fortran assume SI (Joules, kg, m/s). This made `cwaven_constant()` return 0.002197 instead of 0.2197 (100x too small), making `pifac = π/k²` 10,000x too large, inflating every resonance cross section by ~10,000x.
+7. **Tolerance-based deduplication** — `_dedup_tol!` removes near-duplicate energies (within 1e-9 relative) caused by the `sigfig` bias. Exact `unique!` missed these.
 
-**What changed:**
-- `ev`: 1.602e-12 (erg) → 1.602e-19 (J)
-- `clight`: 3e10 (cm/s) → 3e8 (m/s)
-- `amu`: derived in grams → 1.661e-27 (kg)
-- `hbar`: derived in erg·s → 1.055e-34 (J·s)
-- `finstri`: replaced formula with exact CODATA value 137.036
+8. **Boundary filtering** — post-processing removes interior grid points at eresl/eresr/eresh, matching Fortran lunion lines 2196-2226. Not applied for LRU=0 materials.
 
-**Downstream fixes:**
-- `src/processing/reconr_evaluator.jl:554`: Removed `clight/100` (was converting cm/s→m/s, no longer needed)
-- `src/resonances/sammy.jl:66`: Same `clight/100` removal
+9. **Threshold adjustment** — computes physical threshold `thrx = -QI * (AWR+1)/AWR`, shades up with `sigfig(thrx,7,+1)`, adds to grid. Only when first MF3 breakpoint is below threshold AND not in a zero-XS pseudo-threshold skip region.
 
-**Verification:** Test 02 (U-234, MAT=1050) capture XS at 5.23 eV went from 6,537 barns → 0.65 barns (matches physics). Worst error against reference dropped from 8,127,229% → 713%.
+10. **Pseudo-threshold skip** — doesn't add threshold when first TWO MF3 breakpoints both have zero XS, matching Fortran lines 1973-1976.
 
-### Infrastructure: Validation Pipeline Module Chaining (COMPLETED)
-**Files:** `test/validation/test_executor.jl`, `input_parser.jl`, `njoy_test_runner.jl`, `run_all.jl`
+**XS evaluation (`src/processing/reconr_evaluator.jl`):**
 
-The validation pipeline now chains modules per the NJOY input deck instead of only running `reconr()`. Supports: `reconr → broadr → heatr → thermr → gaspr → acer` with graceful degradation for `unresr`, `purr`, `groupr`, `errorr`, `covr` (pass-through).
+11. **sigfig rounding** — each interpolated MF3 background value is rounded to 7 significant figures via `round_sigfig(bg, 7)`, matching Fortran emerge line 4836.
 
-Key changes:
-- `ExecutionResult` now has single `pendf` field (was separate `reconr_output`/`broadr_output`)
-- AWR extracted from ENDF file MF1/MT451 and passed through pipeline (was hardcoded 1.0)
-- Added `NJOYTestCase.awr` field
-- Added `reconr_to_pendf()`, `pendf_to_result()`, `ensure_pendf()` conversion helpers
-- Added `execute_heatr`, `execute_thermr`, `execute_gaspr`, `execute_acer` functions
-- Added input parsers: `ThermrParams`, `AcerParams`, `GasprParams`, `UnresrParams`, `PurrParams`
+12. **Threshold suppression** — XS set to 0 at the threshold energy, matching Fortran emerge line 4795.
 
-### Infrastructure: Diagnostic Runner (NEW)
-**File:** `test/validation/diagnose_test.jl`
+13. **Threshold-adjusted interpolation** — near the threshold, interpolate from the adjusted threshold energy `thrxx` instead of the original MF3 breakpoint, matching Fortran's modified first data point (line 1936).
 
-Verbose per-test diagnostic: shows parsed input deck params, step-by-step execution with timing, sample XS at key energies, detailed comparison against all reference tapes with top-10 worst points.
+**PENDF writer (`src/processing/pendf_writer.jl`):**
+
+14. **Section ordering** — outputs MTs in ENDF file order (matching Fortran emerge), not hardcoded primary-first order.
+
+15. **Pseudo-threshold skip in output** — skips leading zero-XS panels for threshold reactions, matching Fortran emerge.
+
+16. **MT=4 redundant sum** — computed as sum of MT=51-91 with threshold-adjusted interpolation and sigfig rounding.
+
+**Reader fix (`src/processing/reconr_types.jl`):**
+
+17. **MF3Section QM** — was reading HEAD.C1 (=ZA) as QM. Fixed to read TAB1.C1 (the actual Q value).
+
+## How to continue the grind
+
+### Immediate next: Test 02 (U-234, SLBW resonances)
 
 ```bash
-julia --project=. test/validation/diagnose_test.jl 2   # diagnose test 02
-julia --project=. test/validation/diagnose_test.jl 7   # diagnose test 07
+# 1. Check oracle cache exists
+ls test/validation/oracle_cache/test02/
+
+# 2. Check test input
+cat njoy-reference/tests/02/input
+# MAT=1050, err=0.001, ENDF: t404 (multi-material tape)
+
+# 3. Run Julia RECONR and write PENDF
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e '
+using NJOY
+result = reconr("njoy-reference/tests/resources/t404"; mat=1050, err=0.001)
+write_pendf_file("/tmp/julia_test02.pendf", result; mat=1050, err=0.001)
+println("Points: $(length(result.energies))")
+'
+
+# 4. Compare MF3 data (columns 1-66, ignoring sequence numbers)
+# Use this pattern for each MT section:
+julia --project=. -e '
+using NJOY, Printf
+
+function parse_all_mf3(filename)
+    result = Dict{Int, Vector{String}}()
+    lines = readlines(filename)
+    local idx = 1
+    while idx <= length(lines)
+        length(lines[idx]) < 75 && (idx += 1; continue)
+        p = rpad(lines[idx], 80)
+        mf = NJOY._parse_int(p[71:72]); mt = NJOY._parse_int(p[73:75]); mat = NJOY._parse_int(p[67:70])
+        if mf == 3 && mt > 0 && mat > 0
+            idx += 3; data = String[]
+            while idx <= length(lines)
+                length(lines[idx]) < 75 && (idx += 1; continue)
+                pd = rpad(lines[idx], 80)
+                mfc = NJOY._parse_int(pd[71:72]); mtc = NJOY._parse_int(pd[73:75])
+                (mfc != 3 || mtc != mt) && break
+                push!(data, pd[1:66]); idx += 1
+            end; result[mt] = data
+        else; idx += 1; end
+    end; return result
+end
+
+j = parse_all_mf3("/tmp/julia_test02.pendf")
+f = parse_all_mf3("test/validation/oracle_cache/test02/after_reconr.pendf")
+all_mts = sort(collect(union(keys(j), keys(f))))
+for mt in all_mts
+    jd = get(j, mt, String[]); fd = get(f, mt, String[])
+    if isempty(jd) && !isempty(fd); @printf("MT=%3d: MISSING\n", mt)
+    elseif jd == fd; @printf("MT=%3d: PERFECT ✓\n", mt)
+    else; @printf("MT=%3d: %d vs %d lines, DIFF\n", mt, length(jd), length(fd))
+    end
+end
+'
 ```
 
-## Current state: HONEST ASSESSMENT (updated after Grind Phase 2)
+### Key insight: Test 02 uses the RESONANCE code path
 
-| What works | What doesn't |
-|------------|-------------|
-| **Test 84 (H-2) RECONR: 4/4 MTs BIT-IDENTICAL** | MF1/MF2 PENDF headers not yet matching Fortran format |
-| **Test 01 (C-nat) RECONR: 29/29 MTs BIT-IDENTICAL** | MF12/MT=102 photon production section not output |
-| lunion_grid matches Fortran lunion exactly | BROADR not yet validated against oracle |
-| All MF3 data (energies + XS) matches byte-for-byte | Test 02 (Pu-238/U-234) not yet tested in grind phase |
-| Threshold adjustment, pseudo-threshold skip working | UNRESR/PURR/GROUPR/HEATR/THERMR not validated |
-| MT=4 redundant inelastic sum computed correctly | Unit tests may need updating to match Fortran behavior |
-| PENDF writer outputs all MTs in ENDF file order | |
-| Constants CGS, cwaven correct, MAT filtering works | |
+Test 84 and Test 01 are both LRU=0 (no resonance parameters). Test 02 has actual SLBW resonances. The code path diverges at `reconr.jl` line ~250: instead of `lunion_grid`, it uses `build_grid` → `adaptive_reconstruct` → grid extension → `merge_background_legacy`. This path has NOT been grind-tested yet and likely has bugs.
 
-## CRITICAL: What to do next (priority order)
+The `reconr()` function (legacy interface) and `reconstruct()` function have duplicated but divergent code. Both need to produce identical output. Focus on whichever the test executor calls.
 
-### Step 0: Continue Grind Phase — next tests to validate
+### After RECONR: validate BROADR
 
-**What was done in Grind Phase 2:** Fixed 16 RECONR bugs achieving bit-identical MF3 output for Test 84 (H-2, 4 MTs) and Test 01 (C-nat, 29 MTs). Key fixes: lunion_grid with unified DFS, arithmetic midpoints, threshold adjustment, pseudo-threshold skip, sigfig rounding, tolerance-based dedup.
+The oracle cache has `after_broadr.pendf` for Test 01. Compare Julia BROADR output against it. The test executor calls `execute_broadr` which calls `doppler_broaden`.
 
-**Next test: Test 02 (Pu-238/U-234)** — multi-material tape, resolved resonances (SLBW). Generate Fortran oracle with `test/validation/diagnose_harness.jl 2`, compare RECONR module output.
+## Architecture of key files
 
-**After Test 02:** Pick tests with different formalisms (MLBW, Reich-Moore, SAMMY/LRF=7). Then validate BROADR using the per-module oracle.
+| File | What it does | Fortran equivalent |
+|------|-------------|-------------------|
+| `src/processing/reconr.jl` | Top-level RECONR pipeline. Two interfaces: `reconr()` (legacy NamedTuple) and `reconstruct()` (PointwiseMaterial). | reconr.f90 main |
+| `src/processing/reconr_grid.jl` | Grid construction: `lunion_grid()` (LRU=0 path), `build_grid()` (resonance path), `linearize_one_over_v!()`, `_bisect_panel!()` | reconr.f90 lunion |
+| `src/processing/reconr_evaluator.jl` | XS evaluation: `merge_background_legacy()` adds MF3 backgrounds to resonance XS. Has threshold logic. | reconr.f90 emerge |
+| `src/processing/reconr_types.jl` | Types: `MF3Section`, `CrossSections`, `PointwiseMaterial`. Reader: `read_mf3_sections()` | — |
+| `src/processing/pendf_writer.jl` | PENDF output: `write_pendf()`, `_collect_reactions()`, `_get_legacy_section()`. Handles thresholds, redundant sums, pseudo-threshold skip. | reconr.f90 emerge/recout |
+| `src/processing/adaptive_grid.jl` | Generic adaptive refinement: `adaptive_reconstruct()`, `round_sigfig()` | reconr.f90 panel loop |
+| `src/processing/broadr.jl` | Doppler broadening: Sigma1 kernel | broadr.f90 |
+| `test/validation/reference_comparator.jl` | Parses PENDF files, compares XS values | — |
+| `test/validation/fortran_oracle.jl` | Runs Fortran NJOY binary with truncated input decks | — |
 
-### Step 0 (previous): Port Fortran `emerge` to Julia
+## Fortran reference: key subroutines to read
 
-**Status: LARGELY DONE** — The `lunion_grid` + `_get_legacy_section` + `merge_background_legacy` combination now produces bit-identical output for LRU=0 materials. The `emerge` port is effectively complete for the LRU=0 case. For materials WITH resonances, the resonance XS are added by `adaptive_reconstruct` + `merge_background_legacy`.
+| Subroutine | File:Lines | What it does |
+|-----------|-----------|-------------|
+| `lunion` | reconr.f90:1771-2238 | Builds the union energy grid from MF3 sections. Bisects panels with forced decade points + ratio/interpolation tests. |
+| `emerge` | reconr.f90:4646-4982 | Walks the union grid, evaluates each MF3 section, writes output. Handles thresholds, pseudo-thresholds, redundant sums. |
+| `anlyzd` | reconr.f90:5442-5747 | Analyzes the MF3 dictionary to identify redundant reactions (MT=1,3,4,101, gas production). |
+| `sigma` | reconr.f90:2571-2667 | Evaluates resonance cross sections at a single energy. |
+| `sigfig` | util.f90:361-393 | Rounds to N significant figures with optional shading (+/-1 in last digit). Has `bias=1.0000000000001` multiplier. |
+| `panel` | reconr.f90:2256-2569 | Adaptive reconstruction within resonance range. |
 
-**Plan:** `.claude/plans/zesty-baking-snowflake.md`
+## Traps and lessons (from 3 sessions of debugging)
 
-The entire `merge_background_legacy` function needs replacement with a proper port of Fortran's `emerge` subroutine (reconr.f90:4646-4982). This is the #1 blocker.
+1. **Precomp cache corruption** — `rm -rf ~/.julia/compiled/v1.12/NJOY*` before EVERY test run. Weird errors after agent work = cache corruption.
 
-**What `emerge` does:** For EACH MF3 section individually, walk the union grid, interpolate MF3 background, add resonance XS, accumulate redundant reactions. Produces ALL output MF3 sections (not just 4).
+2. **`sigfig` bias** — `round_sigfig` multiplies by 1.0000000000001 (matching Fortran). This creates near-duplicates that exact `unique!` misses. Use `_dedup_tol!` (tolerance-based).
 
-**New functions needed:**
-1. `analyze_dictionary(mf3) → RedundantReactions` — port of `anlyzd`
-2. `build_union_grid(res_e, mf3, eresl, eresh, err)` — merge resonance + background grids
-3. `emerge!(union_e, res_e, res_v, mf3, mf2, redundant)` — the core algorithm
+3. **Fortran constants vs MF2 values** — `ehigh = 20e6` is a Fortran parameter, NOT read from MF2 EH. Similarly `elow = 1e-5`, `elim = 0.99e6`, `emax = 19e6` are all hardcoded.
 
-**Follow the 3+1 workflow:** Dual proposals, orchestrator comparison, skeptical reviewer.
+4. **Threshold formula** — `thrx = -QI * (AWR+1)/AWR` where AWR is from MF2 (NOT AWR/amassn). `awin = 1` for neutron-induced reactions in both ENDF-6 and older formats.
 
-**Verification:** Run `julia --project=. test/validation/diagnose_harness.jl 2` and check ALL MTs match.
+5. **Pseudo-threshold skip** — Fortran skips MF3 panels where BOTH current AND next XS are zero (lines 1973-1976). This means threshold reactions with zero-XS padding at the start are trimmed.
 
-### Step 1 (was): Fix MF3 background merging above resonance range
-**SUBSUMED by Step 0.** The emerge port will fix this automatically — Fortran's emerge handles all energies correctly.
+6. **Panel splitting** — Fortran's lunion merges the existing grid INTO each section's panel processing. A panel [A,B] is split by any existing grid point G into [A,G] and [G,B]. This prevents over-bisection.
 
-### Step 1 (new): Fix BROADR elastic error
-**This is the #1 blocker for most tests.** After reconr, cross sections go to zero above ~400 eV because MF3 background data isn't being merged outside the resolved resonance range.
+7. **Decade points** — forced within bisection (not injected upfront). Range: ipwr=-4 to 5 giving 1, 0.5, 0.2 × 10^ipwr. Thermal 0.0253 eV. Only below `elim`.
 
-**Symptoms (from Test 02 diagnostic):**
-- Elastic XS = 1e-8 above 400 eV (should be ~30 b from potential scattering)
-- Fission XS = 0 in keV range (should be ~1.5 b from MF3/MT18)
-- Capture XS = 0 in keV range (should be ~2 b from MF3/MT102)
-- Total XS = 0 at 1000 eV (should be ~16 b)
+8. **ENDF format columns** — MAT=cols 67-70, MF=71-72, MT=73-75, NS=76-80. Data in cols 1-66. Compare cols 1-66 only (ignore sequence numbers).
 
-**Root cause analysis (from deep agent investigation):**
-The bug is in `src/processing/reconr_evaluator.jl` and `src/processing/reconr.jl`. Three interacting issues:
+9. **Julia 1.12 scoping** — `for` loops inside top-level scripts can't assign to globals. Wrap in functions or use `local`.
 
-1. **Overlap region suppression** (`reconr_evaluator.jl:112-118`): The `merge_background!` function skips MT=2,18,102 backgrounds for energies in `[eresr, eresh)`. This is meant for the resolved/unresolved overlap region, but if `eresr ≈ eresh` (no unresolved range), it may suppress ALL backgrounds.
+10. **CGS units** — constants.jl uses CGS (ergs, grams, cm/s) matching Fortran phys.f90. The previous session's CGS→SI "fix" was WRONG and was reverted.
 
-2. **Grid extension outside resonance range** (`reconr.jl:133-152`): Points outside `[eresl, eresh]` are added from MF3 breakpoints and decade multiples (1,2,5 per decade). These get zero resonance XS, then `merge_background!` is supposed to fill in MF3 data. But the overlap check in point #1 may prevent this.
+11. **Multi-material tapes** — `find_section(io, 2, 151; target_mat=MAT)` must filter by MAT. Without this, multi-material tapes return wrong material's resonance data.
 
-3. **Inconsistent skip lists**: `reconr.jl:136` skips MT=(1,3,101) for grid extension, but `reconr_evaluator.jl:94` skips MT=(1,3,4,101,27). These should be consistent.
-
-**How to debug:**
-```bash
-julia --project=. test/validation/diagnose_test.jl 2
-```
-Look at the RECONR output table — XS goes to zero at 1000 eV. Then check:
-- What are `eresl`, `eresh`, `eresr` for Test 02's material?
-- Does MF3/MT18 have data in the keV range?
-- Is `merge_background!` being called for those energies?
-
-**How to fix:** Compare against `njoy-reference/src/reconr.f90`, specifically:
-- The `emerge` subroutine (handles background merging)
-- The `panel` loop structure (iterates over energy panels)
-- How backgrounds are added outside the resonance range
-
-### Step 2: Fix resonance grid resolution
-**Symptoms:** At ~191 eV in Test 02, there's a resonance the reference resolves (peak ~700 b) but our grid completely misses (we get 0.2 b). The adaptive grid isn't placing enough points near narrow resonances.
-
-**Files:** `src/processing/adaptive_grid.jl`, `src/processing/reconr_grid.jl`
-
-**Investigation notes from agent:** Issue in `reconr_grid.jl:149` — half-width nodes clamped to 7 sig-figs for resonances where `E_r >> half_width`. For a resonance at 191 eV with width 0.07 eV, the half-width offset rounds to the resonance energy itself, losing the flank node entirely.
-
-### Step 3: Skip GROUPR reference tapes in comparator
-**Quick fix:** ReferenceTape29-type files are GROUPR multigroup output, not PENDF pointwise data. The comparator reads them as PENDF and gets garbage. Either detect and skip them, or only compare against tapes matching the pattern of RECONR/BROADR output.
-
-### Step 4: Check thermr.jl Bragg scattering units
-**File:** `src/processing/thermr.jl:197-204`
-
-The `build_bragg_data` function uses `amne = amassn * amu` and `econ = ev * 8 * amne / hbar²`. With the CGS→SI switch, `econ` changed by 1e4. If lattice parameters (`a`, `c`) are passed in Angstroms or some other unit, the formula may need a compensating factor. This only affects LEAPR/THERMR crystalline scattering (Tests 22, 23, 33, 80), not the main RECONR→BROADR chain.
-
-### Step 5: Run the SAMMY reviewer (beads: NJOY.jl-eux)
-Per the project rules, the SAMMY/LRF=7 implementation needs a skeptical reviewer (line-by-line diff against samm.f90).
-
-### Step 6: Iterate on remaining tests
-After Steps 1-3, run `julia --project=. test/validation/run_all.jl` or use the diagnostic runner on individual tests. Each failure will expose a real bug.
-
-## MANDATORY RULES — READ BEFORE DOING ANYTHING
-
-### The 3+1 Agent Workflow (NON-NEGOTIABLE)
-
-For every module port, physics implementation, or significant architectural decision:
-
-1. **DUAL PROPOSALS:** Spawn TWO independent subagents. They work WITHOUT seeing each other's output. Each produces a complete, working implementation.
-
-2. **ORCHESTRATOR COMPARISON:** Compare both proposals against the Fortran reference code at njoy-reference/src/. Run tests. Select the better approach OR synthesize a hybrid. Document the reasoning.
-
-3. **SKEPTICAL REVIEWER:** Spawn a reviewer agent that:
-   - Diffs Julia code against Fortran line-by-line
-   - Checks edge cases (zero widths, negative XS, energy boundaries)
-   - Verifies physical invariants (sum rules, detailed balance)
-   - Reviews for Julia idiom violations (type instability, allocations, global state)
-   - Produces a REVIEW_REPORT.md with PASS/CONDITIONAL PASS/FAIL verdict
-
-4. **NO CODE MERGED WITHOUT REVIEWER PASS.**
-
-5. **DECISION LOG:** Every decision in reports/decisions/NNN-topic.md with: both proposals summarized, selection rationale, reviewer verdict.
-
-### Critical Operational Rules
-
-6. **NEVER run parallel Julia test processes.** Julia's precompilation cache (~/.julia/compiled/) is NOT safe for concurrent access. **Always:** kill all Julia processes, clear cache (`rm -rf ~/.julia/compiled/v1.12/NJOY*`), then run exactly ONE test.
-
-7. **Use beads (bd) for issue tracking.** Run `bd ready` to see open work. Run `bd close <id> --reason "..."` when done.
-
-8. **After every wave/phase, restate the 3+1 rules.** LLM attention drifts. Repeat the rules explicitly before starting new work.
-
-9. **Read the Fortran before writing Julia.** The reference is at njoy-reference/src/. When the Julia disagrees with NJOY output, the Julia is wrong until proven otherwise.
-
-10. **Use the bundled ENDF evaluations.** The test suite's .endf files are in `njoy-reference/tests/resources/`. Never use external ENDF files — evaluation revisions change resonance parameters and produce false failures.
-
-11. **Write elegant, idiomatic Julia.** No Fortran transliterations. Use multiple dispatch, broadcasting, clear type annotations, functional patterns.
+12. **MF3Section.QM was ZA** — the reader was storing HEAD.C1 (ZA) as QM instead of TAB1.C1 (actual Q value). Fixed.
 
 ## How to run things
 
 ```bash
-# Run unit tests (takes ~90 seconds, 13,360 assertions)
+# Clear precomp (ALWAYS do this before running Julia)
 rm -rf ~/.julia/compiled/v1.12/NJOY*
-julia --project=. -e 'using Pkg; Pkg.test()'
 
-# Run full validation pipeline (all 85 tests, ~5 minutes)
-julia --project=. test/validation/run_all.jl
-
-# Run validation on specific tests
-julia --project=. test/validation/run_all.jl --tests 1,2,7,12,84
-
-# Diagnose a single test (verbose output)
-julia --project=. test/validation/diagnose_test.jl 2
-
-# Quick smoke test
+# Quick targeted test for a specific material
 julia --project=. -e '
 using NJOY
-endf = "njoy-reference/tests/resources/n-001_H_002-ENDF8.0.endf"
-result = reconr(endf; mat=128, err=0.001)
-println("H-2: $(length(result.energies)) points, thermal=$(round(result.total[1], digits=2)) b")
+result = reconr("njoy-reference/tests/resources/t511"; mat=1306, err=0.005)
+println("C-nat: $(length(result.energies)) points")
 '
+
+# Write PENDF and compare against Fortran oracle
+julia --project=. -e '
+using NJOY
+result = reconr("path/to/endf"; mat=MAT, err=ERR)
+write_pendf_file("/tmp/julia_output.pendf", result; mat=MAT, err=ERR)
+'
+# Then compare MF3 data columns 1-66 as shown above
+
+# Generate Fortran oracle for a test
+julia --project=. test/validation/diagnose_harness.jl 2
 
 # Check beads issues
 bd ready
 bd list
 ```
 
-## Key reference files
+## Test details
 
-| File | Purpose |
-|------|---------|
-| src/constants.jl | Physics constants — NOW SI (was CGS, caused 10,000x bug) |
-| src/endf/io.jl | ENDF float parser (fixed: spaces, compact notation) |
-| src/resonances/slbw.jl | SLBW formalism + cwaven_constant() |
-| src/processing/reconr.jl | Main RECONR pipeline |
-| src/processing/reconr_evaluator.jl | Background merging — CONTAINS KNOWN BUG (Step 1) |
-| src/processing/broadr.jl | Sigma1 Doppler kernel (verified correct) |
-| test/validation/test_executor.jl | Pipeline execution + module chaining |
-| test/validation/diagnose_test.jl | Verbose per-test diagnostic runner |
-| test/validation/input_parser.jl | NJOY input deck parser |
-| test/validation/reference_comparator.jl | PENDF reference comparison |
-| njoy-reference/src/reconr.f90 | RECONR Fortran (5747 lines) — THE authority |
-| njoy-reference/src/broadr.f90 | BROADR Fortran (1947 lines) |
-| njoy-reference/tests/ | 85 test problems with reference tapes |
+| Test | MAT | ENDF file | err | Formalism | Chain | Status |
+|------|-----|-----------|-----|-----------|-------|--------|
+| 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
+| 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→HEATR→THERMR→GROUPR | RECONR **BIT-IDENTICAL**, rest untested |
+| 02 | 1050 | t404 | 0.001 | SLBW | RECONR→BROADR→UNRESR→GROUPR | **UNTESTED** in grind phase |
 
-## Test 02 detailed state (use as debugging reference)
+## Open beads issues
 
-**Material:** U-234 (ZA=92234, AWR=232.029, MAT=1050 in ENDF/B-IV notation)
-**Chain:** moder → reconr → broadr(300,900,2100K) → moder → unresr → groupr → ccccr → moder → moder
-**ENDF source:** `njoy-reference/tests/resources/t404` (tape20)
-**Reference tapes:** referenceTape28 (PENDF via unresr), referenceTape29 (GROUPR — ignore)
-
-**Current diagnostic results (after SI fix):**
-- RECONR: 2249 pts, thermal total=594 b — reasonable
-- BROADR: 1727 pts at T=300K, AWR=232.0 — runs correctly
-- Comparison vs referenceTape28:
-  - MT=1 total: worst 99.97% at 192 eV (missing resonance peak)
-  - MT=2 elastic: 100% above 400 eV (MF3 background missing)
-  - MT=18 fission: 100% in keV range (MF3 background missing)
-  - MT=102 capture: worst 713% at 5.23 eV (much improved from 8,127,229%)
-
-**21 resonances** at: -1.68, 5.19, 31.4, 46.4, 49.4, 78.3, 88.7, 95.3, 106.9, 112.1, 132.9, 145.9, 154.0, 179.0, 184.0, 191.0, 274.0, 295.0, 319.0, 357.0, 369.0 eV
-
-## Lessons learned (save yourself time)
-
-1. **Precompilation races are the enemy.** If tests fail with weird errors after agent work, it's almost certainly cache corruption. Clear and retry once.
-
-2. **The ENDF float format is treacherous.** `1.234567+8` (no E), `1.23456-38` (2-digit exponent), spaces in exponents, blank fields — every edge case exists in real data. The parser must be bulletproof.
-
-3. **CGS vs SI was a 10,000x bug.** `constants.jl` used CGS (ergs, grams, cm) while all Fortran formulas assume SI (Joules, kg, m). Fixed in this session. If you see cross sections that are orders of magnitude too high/low, check units first.
-
-4. **Sum rule tests need `>=` not `==`.** After adding non-primary MTs to total (gaspr, inelastic channels), total > elastic + fission + capture. Use `total >= sum_of_parts - epsilon`.
-
-5. **LRF=7 (SAMMY) is the hardest formalism.** Variable channel count, per-channel radii, eliminated capture channel, background R-matrix. The Fortran is 7169 lines for a reason.
-
-6. **Reference tapes include ALL processing steps.** A "RECONR test" reference tape may actually include BROADR+HEATR+UNRESR effects if those modules appear in the input deck. Always check the input file to know what processing was applied.
-
-7. **ReferenceTape29-type files are GROUPR output**, not PENDF. The comparator reads them as PENDF and gets millions of percent error. Ignore these until GROUPR comparison is implemented.
-
-8. **Test 02 is MAT=1050 = U-234 (not Pu-238).** Old ENDF/B-IV MAT numbers are tape-sequential, not nuclide-derived. Always check ZA in the ENDF file header.
-
-9. **The user has 64 threads available.** Use parallel agents for research. But NEVER run parallel Julia test processes (precomp cache corruption).
-
-10. **The user wants elegant, idiomatic Julia.** No Fortran transliterations. Favor multiple dispatch, broadcasting, clean type annotations. File length limits are a soft guideline.
+Run `bd ready` to see current work. Key issues:
+- `NJOY.jl-qkv` — Grind Test 02: Pu-238/U-234 RECONR bit-identical (P0)
+- `NJOY.jl-gun` — Grind BROADR: validate against per-module oracle (P1)
+- `NJOY.jl-dkm` — PENDF format: MF1 header, MF2, MF12/MT=102 (P2)
