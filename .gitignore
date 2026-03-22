@@ -5,3 +5,4 @@ endf-data/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+test/validation/oracle_cache/

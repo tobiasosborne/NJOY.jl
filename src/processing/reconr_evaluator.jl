@@ -551,7 +551,8 @@ function cross_section_rml(E::Float64, rml::RMLData)
     # Wavenumber constant following NJOY samm.f90 fxradi
     hbarrr = C.hbar / C.ev                          # hbar in eV·s
     amuevv = C.amu * C.clight * C.clight / C.ev      # amu in eV
-    twomhb = sqrt(2.0 * C.amassn * amuevv) / (hbarrr * 1.0e15 * C.clight)
+    cspeed = C.clight / 100.0                        # c in m/s (CGS clight is cm/s)
+    twomhb = sqrt(2.0 * C.amassn * amuevv) / (hbarrr * 1.0e15 * cspeed)
 
     factor_lab = emb_el / (emb_el + ema_el)
     alabcm = factor_lab
@@ -1042,7 +1043,18 @@ end
 function merge_background_legacy(energies::Vector{Float64},
                                   res_xs::Vector{<:CrossSections},
                                   mf3_sections::Vector{MF3Section})
-    _SKIP_MTS_LEGACY = (1, 3, 4, 101, 27)
+    # MTs to skip entirely (redundant sums or non-cross-section quantities):
+    #   MT=1   : total (redundant — recomputed from partials)
+    #   MT=3   : nonelastic (redundant — total - elastic)
+    #   MT=4   : inelastic total (redundant — sum of MT=51-91)
+    #   MT=27  : absorption (redundant)
+    #   MT=101 : disappearance (redundant)
+    #   MT=46-49 : skipped per Fortran reconr.f90:4846
+    #   MT>200 : non-cross-section quantities (mubar, xi, gamma, heating, etc.)
+    #            per Fortran reconr.f90:4847
+    _skip(mt::Int) = mt == 1 || mt == 3 || mt == 4 || mt == 27 || mt == 101 ||
+                     (mt >= 46 && mt <= 49) || mt > 200
+
     n = length(energies)
     result = Vector{CrossSections{Float64}}(undef, n)
     for i in 1:n
@@ -1053,7 +1065,7 @@ function merge_background_legacy(energies::Vector{Float64},
         other_bg = 0.0
         for sec in mf3_sections
             mt = Int(sec.mt)
-            mt in _SKIP_MTS_LEGACY && continue
+            _skip(mt) && continue
             bg = interpolate(sec.tab, e)
             bg == 0.0 && continue
             if mt == 2

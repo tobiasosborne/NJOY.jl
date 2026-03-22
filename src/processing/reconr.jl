@@ -56,10 +56,10 @@ function reconstruct(endf_file::AbstractString;
         # Detect MAT number
         actual_mat = _detect_mat(io, mat)
 
-        # Read MF2
+        # Read MF2 (filter by MAT for multi-material tapes)
         seekstart(io)
-        found = find_section(io, 2, 151)
-        found || error("reconstruct: MF2/MT151 not found in $endf_file")
+        found = find_section(io, 2, 151; target_mat=actual_mat)
+        found || error("reconstruct: MF2/MT151 not found for MAT=$actual_mat in $endf_file")
         mf2 = read_mf2(io)
 
         # Read MF3 sections
@@ -106,6 +106,8 @@ function reconstruct(endf_file::AbstractString;
             if length(energies) < 2
                 energies = [1.0e-5, 2.0e7]
             end
+            # Linearize for 1/v: add midpoints, decade points, thermal point
+            linearize_one_over_v!(energies, Float64(err))
             n_pts = length(energies)
             values = zeros(n_pts, 4)
             merge_background!(energies, values, mf3_sections, mf2)
@@ -140,19 +142,12 @@ function reconstruct(endf_file::AbstractString;
                 end
             end
         end
-        _decade_mults_r = (1.0, 2.0, 5.0)
-        for exp_val in -5:7
-            base = exp10(exp_val)
-            for m in _decade_mults_r
-                e = m * base
-                if e >= 1.0e-5 && e <= 2.0e7 && (e < eresl || e > eresh)
-                    push!(mf3_extra, e)
-                end
-            end
-        end
         if !isempty(mf3_extra)
             sort!(mf3_extra)
             unique!(mf3_extra)
+            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
+            # Linearize the extension grid for 1/v representation
+            linearize_one_over_v!(mf3_extra, Float64(err))
             filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
             n_extra = length(mf3_extra)
             extra_values = zeros(n_extra, 4)
@@ -199,8 +194,8 @@ function reconr(endf_file::AbstractString;
         actual_mat = _detect_mat(io, mat)
 
         seekstart(io)
-        found = find_section(io, 2, 151)
-        found || error("reconr: MF2/MT151 not found in $endf_file")
+        found = find_section(io, 2, 151; target_mat=actual_mat)
+        found || error("reconr: MF2/MT151 not found for MAT=$actual_mat in $endf_file")
         mf2 = read_mf2(io)
 
         mf3_sections = read_mf3_sections(io, actual_mat)
@@ -234,6 +229,9 @@ function reconr(endf_file::AbstractString;
             sort!(all_energies)
             unique!(all_energies)
             filter!(e -> e > 0.0, all_energies)
+
+            # Linearize for 1/v: add midpoints, decade points, thermal point
+            linearize_one_over_v!(all_energies, err)
 
             n_pts = length(all_energies)
             res_xs = [CrossSections() for _ in 1:n_pts]
@@ -292,20 +290,12 @@ function reconr(endf_file::AbstractString;
                 end
             end
         end
-        # Also add decade points outside the resonance range
-        _decade_mults = (1.0, 2.0, 5.0)
-        for exp_val in -5:7
-            base = exp10(exp_val)
-            for m in _decade_mults
-                e = m * base
-                if e >= 1.0e-5 && e <= 2.0e7 && (e < eresl || e > eresh)
-                    push!(mf3_extra, e)
-                end
-            end
-        end
         if !isempty(mf3_extra)
             sort!(mf3_extra)
             unique!(mf3_extra)
+            filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
+            # Linearize the extension grid for 1/v representation
+            linearize_one_over_v!(mf3_extra, err)
             filter!(e -> !(e >= eresl && e <= eresh), mf3_extra)
             n_extra = length(mf3_extra)
             extra_values = zeros(n_extra, 4)

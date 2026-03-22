@@ -187,6 +187,82 @@ function _add_decade_points!(nodes::Vector{Float64})
 end
 
 # ==========================================================================
+# 1/v linearization -- bisect step-ratio gaps and force decade points
+# ==========================================================================
+
+"""
+    linearize_one_over_v!(energies, err; elim=1e6)
+
+Refine `energies` so that the step ratio between consecutive points is small
+enough to represent 1/v behaviour to fractional tolerance `err`.
+
+This matches the logic of Fortran RECONR's `lunion` subroutine
+(reconr.f90:1771-2238):
+
+1. Force decade points (1, 2, 5 x 10^n) and the thermal point 0.0253 eV.
+2. Walk through sorted energies; where `e[i+1]/e[i] > stpmax`, insert the
+   geometric midpoint rounded to 7 significant figures.
+3. Apply 5x tighter tolerance below the thermal range (0.4999 eV), matching
+   Fortran's `trange` logic (line 2150).
+4. Only linearize below `elim` (default 1 MeV), matching Fortran's `elim`
+   (line 1811).
+
+The vector is sorted and deduplicated on exit.
+"""
+function linearize_one_over_v!(energies::Vector{Float64}, err::Float64;
+                               elim::Float64 = 1.0e6)
+    _inject_decade_and_thermal!(energies, elim)
+    length(energies) < 2 && return energies
+
+    # Fortran constants (reconr.f90:1821, 2150)
+    trange     = 0.4999
+    stpmax     = 1.0 + sqrt(5.3 * err)
+    stpmax_lo  = 1.0 + sqrt(5.3 * err / 5.0)  # 5x tighter below trange
+
+    # Single-pass scan: inserting a midpoint re-checks the left sub-interval
+    # before advancing, so one pass suffices.
+    i = 1
+    while i < length(energies)
+        lo, hi = energies[i], energies[i + 1]
+        if lo >= elim
+            i += 1; continue
+        end
+        hi_eff = min(hi, elim)
+        threshold = lo < trange ? stpmax_lo : stpmax
+        if hi_eff / lo > threshold
+            mid = round_sigfig(sqrt(lo * hi_eff), 7)
+            if mid > lo && mid < hi
+                insert!(energies, i + 1, mid)
+            else
+                i += 1
+            end
+        else
+            i += 1
+        end
+    end
+    energies
+end
+
+"""Insert decade points (1,2,5 x 10^n) and thermal (0.0253 eV) into sorted grid."""
+function _inject_decade_and_thermal!(energies::Vector{Float64}, elim::Float64)
+    isempty(energies) && return
+    emin, emax = first(energies), min(last(energies), elim)
+    if 0.0253 >= emin && 0.0253 <= emax
+        push!(energies, 0.0253)
+    end
+    for exp_val in -5:7
+        base = exp10(exp_val)
+        for m in (1.0, 2.0, 5.0)
+            e = m * base
+            e >= emin && e <= emax && push!(energies, e)
+        end
+    end
+    sort!(energies)
+    unique!(energies)
+    filter!(>(0.0), energies)
+end
+
+# ==========================================================================
 # MF3 linearization -- add midpoints for non-linear interpolation
 # ==========================================================================
 

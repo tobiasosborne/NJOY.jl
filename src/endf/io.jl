@@ -80,18 +80,22 @@ end
     find_section(io::IO, target_mf::Integer, target_mt::Integer) -> Bool
 
 Scan from the beginning of `io` until a line with the given MF/MT is found.
+If `target_mat` is specified (> 0), also filters by MAT number — critical
+for multi-material tapes (e.g. tape t404 has U-234, Pu-238, Am-241, Am-243).
 Leaves the stream positioned at the start of that line (the HEAD record).
 Returns `true` if found, `false` if EOF is reached.
 """
-function find_section(io::IO, target_mf::Integer, target_mt::Integer)
+function find_section(io::IO, target_mf::Integer, target_mt::Integer;
+                      target_mat::Integer=0)
     seekstart(io)
     while !eof(io)
         pos = position(io)
         line = readline(io)
         p = rpad(line, 80)
+        mat = _parse_int(p[67:70])
         mf = _parse_int(p[71:72])
         mt = _parse_int(p[73:75])
-        if mf == target_mf && mt == target_mt
+        if mf == target_mf && mt == target_mt && (target_mat <= 0 || mat == target_mat)
             seek(io, pos)
             return true
         end

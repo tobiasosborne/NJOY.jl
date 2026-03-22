@@ -155,7 +155,7 @@ export AdaptiveConfig, adaptive_reconstruct, round_sigfig
 
 # Public API -- RECONR processing
 export MF3Section, ENDFMaterial, PointwiseMaterial
-export read_mf3_sections, build_grid, build_evaluator
+export read_mf3_sections, build_grid, build_evaluator, linearize_one_over_v!
 export merge_background!, reconstruct, reconr, sigma_mf2
 
 # Public API -- PENDF writer
