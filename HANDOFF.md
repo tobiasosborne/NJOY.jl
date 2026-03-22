@@ -138,6 +138,33 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 | 1033 pts exact | **BIT-IDENTICAL** |
 | Test 02 | Pu-238 | SLBW + URR | 17/17 | 3567 pts exact | **BIT-IDENTICAL** |
 
+### In Progress — Test 08 (Ni-61, Reich-Moore)
+
+| Test | Material | Formalism | MTs | Status |
+|------|----------|-----------|-----|--------|
+| Test 08 | Ni-61 | Reich-Moore (LRF=3) | 3/18 | **3/18 PERFECT** |
+
+MAT=2834, err=0.01, ENDF file `eni61`. Single resolved range [1e-5, 70000 eV].
+
+**Root causes of 15 failing MTs:**
+
+1. **Grid difference near thermal (MT=1, 2, 102)**: 1582 diffs each. The Fortran has ~41 extra grid points, many clustered near 0.0253 eV. The Fortran adaptive reconstruction adds dense points near thermal because the **capture cross section** follows 1/v (changes within each panel). The Julia also handles 1/v via the adaptive reconstruction, but produces a slightly different grid. The grid diverges at index 82 (E=0.0253 eV): Julia has 1 point, Fortran has ~6 shaded points. Root cause likely in how `resxs` handles the thermal enode point vs how `adaptive_reconstruct` handles it.
+
+2. **Threshold boundary shading (MT=4, 51-58, 91, 103, 107)**: ~192-864 diffs each. The Fortran output for threshold reactions starts with `sigfig(thrxx, 7, -1)` and `sigfig(thrxx, 7, +1)` as the first two energies. For example, MT=4 starts at 69999.99 and 70000.01 in Fortran but at 68136.5 in Julia. This is a PENDF writer issue — `_get_legacy_section` doesn't generate shaded threshold boundaries.
+
+**What's verified working:**
+- Reich-Moore reader (`_read_rm_params`) parses correctly
+- Reich-Moore evaluator (`cross_section_rm`) produces correct XS (errors are grid-based, not formula-based)
+- Grid construction (`lunion_grid`) works but doesn't exactly match Fortran resxs adaptive refinement
+- Oracle cache generated at `test/validation/oracle_cache/test08/`
+
+### Not Yet Attempted
+
+| Test | Material | Formalism | Notes |
+|------|----------|-----------|-------|
+| Test 07 | U-235 | SLBW + URR(LRF=2) | Needs `_read_urr_lrf2` + `_csunr2` (mode=12) |
+| Test 15-17 | U-238 JENDL | Likely RM | ENDF file not yet identified |
+
 ---
 
 ## Architecture
@@ -235,11 +262,19 @@ For ±1 diffs, common root causes (all encountered and fixed in this project):
 
 ## Immediate Next Steps
 
-### Priority 1: Grind Test 03 or another SLBW/MLBW/Reich-Moore test
+### Priority 1: Fix Test 08 grid near thermal
 
-Tests 84, 01, 02 are all bit-identical. Try another material with a different formalism (MLBW, Reich-Moore). Look at tests in `njoy-reference/tests/` and check their input decks. Generate the oracle first: `julia --project=. test/validation/diagnose_harness.jl <test_number>`.
+The adaptive reconstruction grid differs near 0.0253 eV. The Fortran resxs (reconr.f90:2240-2569) adds dense points near the thermal enode because the capture 1/v cross section changes within panels. Compare the Fortran resxs panel bisection logic against Julia's `adaptive_reconstruct` to find the exact divergence point. Key files: `src/processing/adaptive_grid.jl`, Fortran `resxs`/`panel`.
 
-### Priority 2: Grind BROADR
+### Priority 2: Fix Test 08 threshold shading
+
+The Fortran emerge outputs threshold reactions (MT=4, 51-91, etc.) starting with `sigfig(thrxx, 7, -1)` and `sigfig(thrxx, 7, +1)` as the first two energies. The Julia `_get_legacy_section` doesn't generate these shaded boundaries. Fix in `pendf_writer.jl`.
+
+### Priority 3: Implement LRU=2/LRF=2 reader (mode=12)
+
+Test 07 (U-235) needs `_read_urr_lrf2` (matching Fortran `rdf2u2`, reconr.f90:828-829) and `_csunr2` evaluator. This unlocks U-235 and Mn-55 tests.
+
+### Priority 4: Grind BROADR
 
 The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next module in the processing chain (Doppler broadening).
 
@@ -252,6 +287,8 @@ The oracle cache has `after_broadr.pendf` for Tests 01 and 02. This is the next 
 | 84 | 128 | n-001_H_002-ENDF8.0.endf | 0.001 | LRU=0 | RECONR only | **BIT-IDENTICAL** |
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→... | RECONR **BIT-IDENTICAL** |
 | 02 | 1050 | t404 | 0.005 | SLBW+URR | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
+| 08 | 2834 | eni61 | 0.01 | Reich-Moore | RECONR→BROADR→HEATR→... | RECONR **3/18 PERFECT** |
+| 07 | 1395 | t511 | 0.005 | SLBW+URR(LRF=2) | RECONR→BROADR→... | **Needs mode=12 reader** |
 
 ---
 
