@@ -279,10 +279,11 @@ function build_unresolved_table(urr::URRData, abn::Float64,
     energies = Float64[]
     wide = 1.26
     raw_e = urr.energies
+    # Match Fortran rdf2u1 loop: ener.ge.el.and.ener.lt.eh
     for n in 1:length(raw_e)
         ener = raw_e[n]
         ener < urr.EL && continue
-        ener >= urr.EH && continue
+        ener >= urr.EH && continue  # strict < EH, matching Fortran
         push!(energies, round_sigfig(ener, 7, 0))
         # Add egridu intermediate points if step is too wide
         if n < length(raw_e)
@@ -299,11 +300,8 @@ function build_unresolved_table(urr::URRData, abn::Float64,
             end
         end
     end
-    # Add the last energy node
-    if !isempty(raw_e) && raw_e[end] >= urr.EL
-        e_last = round_sigfig(raw_e[end], 7, 0)
-        (isempty(energies) || energies[end] != e_last) && push!(energies, e_last)
-    end
+    # Add extra grid at top: sigfig(EH, 7, -1) (reconr.f90:1416-1419)
+    push!(energies, round_sigfig(urr.EH, 7, -1))
     ne = length(energies)
     total = zeros(ne)
     elastic = zeros(ne)
