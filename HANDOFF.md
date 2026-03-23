@@ -395,9 +395,9 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 ### Close (>50% MTs)
 | Test | MAT | Material | MTs | Notes |
 |------|-----|----------|-----|-------|
-| 45 | 525 | B-10 | 40/53 (75%) | LRU=0, threshold-area diffs |
-| 27 | 9437 | Pu-239 | 35/49 (71%) | Reich-Moore, threshold-area diffs |
-| 47 | 9437 | Pu-239 | 35/49 (71%) | Same as 27, different chain |
+| 27 | 9437 | Pu-239 | 45/49 (92%) | Reich-Moore, ±1 FP — **improved in Phase 10** |
+| 47 | 9437 | Pu-239 | 45/49 (92%) | Same as 27, different chain |
+| 45 | 525 | B-10 | 42/53 (79%) | LRU=0, grid deficit + MT=105 redundant |
 | 18 | 9999 | Cf-252 | 5/9 (56%) | LRU=0 with special data |
 
 ### Partial (<50% MTs)
