@@ -332,12 +332,25 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         for k in start_k:npts
             e = work_x[k]
             if k < npts && abs(work_x[k+1] - e) < 1.0e-9 * abs(e)
-                # First of a duplicate pair: Fortran uses different shading
-                # for initial (label 207, line 1979: sigfig(er,7,0)) vs
-                # mid-data (label 270, line 2029: sigfig(er,7,-1)) duplicates
-                bias = (k == start_k) ? 0 : -1
-                push!(grid, round_sigfig(e, 7, bias))
+                # Duplicate pair detected. Fortran lunion (line 2092) checks
+                # if the y-values differ: if same, skip shading (go to 260).
+                # Only shade when y-values actually differ (real discontinuity).
+                if abs(tab.y[k+1] - tab.y[k]) < 1.0e-9 * abs(tab.y[k] + 1.0e-30)
+                    # Same y-values → not a real discontinuity. Just keep
+                    # one copy (Fortran advances ir without shading).
+                    push!(grid, e)
+                else
+                    # First of a duplicate pair: Fortran uses different shading
+                    # for initial (label 207, line 1979: sigfig(er,7,0)) vs
+                    # mid-data (label 270, line 2029: sigfig(er,7,-1)) duplicates
+                    bias = (k == start_k) ? 0 : -1
+                    push!(grid, round_sigfig(e, 7, bias))
+                end
             elseif k > start_k && abs(e - work_x[k-1]) < 1.0e-9 * abs(e)
+                # Second of a duplicate pair: check if it was a real discontinuity
+                if abs(tab.y[k] - tab.y[k-1]) < 1.0e-9 * abs(tab.y[k-1] + 1.0e-30)
+                    continue  # Same y-values → skip (already inserted one copy)
+                end
                 push!(grid, round_sigfig(e, 7, +1))
             elseif is_histogram && k > start_k && k < npts
                 # Histogram interior breakpoint → shaded pair
