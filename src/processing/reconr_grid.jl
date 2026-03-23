@@ -378,6 +378,31 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         filter!(>(0.0), grid)
     end
 
+    # Post-processing: step-ratio enforcement on the cumulative grid.
+    # Fortran lunion processes each section cumulatively — panel bisection
+    # sees grid points from ALL previous sections. Julia's per-section
+    # _bisect_panel! only sees its own breakpoints. After combining,
+    # consecutive grid points may have step ratios > stpmax that need
+    # bisection. Matches Fortran lunion lines 2131-2140 (step ratio check).
+    if elim > 0.0
+        changed = true
+        while changed
+            changed = false
+            i = 1
+            while i < length(grid)
+                xl, xh = grid[i], grid[i+1]
+                if xl > 0.0 && xl <= elim && xh / xl > stpmax
+                    xm = round_sigfig((xl + xh) / 2, 7)
+                    if xm > xl && xm < xh
+                        insert!(grid, i+1, xm)
+                        changed = true
+                    end
+                end
+                i += 1
+            end
+        end
+    end
+
     # Post-processing: remove interior points that coincide with resonance
     # range boundaries (matching Fortran lunion lines 2196-2226).
     # First and last points and points above emax=19 MeV are always kept.
