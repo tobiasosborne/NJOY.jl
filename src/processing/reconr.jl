@@ -250,6 +250,7 @@ function reconr(endf_file::AbstractString;
         # Build unresolved XS table FIRST (needed for lunion grid + xs_fn)
         urr_table = nothing
         eresu = Inf
+        urr_lssf = 0
         for iso in mf2.isotopes
             for rng in iso.ranges
                 if Int(rng.LRU) == 2 && rng.parameters isa URRData
@@ -261,6 +262,7 @@ function reconr(endf_file::AbstractString;
                     urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections;
                                                         eresr=eresr)
                     eresu = min(eresu, rng.EL)
+                    urr_lssf = Int(urr_data.LSSF)
                 elseif Int(rng.LRU) == 2 && rng.parameters isa URR2Data
                     urr_data = rng.parameters::URR2Data
                     urr_full = URR2Data(rng.EL, rng.EH, urr_data.SPI, urr_data.AP,
@@ -270,6 +272,7 @@ function reconr(endf_file::AbstractString;
                     urr_table = build_unresolved_table(urr_full, iso.ABN, mf3_sections;
                                                         eresr=eresr)
                     eresu = min(eresu, rng.EL)
+                    urr_lssf = Int(urr_data.LSSF)
                 end
             end
         end
@@ -321,7 +324,7 @@ function reconr(endf_file::AbstractString;
         # Include unresolved contribution for energies in [eresu, eresh).
         xs_partials = function(E)
             xs = xs_fn(E)
-            if urr_table !== nothing && E >= eresu && E < eresh
+            if urr_table !== nothing && urr_lssf == 0 && E >= eresu && E < eresh
                 urr = eval_unresolved(urr_table, E)
                 return (xs.elastic + urr[2], xs.fission + urr[3], xs.capture + urr[4])
             end
@@ -350,8 +353,9 @@ function reconr(endf_file::AbstractString;
             e = all_energies[i]
             # Resolved contribution (SLBW)
             xs = (e >= eresl && e < eresr) ? xs_fn(e) : CrossSections()
-            # Unresolved contribution (matching Fortran sigma:2659-2665)
-            if urr_table !== nothing && e >= eresu && e < eresh
+            # Unresolved contribution (matching Fortran sigma:2659-2665).
+            # Skip for LSSF=1: MF3 smooth values provide pointwise XS directly.
+            if urr_table !== nothing && urr_lssf == 0 && e >= eresu && e < eresh
                 urr = eval_unresolved(urr_table, e)
                 xs = CrossSections(xs.total + urr[1], xs.elastic + urr[2],
                                    xs.fission + urr[3], xs.capture + urr[4])

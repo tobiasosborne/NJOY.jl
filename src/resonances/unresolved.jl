@@ -369,8 +369,11 @@ function _csunr2(E::Float64, urr::URR2Data)
         gff *= terf
         gs  *= ters
 
-        # Interference correction (Fortran lines 4271-4273)
-        add = cnst * gj * 2 * gnx * sin(ps)^2 / den
+        # Interference correction — two-step to match Fortran evaluation
+        # order (reconr.f90:4271-4272: add=const*gj*2*gnx*(sin(ps))**2;
+        # add=add/(e*dx))
+        add = cnst * gj * 2 * gnx * sin(ps)^2
+        add /= den
         gs -= add
 
         sig_e += gs
@@ -480,26 +483,21 @@ function build_unresolved_table(urr::URRData, abn::Float64,
         end
     end
 
-    # Add MF3 backgrounds (matching genunr lines 1695-1731)
-    for sec in mf3_sections
-        mt = Int(sec.mt)
-        mt == 1   && (col = 1)
-        mt == 2   && (col = 2)
-        mt == 18  && (col = 3)
-        mt == 102 && (col = 4)
-        (mt != 1 && mt != 2 && mt != 18 && mt != 102) && continue
-        for i in 1:ne
-            E = energies[i]
-            E < 0 && continue
-            bkg = interpolate(sec.tab, E)
-            if col == 1
-                total[i]   = round_sigfig(total[i] + bkg, 7)
-            elseif col == 2
-                elastic[i] = round_sigfig(elastic[i] + bkg, 7)
-            elseif col == 3
-                fission[i] = round_sigfig(fission[i] + bkg, 7)
-            elseif col == 4
-                capture[i] = round_sigfig(capture[i] + bkg, 7)
+    # Add MF3 backgrounds only when LSSF=0 (Fortran genunr lines 1695-1731).
+    # LSSF=1 means backgrounds are NOT included in the table; emerge adds them.
+    if urr.LSSF == 0
+        for sec in mf3_sections
+            mt = Int(sec.mt)
+            (mt != 1 && mt != 2 && mt != 18 && mt != 102) && continue
+            for i in 1:ne
+                E = energies[i]
+                E < 0 && continue
+                bkg = interpolate(sec.tab, E)
+                if     mt == 1;   total[i]   = round_sigfig(total[i]   + bkg, 7)
+                elseif mt == 2;   elastic[i] = round_sigfig(elastic[i] + bkg, 7)
+                elseif mt == 18;  fission[i] = round_sigfig(fission[i] + bkg, 7)
+                elseif mt == 102; capture[i] = round_sigfig(capture[i] + bkg, 7)
+                end
             end
         end
     end
@@ -588,18 +586,20 @@ function build_unresolved_table(urr::URR2Data, abn::Float64,
         end
     end
 
-    # Add MF3 backgrounds (matching genunr lines 1695-1731)
-    for sec in mf3_sections
-        mt = Int(sec.mt)
-        (mt != 1 && mt != 2 && mt != 18 && mt != 102) && continue
-        for i in 1:ne
-            E = energies[i]
-            E < 0 && continue
-            bkg = interpolate(sec.tab, E)
-            if     mt == 1;   total[i]   = round_sigfig(total[i]   + bkg, 7)
-            elseif mt == 2;   elastic[i] = round_sigfig(elastic[i] + bkg, 7)
-            elseif mt == 18;  fission[i] = round_sigfig(fission[i] + bkg, 7)
-            elseif mt == 102; capture[i] = round_sigfig(capture[i] + bkg, 7)
+    # Add MF3 backgrounds only when LSSF=0 (Fortran genunr lines 1695-1731)
+    if urr.LSSF == 0
+        for sec in mf3_sections
+            mt = Int(sec.mt)
+            (mt != 1 && mt != 2 && mt != 18 && mt != 102) && continue
+            for i in 1:ne
+                E = energies[i]
+                E < 0 && continue
+                bkg = interpolate(sec.tab, E)
+                if     mt == 1;   total[i]   = round_sigfig(total[i]   + bkg, 7)
+                elseif mt == 2;   elastic[i] = round_sigfig(elastic[i] + bkg, 7)
+                elseif mt == 18;  fission[i] = round_sigfig(fission[i] + bkg, 7)
+                elseif mt == 102; capture[i] = round_sigfig(capture[i] + bkg, 7)
+                end
             end
         end
     end

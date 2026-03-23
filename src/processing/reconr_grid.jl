@@ -243,6 +243,41 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
             thrx = awr > 0.0 ? -qx * (awr + 1) / awr : -qx
         end
 
+        # Threshold replacement: Fortran REPLACES the first MF3 breakpoint
+        # with the kinematic threshold in-place (reconr.f90:1925-1943).
+        work_x = tab.x  # Default: alias original x data
+        start_k = 1
+
+        if thrx > 0.0
+            thrxx = round_sigfig(thrx, 7, +1)
+            if tab.x[1] < thrxx
+                work_x = copy(tab.x)
+                work_x[1] = thrxx
+                # Fix subsequent breakpoints now <= new first energy
+                # (Fortran lines 1937-1943)
+                l = 1
+                while l < npts && work_x[l + 1] <= work_x[l]
+                    (l > 11) && break
+                    work_x[l + 1] = round_sigfig(work_x[l], 7, +1)
+                    l += 1
+                end
+            end
+        end
+
+        # Pseudo-threshold advancement: skip leading zero-XS panels
+        # for non-primary reactions (Fortran label 205, lines 1968-1976)
+        if mt != 2 && mt != 18 && mt != 19 && mt != 102
+            ir = start_k
+            while ir < npts - 1
+                if abs(tab.y[ir]) < _SSMALL && abs(tab.y[ir + 1]) < _SSMALL
+                    ir += 1
+                else
+                    break
+                end
+            end
+            start_k = ir
+        end
+
         # Process this section's panels through the bisection loop.
         # Split panels at existing grid nodes (matching Fortran lunion
         # labels 210-280 which merges existing grid into panel processing).
@@ -294,13 +329,17 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         is_histogram = any(l == Histogram for l in tab.interp.law)
         shaded_energies = Float64[]
 
-        for k in 1:npts
-            e = tab.x[k]
-            if k < npts && abs(tab.x[k+1] - e) < 1.0e-9 * abs(e)
-                push!(grid, round_sigfig(e, 7, -1))
-            elseif k > 1 && abs(e - tab.x[k-1]) < 1.0e-9 * abs(e)
+        for k in start_k:npts
+            e = work_x[k]
+            if k < npts && abs(work_x[k+1] - e) < 1.0e-9 * abs(e)
+                # First of a duplicate pair: Fortran uses different shading
+                # for initial (label 207, line 1979: sigfig(er,7,0)) vs
+                # mid-data (label 270, line 2029: sigfig(er,7,-1)) duplicates
+                bias = (k == start_k) ? 0 : -1
+                push!(grid, round_sigfig(e, 7, bias))
+            elseif k > start_k && abs(e - work_x[k-1]) < 1.0e-9 * abs(e)
                 push!(grid, round_sigfig(e, 7, +1))
-            elseif is_histogram && k > 1 && k < npts
+            elseif is_histogram && k > start_k && k < npts
                 # Histogram interior breakpoint → shaded pair
                 push!(grid, round_sigfig(e, 7, -1))
                 push!(grid, round_sigfig(e, 7, +1))
@@ -319,21 +358,6 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         end
         append!(grid, new_points)
 
-        # Add computed threshold only when:
-        # 1. MF3 first breakpoint is below the threshold (line 1931)
-        # 2. The pseudo-threshold skip (lines 1973-1976) doesn't skip past it.
-        #    The skip fires when current AND next XS are both zero.
-        if thrx > 0.0
-            thrxx = round_sigfig(thrx, 7, +1)
-            if tab.x[1] < thrxx
-                # Check pseudo-threshold: if first xs=0 AND second xs=0,
-                # the Fortran skips this panel (never reaches threshold code)
-                skip_pseudo = npts >= 2 && abs(tab.y[1]) < 1e-30 && abs(tab.y[2]) < 1e-30
-                if !skip_pseudo
-                    push!(grid, thrxx)
-                end
-            end
-        end
         sort!(grid)
         # Tolerance-based deduplication matching Fortran lunion (small=1e-9).
         # The sigfig bias creates near-duplicates that exact unique! misses.

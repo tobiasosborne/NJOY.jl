@@ -1093,11 +1093,11 @@ function merge_background_legacy(energies::Vector{Float64},
             mt = Int(sec.mt)
             _skip(mt) && continue
 
-            # Suppress at threshold (Fortran emerge line 4795:
-            # if thresh>1 and |thresh-eg|<test*thresh → sn=0)
+            # Below/at threshold → skip (Fortran emerge lines 4792-4795:
+            # if (thresh-eg > test*thresh) go to 370; if |thresh-eg|<test → sn=0)
             thrx = get(thresholds, mt, 0.0)
-            if thrx > 1.0 && abs(thrx - e) < 1.0e-7 * thrx
-                continue  # sn=0 at threshold
+            if thrx > 1.0 && (thrx - e) > 1.0e-10 * thrx
+                continue  # below threshold
             end
 
             # Near threshold, modify first breakpoint to (thrx, 0) and interpolate

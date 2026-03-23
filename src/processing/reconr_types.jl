@@ -188,11 +188,10 @@ function read_mf13_sections(io::IO, mat::Integer)
                 head = read_cont(io)
                 # Read first TAB1 (Fortran forces NK=1, line 1879)
                 tab1 = read_tab1(io)
-                # Force histogram interpolation (Fortran line 1880)
-                hist_interp = InterpolationTable(
-                    [Int32(length(tab1.x))], [Histogram])
-                tf = TabulatedFunction(hist_interp, tab1.x, tab1.y)
-                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf, Int32(13)))
+                # Note: Fortran line 1880 (scr(5)=1) is dead code — overwritten
+                # by tab1io. MF=13 uses the actual interpolation law from ENDF.
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2,
+                    TabulatedFunction(tab1.interp, tab1.x, tab1.y), Int32(13)))
                 _skip_to_send(io)
             catch e
                 @warn "read_mf13_sections: skipping MF13/MT=$mt" exception=(e, catch_backtrace())
