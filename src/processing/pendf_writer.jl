@@ -544,21 +544,31 @@ function _get_legacy_section(result, mt::Int)
 
         # Compute threshold for reactions with Q < 0
         thrxx = 0.0
+        # thresh: Fortran emerge's threshold = sigfig(tab.x[1], 7, 0)
+        # from gety1 initialization (line 4753). Used for BOTH the
+        # below-threshold skip (line 4792) AND the at-threshold
+        # suppression (line 4794). When tab.x[1] > physical threshold
+        # (thrx), Fortran effectively uses the MF3 start energy, not
+        # the Q-value threshold.
+        thresh = 0.0
         if qi < 0.0
             thrx = awr > 0.0 ? -qi * (awr + 1) / awr : -qi
             thrxx = round_sigfig(thrx, 7, +1)
+            thresh = round_sigfig(sec.tab.x[1], 7)
+            if thresh < thrxx
+                thresh = thrxx  # physical threshold is higher
+            end
         end
 
         # Build the section output matching Fortran emerge:
         # 1. Skip points below threshold (line 4792)
-        # 2. Pseudo-threshold skip: skip zero-XS panels (lines 1973-1976)
-        # 3. Set xs=0 at threshold energy (line 4795)
+        # 2. Set xs=0 at threshold energy (line 4795)
+        # 3. Pseudo-threshold skip via ith logic (lines 4834, 4918)
         sec_e = Float64[]
         sec_xs = Float64[]
-        found_nonzero = false
         for (idx, e) in enumerate(energies)
-            if thrxx > 0.0 && thrxx - e > 1.0e-9 * thrxx
-                continue  # below threshold
+            if thresh > 0.0 && thresh - e > 1.0e-10 * thresh
+                continue  # below threshold (Fortran line 4792)
             end
             # Near threshold, modify first breakpoint to (thrxx, 0) and interpolate
             # using the MF3 interpolation law (Fortran emerge:1936 + gety1)
@@ -569,31 +579,11 @@ function _get_legacy_section(result, mt::Int)
             end
             bg = round_sigfig(bg, 7)
 
-            # Pseudo-threshold skip: if current xs ≈ 0, check if we've
-            # reached non-zero data yet. Skip leading zero-XS panels.
-            if !found_nonzero
-                if abs(bg) < 1.0e-30
-                    # Look ahead: is the NEXT point also zero?
-                    next_idx = idx + 1
-                    while next_idx <= length(energies)
-                        next_e = energies[next_idx]
-                        if thrxx > 0.0 && thrxx - next_e > 1.0e-9 * thrxx
-                            next_idx += 1; continue
-                        end
-                        break
-                    end
-                    if next_idx <= length(energies)
-                        next_bg = round_sigfig(interpolate(sec.tab, energies[next_idx]), 7)
-                        if abs(next_bg) < 1.0e-30
-                            continue  # both zero → skip
-                        end
-                    end
-                end
-                found_nonzero = true
-            end
-
-            # Set xs=0 at threshold (line 4795)
-            if thrxx > 0.0 && abs(thrxx - e) < 1.0e-9 * thrxx
+            # Set xs=0 at threshold (line 4795): Fortran uses
+            # thresh=sigfig(tab.x[1],7,0), NOT thrxx=sigfig(thrx,7,+1).
+            # Since thrxx > thresh, the grid point at thrxx is NOT
+            # suppressed, matching Fortran behavior.
+            if thresh > 1.0 && abs(thresh - e) < 1.0e-10 * thresh
                 bg = 0.0
             end
 
@@ -602,6 +592,19 @@ function _get_legacy_section(result, mt::Int)
         end
 
         isempty(sec_e) && return nothing
+
+        # Pseudo-threshold skip: matching Fortran emerge ith logic
+        # (lines 4834, 4918). Find first nonzero XS (ith), back up one
+        # if possible, output from there.
+        ith = findfirst(x -> x > 0.0, sec_xs)
+        if ith !== nothing && ith > 1
+            ith -= 1  # Fortran line 4918: if (ith.gt.1) ith=ith-1
+            sec_e = sec_e[ith:end]
+            sec_xs = sec_xs[ith:end]
+        elseif ith === nothing
+            return nothing  # all zero
+        end
+
         return sec_e, sec_xs, qm, qi
     end
     return nothing
