@@ -341,17 +341,25 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ## Immediate Next Steps
 
-### Priority 1: Grind more tests
+### Priority 1: Fix duplicate shading for same-y breakpoints (Trap 28)
 
-Try other tests with MLBW, different materials. Tests 27/47 (Pu-239, 71%) and 45 (B-10, 75%) may benefit from the threshold/duplicate fixes. The remaining 3 MTs in Test 07 (±1 at URR boundary) are a floating-point precision issue, not a logic bug.
+Julia's lunion_grid shades ALL duplicate breakpoints, but Fortran only shades those with different y-values. This creates extra grid points (e.g., Test 27 MTs 51-58 each have 2 extra). Fix: check if duplicate breakpoints have the same y-value before shading. Expected to improve Tests 27/47 (Pu-239) and possibly others.
 
-### Priority 2: Grind BROADR
+### Priority 2: Investigate lunion linearization (Trap 27)
 
-The oracle cache has `after_broadr.pendf` for Tests 01, 02, 07. This is the next module in the processing chain (Doppler broadening).
+For Test 46 MT=103 (Fe-56 JEFF), the Fortran has a constant ~3e-5 multiplicative offset in all MF3 values. This comes from emerge reading lunion's scratch tape instead of the original ENDF. Need to understand what lunion does to the MF3 data and whether Julia needs to replicate this.
 
-### Low Priority: URR ±1 at 82.00001 eV (Test 07 MT=18/19/102)
+### Priority 3: Investigate Test 45 (B-10) grid differences
 
-Floating-point accumulation differences in `_gnrl` Gauss-Laguerre quadrature. Raw values are within 1 ULP of the 7-sigfig rounding boundary. Would require exactly matching Fortran compiler evaluation order for 100-term accumulation — impractical. The two-step interference correction (matching Fortran lines 4271-4272) has already been applied.
+Julia has 15 FEWER grid points than Fortran for primary MTs, and MT=105 is MISSING. Grid construction issue.
+
+### Priority 4: Grind BROADR
+
+The oracle cache has `after_broadr.pendf` for Tests 01, 02, 07. Next module in the processing chain.
+
+### Low Priority: ±1 FP precision issues
+
+Tests 34, 19, 07, 04 all have ±1 diffs at 7th sigfig — cross-compiler floating-point precision, not logic bugs.
 
 ---
 
@@ -378,10 +386,10 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | Test | MAT | Material | MTs | Notes |
 |------|-----|----------|-----|-------|
 | 34 | 9440 | Pu-240 | 51/53 (96%) | Reich-Moore+URR mode=11 (LSSF=1), ±1 FP |
-| 46 | 2631 | Fe-56 | 67/73 (92%) | JEFF3.3, near-threshold XS diffs |
+| 46 | 2631 | Fe-56 | 67/73 (92%) | JEFF3.3, MT=103 lunion linearization diffs |
+| 19 | 9443 | Pu-241 | 21/23 (91%) | ENDF-6, URR, ±1 FP — **improved in Phase 10** |
 | 04 | 1395 | U-235 | 24/27 (89%) | SLBW+URR mode=12, ±1 at URR boundary |
 | 07 | 1395 | U-235 | 24/27 (89%) | Same material, err=0.005 |
-| 19 | 9443 | Pu-241 | 20/23 (87%) | ENDF-6, URR, ±1 + 1 extra grid pt |
 | 26 | 9455 | Pu-245 | 19/23 (83%) | ENDF-8.0, missing MT=103/107 |
 
 ### Close (>50% MTs)
@@ -480,3 +488,31 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 **Two-step interference correction in _csunr2**: Split the interference `add = cnst*gj*2*gnx*sin(ps)^2/den` into two statements matching Fortran's evaluation order (line 4271-4272: numerator first, then divide). This ensures identical intermediate rounding. Applied to both csunr1 and csunr2 paths.
 
 **Result**: 24/27 MTs now BIT-IDENTICAL. Grid matches exactly (2315 pts). Remaining 3 diffs: MT=18/19/102 at ±1 at URR boundary (82.00001 eV) — floating-point accumulation difference in `_gnrl` quadrature, not a logic bug. Tests 01, 02, 04, 08 all pass.
+
+### Phase 10: New computer setup + threshold fix + deep investigation
+
+**Setup**: Fresh clone, Julia 1.12.5, NJOY2016.78 compiled from github.com/njoy/NJOY2016. Generated oracle caches for Tests 01, 02, 08, 19, 27, 34, 45, 46.
+
+**Threshold handling fix in `_get_legacy_section` (FIXED)**: Two bugs in how non-primary MT thresholds are computed:
+
+1. **Below-threshold skip used wrong threshold**: Julia used `thrxx = sigfig(thrx, 7, +1)` from QI, but Fortran emerge uses `thresh = sigfig(tab.x[1], 7, 0)` from gety1 initialization. When `tab.x[1] > thrx` (MF3 starts above the physical threshold), Julia's threshold was too low, failing to skip points between thrx and tab.x[1]. Fixed by using `max(thrxx, sigfig(tab.x[1], 7))`. Fixes Test 19 MT=51 (extra leading zero).
+
+2. **At-threshold suppression used thrxx instead of thresh**: Julia suppressed XS at E=thrxx (sigfig(thrx,7,+1)), but Fortran suppresses at E=thresh (sigfig(tab.x[1],7,0)). Since thrxx is a grid point but thresh is not, Julia incorrectly zeroed the XS at thrxx. Fixed by using thresh for the suppression check.
+
+3. **Pseudo-threshold skip rewritten**: Replaced look-ahead logic with Fortran's exact ith approach (lines 4834, 4918): collect all points, find first nonzero (ith), back up one if ith>1, output from there.
+
+**Test 19 (Pu-241): 20/23 → 21/23** — MT=51 fixed (extra grid point removed). Remaining 2 diffs (MT=1, MT=102) are ±1 FP precision at E=1e-5 eV.
+
+**Test 34 (Pu-240): 51/53 confirmed** — 5 diff points across MT=1 and MT=102, all ±1 at 7th sigfig. Four are in the dense RM resonance region (2089, 2307, 4526 eV), one at thermal (3.97e-5 eV). Raw values are within 3e-4 of the .5 rounding boundary. Cross-compiler FP precision issue, not a logic bug.
+
+**Test 46 (Fe-56 JEFF): 67/73 confirmed** — Root cause identified for MT=103 (n,p): Fortran `emerge` reads MF3 from a **scratch tape written by lunion** (tape nscr1), NOT from the original ENDF. The lunion-linearized data has slightly different y-values at breakpoints (constant ratio ~1.0000304). Julia's `_get_legacy_section` interpolates the original sparse MF3 table directly. Fixing this requires either linearizing MF3 data through lunion_grid or matching Fortran's scratch-tape data flow.
+
+**Test 27 (Pu-239): 35/49** — Two issue classes:
+1. **Extra grid points (MTs 51-58)**: Julia's lunion_grid creates shading pairs at E=411111 eV for duplicate MF3 breakpoints in MT=1/2/3 that have SAME y-values (no actual discontinuity). Fortran's overall grid has only the original point. Likely need to suppress shading for same-y duplicates.
+2. **Same-count diffs (MT=1/2/18/59/102)**: ±1 FP precision in RM evaluation (~2600 resonances).
+
+**Test 45 (B-10): 40/53** — Julia has FEWER grid points than Fortran (323 vs 338 for primary MTs). MT=105 is MISSING. Needs investigation of grid construction and MT=105 handling.
+
+**Trap 27 (NEW)**: Fortran emerge reads MF3 from lunion's scratch tape (nscr1), NOT the original ENDF. The lunion writes linearized MF3 data with additional grid points. Julia's `_get_legacy_section` interpolates the original sparse MF3 data. For INT=2 (linear) sections, this should give identical results, but the Fortran values show a constant ~3e-5 multiplicative offset. Root cause unclear — may be related to how lunion modifies the MF3 data during processing.
+
+**Trap 28 (NEW)**: Duplicate MF3 breakpoints with SAME y-values should NOT be shaded in lunion_grid. The Fortran lunion doesn't include shading for these in the overall grid. Julia currently shades ALL duplicates regardless of y-value equality, creating extra grid points (e.g., 411111.0/411111.2 pair for Pu-239).
