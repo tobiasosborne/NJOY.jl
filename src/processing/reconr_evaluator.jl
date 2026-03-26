@@ -1062,10 +1062,21 @@ function merge_background_legacy(energies::Vector{Float64},
     #   MT=27  : absorption (redundant)
     #   MT=101 : disappearance (redundant)
     #   MT=46-49 : skipped per Fortran reconr.f90:4846
-    #   MT>200 : non-cross-section quantities (mubar, xi, gamma, heating, etc.)
-    #            per Fortran reconr.f90:4847
+    #   MT=201-599 : non-cross-section quantities per Fortran reconr.f90:4847
+    #                (mth.gt.200.and.mth.lt.mpmin where mpmin=600 for ENDF-6)
+    #   MT=103-107 : skipped when partials exist (redundant sums)
+    # NOTE: MT=600-849 are NOT skipped — they contribute to the total.
+    _has_range(lo, hi) = any(s -> lo <= Int(s.mt) <= hi, mf3_sections)
+    skip_mt103 = _has_range(600, 649)
+    skip_mt104 = _has_range(650, 699)
+    skip_mt105 = _has_range(700, 749)
+    skip_mt106 = _has_range(750, 799)
+    skip_mt107 = _has_range(800, 849)
     _skip(mt::Int) = mt == 1 || mt == 3 || mt == 4 || mt == 27 || mt == 101 ||
-                     (mt >= 46 && mt <= 49) || mt > 200
+                     (mt >= 46 && mt <= 49) || (mt > 200 && mt < 600) ||
+                     (mt == 103 && skip_mt103) || (mt == 104 && skip_mt104) ||
+                     (mt == 105 && skip_mt105) || (mt == 106 && skip_mt106) ||
+                     (mt == 107 && skip_mt107)
 
     # Pre-compute physical thresholds for each section, shaded up to match
     # the grid point (matching Fortran lunion line 1925: thrxx=sigfig(thrx,7,+1)

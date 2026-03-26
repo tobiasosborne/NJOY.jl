@@ -217,6 +217,15 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
     grid = copy(nodes)
     sort!(grid); unique!(grid)
 
+    # Detect redundant charged-particle groups (Fortran anlyzd lines 567-590)
+    # Only check MF=3 sections for partial reactions
+    _has_mt_range(lo, hi) = any(s -> Int(s.mf) == 3 && lo <= Int(s.mt) <= hi, mf3_sections)
+    skip_mt103 = _has_mt_range(600, 649)
+    skip_mt104 = _has_mt_range(650, 699)
+    skip_mt105 = _has_mt_range(700, 749)
+    skip_mt106 = _has_mt_range(750, 799)
+    skip_mt107 = _has_mt_range(800, 849)
+
     for sec in mf3_sections
         mt = Int(sec.mt)
         # Skip redundant reactions (matching Fortran reconr.f90:1881-1901)
@@ -228,6 +237,12 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
             (mt >= 251 && mt <= 300 && mt != 261) && continue
             mt == 120 && continue
             mt == 151 && continue
+            # Skip MT=103-107 when partials exist (Fortran lunion lines 1884-1888)
+            (mt == 103 && skip_mt103) && continue
+            (mt == 104 && skip_mt104) && continue
+            (mt == 105 && skip_mt105) && continue
+            (mt == 106 && skip_mt106) && continue
+            (mt == 107 && skip_mt107) && continue
         end
 
         tab = sec.tab
@@ -378,6 +393,28 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         filter!(>(0.0), grid)
     end
 
+    # Post-processing: remove interior points that coincide with resonance
+    # range boundaries (matching Fortran lunion lines 2196-2226).
+    # First and last points and points above emax=19 MeV are always kept.
+    small = 1.0e-9
+    emax = 19.0e6
+    boundaries = Float64[eresl, eresr, eresh]
+    filter!(>(0.0), boundaries)
+    if !isempty(boundaries) && length(grid) > 2
+        mask = trues(length(grid))
+        for i in 2:(length(grid) - 1)
+            eg = grid[i]
+            eg > emax && continue  # keep points above emax
+            for eb in boundaries
+                if abs(eg - eb) <= small * eb
+                    mask[i] = false
+                    break
+                end
+            end
+        end
+        grid = grid[mask]
+    end
+
     # Post-processing: step-ratio enforcement on the cumulative grid.
     # Fortran lunion processes each section cumulatively — panel bisection
     # sees grid points from ALL previous sections. Julia's per-section
@@ -401,28 +438,6 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                 i += 1
             end
         end
-    end
-
-    # Post-processing: remove interior points that coincide with resonance
-    # range boundaries (matching Fortran lunion lines 2196-2226).
-    # First and last points and points above emax=19 MeV are always kept.
-    small = 1.0e-9
-    emax = 19.0e6
-    boundaries = Float64[eresl, eresr, eresh]
-    filter!(>(0.0), boundaries)
-    if !isempty(boundaries) && length(grid) > 2
-        mask = trues(length(grid))
-        for i in 2:(length(grid) - 1)
-            eg = grid[i]
-            eg > emax && continue  # keep points above emax
-            for eb in boundaries
-                if abs(eg - eb) <= small * eb
-                    mask[i] = false
-                    break
-                end
-            end
-        end
-        grid = grid[mask]
     end
 
     grid

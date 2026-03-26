@@ -298,15 +298,26 @@ end
 # ==========================================================================
 
 function _collect_reactions(result)
-    # Collect reactions in ENDF file order (matching Fortran emerge).
+    # Collect reactions in ENDF file order (matching Fortran emerge/recout).
     # MT=1 (total) always first. Then non-redundant MTs from MF3 in file order.
-    # MT=4 is output as a computed redundant sum of MT=51-91.
-    # MT=18 is output as a computed redundant sum of MT=19+20+21+38 when partials exist.
+    # Redundant MTs are computed sums inserted at their natural MT position:
+    #   MT=4   = sum(MT=51-91)     MT=18  = sum(MT=19+20+21+38)
+    #   MT=103 = sum(MT=600-649)   MT=104 = sum(MT=650-699)
+    #   MT=105 = sum(MT=700-749)   MT=106 = sum(MT=750-799)
+    #   MT=107 = sum(MT=800-849)
     reactions = Tuple{Int32, String}[]
     push!(reactions, (Int32(1), "total"))
 
     has_inelastic = any(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
     has_partial_fission = any(s -> Int(s.mt) == 19, result.mf3_sections)
+
+    # Detect redundant charged-particle groups (Fortran anlyzd lines 567-590)
+    _has_range(lo, hi) = any(s -> lo <= Int(s.mt) <= hi, result.mf3_sections)
+    has_mp = _has_range(600, 649)   # MT=103 redundant
+    has_md = _has_range(650, 699)   # MT=104 redundant
+    has_mt5 = _has_range(700, 749)  # MT=105 redundant
+    has_m3 = _has_range(750, 799)   # MT=106 redundant
+    has_m4 = _has_range(800, 849)   # MT=107 redundant
 
     for sec in result.mf3_sections
         mt = Int(sec.mt)
@@ -318,12 +329,30 @@ function _collect_reactions(result)
             has_inelastic && push!(reactions, (Int32(4), "inelastic"))
             continue
         end
+        # Skip MT=103-107 when partials exist (Fortran lunion lines 1884-1888)
+        (mt == 103 && has_mp) && continue
+        (mt == 104 && has_md) && continue
+        (mt == 105 && has_mt5) && continue
+        (mt == 106 && has_m3) && continue
+        (mt == 107 && has_m4) && continue
         # MT=19: insert redundant MT=18 before it (matching Fortran recout order)
         if mt == 19 && has_partial_fission
             push!(reactions, (Int32(18), "fission"))
         end
         push!(reactions, (Int32(mt), "MT$mt"))
     end
+
+    # Insert redundant charged-particle MTs at their natural MT position
+    # (Fortran recout interleaves redundant MTs by sorted MT number)
+    for (flag, redmt) in [(has_mp, 103), (has_md, 104), (has_mt5, 105),
+                           (has_m3, 106), (has_m4, 107)]
+        flag || continue
+        any(r -> r[1] == Int32(redmt), reactions) && continue
+        idx = findfirst(r -> r[1] > Int32(redmt), reactions)
+        entry = (Int32(redmt), "MT$redmt")
+        idx === nothing ? push!(reactions, entry) : insert!(reactions, idx, entry)
+    end
+
     return reactions
 end
 
@@ -483,6 +512,50 @@ function _get_legacy_section(result, mt::Int)
         end
         isempty(sec_e) && return nothing
         return sec_e, sec_xs, 0.0, qi_4
+    elseif mt in (103, 104, 105, 106, 107) && begin
+            # Only handle as redundant sum when partials exist
+            _lo, _hi = Dict(103=>(600,649), 104=>(650,699),
+                105=>(700,749), 106=>(750,799), 107=>(800,849))[mt]
+            any(s -> _lo <= Int(s.mt) <= _hi, result.mf3_sections)
+        end
+        # Redundant sum: MT=103-107 from charged-particle partials
+        # (Fortran recout lines 5270-5318, anlyzd lines 567-590)
+        # MT=103=sum(600-649), 104=sum(650-699), 105=sum(700-749),
+        # 106=sum(750-799), 107=sum(800-849)
+        part_lo, part_hi = Dict(103=>(600,649), 104=>(650,699),
+            105=>(700,749), 106=>(750,799), 107=>(800,849))[mt]
+        partials = filter(s -> part_lo <= Int(s.mt) <= part_hi, result.mf3_sections)
+        sec_e = Float64[]
+        sec_xs = Float64[]
+        for e in energies
+            total_cp = 0.0
+            for sec in partials
+                bg = interpolate(sec.tab, e)
+                s_qi = sec.QI
+                if s_qi < 0.0
+                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_thrxx = round_sigfig(s_thrx, 7, +1)
+                    if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
+                       e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
+                        bg = _threshold_interp(sec.tab, e, s_thrxx)
+                    end
+                    if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-9 * s_thrxx
+                        bg = 0.0
+                    end
+                end
+                total_cp += round_sigfig(bg, 7)
+            end
+            push!(sec_e, e)
+            push!(sec_xs, round_sigfig(total_cp, 7))
+        end
+        isempty(sec_e) && return nothing
+        first_nz = findfirst(>(0.0), sec_xs)
+        if first_nz !== nothing && first_nz > 1
+            sec_e = sec_e[first_nz-1:end]
+            sec_xs = sec_xs[first_nz-1:end]
+        end
+        isempty(sec_e) && return nothing
+        return sec_e, sec_xs, 0.0, 0.0
     elseif mt == 2
         return energies, result.elastic, qm, qi
     elseif mt == 18
