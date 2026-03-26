@@ -379,7 +379,8 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | 13 | 2834 | Ni-61 | 18/18 | 0.01 | Same material, different test chain |
 | 25 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
 | 30 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
-| 45 | 525 | B-10 | 53/53 | 0.001 | LRU=0, **NEW in Phase 11** (MT=103-107 redundancy) |
+| 26 | 9455 | Pu-245 | 23/23 | 0.001 | ENDF-8.0, **NEW Phase 11** (MT=103/107 redundancy) |
+| 45 | 525 | B-10 | 53/53 | 0.001 | LRU=0, **NEW Phase 11** (MT=103-107 redundancy) |
 | 55 | 2631 | Fe-56 | 61/61 | 0.001 | TENDL-19, Reich-Moore |
 
 ### Near-Perfect (>85% MTs)
@@ -392,6 +393,11 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | 19 | 9443 | Pu-241 | 21/23 (91%) | 0.02 | ENDF-6, URR, ±1 FP. **err=0.02 NOT 0.001** |
 | 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | SLBW+URR mode=12, ±1 at URR boundary. **err=0.10** |
 | 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | Same material, err=0.005 |
+
+### Close (>50% MTs)
+| Test | MAT | Material | MTs | err | Notes |
+|------|-----|----------|-----|-----|-------|
+| 18 | 9999 | Cf-252 | 5/9 (56%) | 0.001 | LRU=0, near-end diffs |
 
 ### Partial (<50% MTs)
 | Test | MAT | Material | MTs | Notes |
@@ -406,15 +412,11 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 - **56-58, 64**: Photonuclear (`g-` files) — no MF2/MT151
 - **24, 28-29, 31-32, 35, 37-42, 44**: Fortran oracle failed (ENDF-8.0 input deck issues)
 
-### Key Insights from Sweep
-1. **11 BIT-IDENTICAL** (up from 10 in Phase 8) — Fe-56 TENDL-19 now passes
-2. **Pu-240 went from 0/53 to 51/53** thanks to LSSF=1 handling
-3. **Fe-56 JEFF3.3 went from 2/73 to 67/73** thanks to threshold fixes
-4. **Pu-241 went from 0/23 to 20/23**, Pu-245 from 1/23 to 19/23
-5. **Pu-239 and B-10 unchanged at 71% and 75%** — threshold-area diffs need further investigation
-6. **Remaining diffs cluster around**: ±1 FP precision at URR boundaries, near-threshold XS interpolation, missing MT=103/107 for some materials
-7. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr, skip eval_unresolved in RECONR
-7. **Photonuclear data** needs MF23 support (no MF2/MT151 in those files)
+### Key Insights from Sweep (Phase 11 — 20 tests)
+1. **14 BIT-IDENTICAL** (up from 11 in Phase 10) — B-10, Pu-245, Fe-56 TENDL-19
+2. **Remaining diffs cluster**: ±1 FP precision (unfixable), near-threshold Trap 27 (architectural)
+3. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
+4. **Photonuclear data** needs MF23 support (no MF2/MT151 in those files)
 
 ---
 
