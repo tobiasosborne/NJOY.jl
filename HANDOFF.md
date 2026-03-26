@@ -590,3 +590,33 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 - T55 Fe-56 TENDL: 61/61 (no regression)
 - T27 Pu-239: 45/49 (unchanged)
 - T46 Fe-56 JEFF: 69/73 (unchanged)
+
+### Phase 13: MF=10 multi-section + threshold breakpoint adjustment
+
+**MF=10 multi-section reader (FIXED)**: `read_mf10_sections` was only reading the first TAB1 sub-section from each MF=10/MT record. MF=10 has multiple sub-sections (one per product nuclide), counted by N1 in the HEAD record. Fixed by looping over all `max(1, head.N1)` sub-sections. For Zr-90 (T49), MF=10/MT=28 and MF=10/MT=16 had additional sub-sections with higher thresholds (7.118980e6 and 1.269870e7 eV) that produce grid points via lunion_grid. **Impact: T49 1/46 → 41/46 (+40 MTs).**
+
+**T19 (Pu-241): now 23/23 BIT-IDENTICAL** — The remaining 2 diffs (MT=1, MT=102) from Phase 10 were resolved (likely from a prior fix that wasn't verified).
+
+**Threshold breakpoint adjustment when thrxx > x[2] (FIXED — Trap 33)**: When the physical threshold `thrxx = sigfig(thrx, 7, +1)` exceeds the MF3 second breakpoint `x[2]`, the Fortran lunion (lines 1937-1943) shifts subsequent breakpoints upward: each `x[k+1] = sigfig(x[k], 7, +1)` until `x[k+1] > x[k]`. Julia's `_threshold_interp` only modified `x[1]` and assumed `e < x[2]`. Fixed by extending `_threshold_interp` to adjust the full chain of breakpoints below thrxx, and removing the `e < x[2]` restriction on the condition. **Impact: T46 69/73 → 71/73 (+2 MTs, MT=80 and MT=82 now PERFECT).**
+
+**Per-level threshold skip in redundant sum loops (FIXED)**: MT=4 and MT=103-107 redundant sums loop over contributing partials. Each partial's threshold must be checked individually — energies below a partial's threshold should contribute 0, not the original MF3 value at that energy. The Fortran's scratch-tape approach handles this implicitly (the scratch tape starts at the adjusted threshold). Julia was interpolating the original MF3 and getting spurious contributions. **Impact: T46 71/73 → 72/73 (+1 MT, MT=4 now PERFECT).**
+
+**T34 ±1 FP investigation (NOT FIXED)**: Deep investigation of 3 remaining MT=102 ±1 diffs at E=630.04, 2089.07, 4526.46 eV. Root cause: the l=1 non-fissile R-function path uses a small-parameter approximation (Fortran lines 3462-3469) when `|dd| < 3e-4` and `|phi| < 3e-4`. The standard and small-param formulas give results differing by ~1e-15 per J-value, accumulating to ~2.8e-12 in the final capture, crossing the sigfig rounding boundary. Both Fortran and Julia use the same small-param path and formula; the difference is in intermediate FP rounding of the R-matrix accumulation across 437+ resonances. Verified: FMA (fused multiply-add) is NOT the cause — Julia does not use FMA by default, and explicit muladd had zero effect. The raw capture values are within 3e-13 of the 0.5 boundary at 7 sigfigs.
+
+**Test results after Phase 13:**
+- T01 C-nat: 29/29 BIT-IDENTICAL (no regression)
+- T02 Pu-238: 17/17 BIT-IDENTICAL (no regression)
+- T08 Ni-61: 18/18 BIT-IDENTICAL (no regression)
+- T19 Pu-241: **23/23 BIT-IDENTICAL (NEW)**
+- T25 H-1: 3/3 BIT-IDENTICAL
+- T26 Pu-245: 23/23 BIT-IDENTICAL
+- T34 Pu-240: 52/53 (unchanged)
+- T45 B-10: 53/53 BIT-IDENTICAL (no regression)
+- T46 Fe-56 JEFF: **72/73** (+3, threshold fixes)
+- T49 Zr-90: **41/46** (+40, MF=10 fix)
+- T55 Fe-56 TENDL: 61/61 BIT-IDENTICAL (no regression)
+- T27 Pu-239: 45/49 (unchanged)
+
+**Trap 33 (NEW — FIXED)**: When `thrxx > x[2]` for an MF3 TAB1 (threshold above second breakpoint), the entire chain of breakpoints below thrxx must be shifted upward. Fortran lunion lines 1937-1943: `do while scr(l+2) <= scr(l); scr(l+2) = sigfig(scr(l), 7, +1); l=l+2`. Julia's `_threshold_interp` and the condition for calling it must handle this extended threshold region. Y-values are NOT modified — only X-values are shifted.
+
+**T18 (Cf-252) investigation**: HANDOFF incorrectly listed as LRU=0. Actually has LRU=1 (SLBW, 1e-5 to 366.5 eV) + LRU=2 (URR mode=12, 366.5 to 10000 eV). Diffs are systematic XS errors in the URR range starting at E=383.25 eV (0.1% magnitude, not ±1 FP). Root cause not yet identified — likely a URR evaluation issue for this specific material.
