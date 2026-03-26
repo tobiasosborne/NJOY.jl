@@ -654,9 +654,11 @@ function _get_legacy_section(result, mt::Int)
             if thresh > 0.0 && thresh - e > 1.0e-10 * thresh
                 continue  # below threshold (Fortran line 4792)
             end
-            # Near threshold, modify first breakpoint to (thrxx, 0) and interpolate
-            # using the MF3 interpolation law (Fortran emerge:1936 + gety1)
-            bg = if thrxx > 0.0 && e >= thrxx && e < sec.tab.x[2] && sec.tab.x[1] < thrxx
+            # Near threshold, modify first breakpoint to (thrxx, 0) and adjust
+            # subsequent breakpoints that fall below thrxx (Fortran lunion
+            # lines 1936-1943), then interpolate using the MF3 interpolation law.
+            # The condition extends beyond x[2] because thrxx can exceed x[2].
+            bg = if thrxx > 0.0 && e >= thrxx && sec.tab.x[1] < thrxx
                 _threshold_interp(sec.tab, e, thrxx)
             else
                 interpolate(sec.tab, e)
@@ -708,11 +710,31 @@ to (thrxx, 0.0) and interpolate using the MF3's own interpolation law.
 Matches Fortran emerge line 1936 (modify ex(1)) + gety1.
 """
 function _threshold_interp(tab::TabulatedFunction, e::Float64, thrxx::Float64)
-    saved_x, saved_y = tab.x[1], tab.y[1]
+    # Save original breakpoints that will be modified
+    n = length(tab.x)
+    saved = Tuple{Int,Float64}[]
+    # Replace x[1] with threshold (Fortran lunion line 1936)
+    push!(saved, (1, tab.x[1]))
     tab.x[1] = thrxx
+    push!(saved, (-1, tab.y[1]))  # use -1 as sentinel for y[1]
     tab.y[1] = 0.0
+    # Adjust subsequent breakpoints that are now <= the threshold
+    # (Fortran lunion lines 1937-1943: do while scr(l+2) <= scr(l))
+    k = 1
+    while k < n && tab.x[k+1] <= tab.x[k]
+        push!(saved, (k+1, tab.x[k+1]))
+        tab.x[k+1] = round_sigfig(tab.x[k], 7, +1)
+        k += 1
+        k > 21 && break  # safety limit matching Fortran lsave+20
+    end
     result = interpolate(tab, e)
-    tab.x[1] = saved_x
-    tab.y[1] = saved_y
+    # Restore all modified breakpoints
+    for (idx, val) in reverse(saved)
+        if idx == -1
+            tab.y[1] = val
+        else
+            tab.x[idx] = val
+        end
+    end
     return result
 end
