@@ -236,22 +236,29 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                     termf = 0.0
 
                     if has_fission
-                        # R-matrix path: add identity and build symmetric SMatrix
-                        cmat = SMatrix{3,3}(
-                            complex(r11 + 1.0, s11), complex(r12, s12),      complex(r13, s13),
-                            complex(r12, s12),       complex(r22 + 1.0, s22), complex(r23, s23),
-                            complex(r13, s13),       complex(r23, s23),      complex(r33 + 1.0, s33)
+                        # R-matrix path: Frobenius-Schur inversion matching
+                        # Fortran csrmat lines 3429-3440: add identity, symmetrize,
+                        # then invert via frobns/thrinv/abcmat (reconr.f90:3503-3607)
+                        rmat = MMatrix{3,3,Float64}(
+                            r11 + 1.0, r12, r13,
+                            r12, r22 + 1.0, r23,
+                            r13, r23, r33 + 1.0
                         )
-                        cinv = inv(cmat)
+                        smat = MMatrix{3,3,Float64}(
+                            s11, s12, s13,
+                            s12, s22, s23,
+                            s13, s23, s33
+                        )
+                        ri, si = _frobns(rmat, smat)
 
-                        ri11 = real(cinv[1, 1])
-                        si11 = imag(cinv[1, 1])
+                        ri11 = ri[1, 1]
+                        si11 = si[1, 1]
 
                         # Fission term
-                        t1 = real(cinv[1, 2])
-                        t2 = imag(cinv[1, 2])
-                        t3 = real(cinv[1, 3])
-                        t4 = imag(cinv[1, 3])
+                        t1 = ri[1, 2]
+                        t2 = si[1, 2]
+                        t3 = ri[1, 3]
+                        t4 = si[1, 3]
                         termf = 4.0 * gj * (t1^2 + t2^2 + t3^2 + t4^2)
 
                         # U11 = exp(2i*phi) * (2*inv - I)
@@ -373,4 +380,103 @@ function _rm_kkkkkk(kchanl, kpstv, kngtv, jj, jjl, numj)
             end
         end
     end
+end
+
+# ==========================================================================
+# Frobenius-Schur complex matrix inversion matching Fortran frobns/thrinv/abcmat
+# (reconr.f90:3503-3607). Uses the exact same sequence of FP operations as
+# the Fortran to ensure bit-identical intermediate rounding.
+# ==========================================================================
+
+"""
+    _abcmat(a, b) -> c
+
+3×3 matrix multiplication c = a*b, matching Fortran abcmat (reconr.f90:3589-3607).
+"""
+function _abcmat(a::MMatrix{3,3,Float64}, b::MMatrix{3,3,Float64})
+    c = MMatrix{3,3,Float64}(undef)
+    for i in 1:3
+        for j in 1:3
+            c[i,j] = 0.0
+            for k in 1:3
+                c[i,j] = c[i,j] + a[i,k] * b[k,j]
+            end
+        end
+    end
+    return c
+end
+
+"""
+    _thrinv!(d, n) -> ind
+
+Invert symmetric matrix d in-place, matching Fortran thrinv (reconr.f90:3539-3587).
+The Fortran thrinv first transforms d → (I - d), then inverts via Gaussian elimination.
+Returns ind: 0 = success, 1 = singular.
+"""
+function _thrinv!(d::MMatrix{3,3,Float64}, n::Int)
+    # Negate and symmetrize, add identity to diagonal
+    for j in 1:n
+        for i in 1:j
+            d[i,j] = -d[i,j]
+            d[j,i] = d[i,j]
+        end
+        d[j,j] = 1.0 + d[j,j]
+    end
+    # Gaussian elimination
+    s = MVector{3,Float64}(undef)
+    for lr in 1:n
+        fooey = 1.0 - d[lr,lr]
+        if fooey == 0.0
+            return 1  # singular
+        end
+        d[lr,lr] = 1.0 / fooey
+        for j in 1:n
+            s[j] = d[lr,j]
+            if j != lr
+                d[j,lr] = d[j,lr] * d[lr,lr]
+                d[lr,j] = d[j,lr]
+            end
+        end
+        for j in 1:n
+            if j != lr
+                for i in 1:j
+                    if i != lr
+                        d[i,j] = d[i,j] + d[i,lr] * s[j]
+                        d[j,i] = d[i,j]
+                    end
+                end
+            end
+        end
+    end
+    return 0
+end
+
+"""
+    _frobns(a, b) -> (c, d)
+
+Invert complex matrix (a + i*b) using the Frobenius-Schur method,
+matching Fortran frobns (reconr.f90:3503-3537). Returns real part c
+and imaginary part d of the inverse.
+"""
+function _frobns(a::MMatrix{3,3,Float64}, b::MMatrix{3,3,Float64})
+    c = copy(a)
+    ind = _thrinv!(a, 3)
+    d = MMatrix{3,3,Float64}(undef)
+    if ind != 1
+        q = _abcmat(a, b)
+        d = _abcmat(b, q)
+        for i in 1:3
+            for j in 1:3
+                c[i,j] = c[i,j] + d[i,j]
+            end
+        end
+        _thrinv!(c, 3)
+        d = _abcmat(q, c)
+        for i in 1:3
+            for j in 1:3
+                d[i,j] = -d[i,j]
+            end
+        end
+    end
+    return c, d
 end

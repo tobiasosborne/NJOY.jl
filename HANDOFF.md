@@ -185,6 +185,19 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 **Fixed in Phase 9 (no longer issues):**
 - **MT=1 ±4 at 12.2 MeV (FIXED)**: Was caused by missing below-threshold skip in `merge_background_legacy`. MT=17 was interpolating a spurious ~3.98e-6 contribution at E=1.219910e7 (below its threshold). Added guard matching Fortran emerge line 4792: `if (thrx - e) > 1e-10 * thrx → skip`.
 
+### In Progress — Test 34 (Pu-240, Reich-Moore + URR mode=11, LSSF=1)
+
+**Test details**: MAT=9440, err=0.001, ENDF file `n-094_Pu_240-ENDF8.0.endf`, resolved range [1e-5, 5700] eV (RM, LRF=3, 437 fissile l=0 + 121 non-fissile l=1 resonances), unresolved range above 5700 eV.
+
+**Status: 52/53 PERFECT** — 3 remaining ±1 diffs in MT=102 (capture) at E=630.04, 2089.07, 4526.46 eV.
+
+**What's been fixed for Test 34 (Phase 12):**
+1. **Coincidence shading bug (FIXED)**: `lunion_grid` used `abs(grid[gi] - e) <= 1e-8*e` (direct comparison) for cross-section coincidence check at label 220. Fortran (reconr.f90:1996) compares `(er - sigfig(|eg|,7,-1)) <= 1e-8*er` (against shaded-down grid point). For E=42980 (shared by MT=2, MT=102, MF=12/MT=4), Julia falsely detected coincidence and created spurious grid point 42980.01, cascading 389+ line shifts across 7 MTs. This bug was introduced by the Phase 11 coincidence shading commit.
+2. **Frobenius-Schur matrix inversion (FIXED)**: `cross_section_rm` used `inv(SMatrix{3,3,ComplexF64})` (generic complex inverse). Fortran `csrmat` (reconr.f90:3503-3607) uses Frobenius-Schur method via `frobns`→`thrinv`→`abcmat`. Implemented exact Fortran algorithm (`_frobns`, `_thrinv!`, `_abcmat` in `reich_moore.jl`). Both compute `(I+R+iS)^{-1}` but with different intermediate FP rounding. Resolved 2 of 5 ±1 capture diffs.
+
+**Remaining issues for Test 34 (3 MTs in MT=102):**
+1. **±1 capture XS at 3 energies** — Raw capture values are within 1e-4 of the 0.5 rounding boundary at 7 sigfigs. With 437 fissile resonances accumulated via `termg = termt - termf - termn`, the subtraction amplifies ~1e-12 FP differences. Root cause is FP accumulation order across many resonances — the same class of issue as T07/T27 but harder because the values are extremely close to the boundary.
+
 ### Not Yet Attempted
 
 | Test | Material | Formalism | Notes |
@@ -338,6 +351,10 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 26. **Primary fission channel is MT=19, not MT=18+19+20+21** — In `merge_background_legacy`, only MT=18 or MT=19 should be added to the fission accumulator (whichever is the primary). MT=20, 21, 38 are non-primary: their backgrounds go to `other_bg` with sigfig rounding, matching Fortran emerge `itype` dispatch (only MT=2, MT=18/19, MT=102 get `itype` assignments).
 
+27. **Coincidence shading comparison uses sigfig(|eg|,7,-1), NOT |eg|** — Fortran lunion label 220 (line 1996) compares `(er - sigfig(|eg|,7,-1)) > 1e-8*er`. The comparison is against the shaded-DOWN version of the grid point, not the grid point itself. This means coincidence only fires when a section's first breakpoint matches a previously-shaded grid point (where `sigfig(eg,7,+1)` then `sigfig(sigfig(eg,7,+1),7,-1) ≈ eg_original`). For two sections sharing the exact same unshaded breakpoint, the check does NOT fire because the sigfig(7,-1) subtraction creates a gap of ~1e-6*er which is much larger than the 1e-8*er threshold.
+
+28. **Frobenius-Schur matrix inversion for Reich-Moore** — Fortran `csrmat` (reconr.f90:3503-3607) inverts the complex (I+R+iS) matrix using the Frobenius-Schur decomposition into real operations: `frobns` → `thrinv` (symmetric matrix inverse via Gaussian elimination with internal I-D transform) → `abcmat` (3x3 matrix multiply). Julia must use this exact algorithm (`_frobns`, `_thrinv!`, `_abcmat` in `reich_moore.jl`) instead of `inv(SMatrix{3,3})` to match Fortran's intermediate FP rounding. Key detail: `thrinv(D)` computes `D^{-1}` (not `(I-D)^{-1}`) despite internally negating D and adding identity — the Gaussian elimination undoes the transform.
+
 ---
 
 ## Immediate Next Steps — ALL ARE REQUIRED WORK
@@ -348,7 +365,9 @@ There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until pr
 
 These are NOT "cross-compiler precision issues." They are bugs that have not yet been investigated thoroughly enough. Evidence: T02 (SLBW+URR), T08 (Reich-Moore), T55 (61 MTs) all involve heavy FP math and are BIT-IDENTICAL. The ±1 diffs in the remaining tests are the same class of bug — a missing `round_sigfig`, wrong accumulation order, or mismatched intermediate step. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it.
 
-**Start with T34 (Pu-240, 51/53)** — only 2 failing MTs (MT=1, MT=102), 5 diff points, all ±1 at 7th sigfig. Energies: 3.97e-5, 2089, 2307, 4526 eV. Trace the exact Fortran calculation at these energies through `cross_section_rm` / `merge_background_legacy` and find where Julia diverges.
+**T34 (Pu-240, 52/53)** — Phase 12 fixed coincidence shading bug (+5 MTs) and frobns matrix inversion (+1 MT). 3 remaining MT=102 ±1 diffs at E=630.04, 2089.07, 4526.46 eV — all within 1e-4 of the 0.5 rounding boundary. The raw capture values come from accumulating `termg = termt - termf - termn` over 437 fissile resonances. Cancellation in `termt - termf - termn` amplifies ~1e-12 differences from FP accumulation order. Next steps: check if Fortran precomputes penetrability at resonance energy (line 3340: `per=res(in+1)`) differently from Julia's on-the-fly computation, or investigate per-resonance FP differences in the `gg4*a1*a1` accumulation.
+
+**T27 (Pu-239, 45/49)** — also Reich-Moore, ~2600 resonances. Same class of ±1 FP diffs. The frobns fix didn't help because the diffs involve extra grid points (separate issue) and ±1 in different MTs.
 
 ### 2. RECONR: Fix Trap 27 — lunion scratch-tape data flow (T46, T18)
 
@@ -406,7 +425,7 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 ### Near-Perfect (>85% MTs)
 | Test | MAT | Material | MTs | err | Notes |
 |------|-----|----------|-----|-----|-------|
-| 34 | 9440 | Pu-240 | 51/53 (96%) | 0.001 | Reich-Moore+URR mode=11 (LSSF=1), ±1 FP |
+| 34 | 9440 | Pu-240 | 52/53 (98%) | 0.001 | Reich-Moore+URR mode=11 (LSSF=1), **+1 Phase 12** (frobns). 3 ±1 FP in MT=102 |
 | 46 | 2631 | Fe-56 | 69/73 (95%) | 0.001 | JEFF3.3, **+2 Phase 11**. Near-threshold diffs (Trap 27) |
 | 27 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Reich-Moore, ±1 FP |
 | 47 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Same as 27, different chain |
@@ -553,3 +572,21 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 **Trap 30 (NEW — FIXED)**: MT=103-107 are redundant charged-particle sums when partials exist. Fortran anlyzd (lines 567-590) detects partials: MT=600-649→MT=103, MT=650-699→MT=104, MT=700-749→MT=105, MT=750-799→MT=106, MT=800-849→MT=107. Fortran lunion skips these MTs (lines 1884-1888), emerge accumulates partials into redundant sums, and recout outputs them. Julia was: (a) not skipping MT=103-107 in lunion_grid, (b) not synthesizing MT=105 when it wasn't in the ENDF, (c) skipping MT=600-849 partials from the total via `_skip(mt > 200)`. Fixed all three. IMPORTANT: only treat MT=103-107 as redundant when partials actually exist — e.g., B-10 has MT=104 in the ENDF with no MT=650-699 partials, so MT=104 is output normally.
 
 **Trap 31 (NEW)**: The HANDOFF test table's err values are unreliable. Always read `njoy-reference/tests/NN/input` for the correct err. Known wrong err values in previous versions: T19 was listed as err=0.001 (correct: 0.02), T04 was listed as err=0.005 (correct: 0.10).
+
+### Phase 12: T34 coincidence shading fix + Frobenius-Schur matrix inversion
+
+**Coincidence shading bug in lunion_grid (FIXED — Trap 32)**: The cross-section coincidence check at Fortran lunion label 220 (reconr.f90:1996) compares `(er - sigfig(|eg|,7,-1)) > 1e-8*er`. Julia's implementation compared `abs(grid[gi] - e) <= 1e-8*e` — checking against the grid point directly instead of its shaded-down value. For energies where sections share exact breakpoints (e.g., MT=2 and MF=12/MT=4 both at E=42980 in Pu-240), the Fortran check does NOT fire (because `er - sigfig(42980,7,-1) = 0.01 >> 4.3e-4 = 1e-8*er`) but the Julia check fired (because `|42980-42980| = 0`). This created a spurious grid point at 42980.01, cascading 389+ line shifts across 7 MTs. Fixed by matching Fortran's exact comparison: `(e - round_sigfig(abs(eg), 7, -1)) <= 1e-8 * e`. Also fixed the elow threshold: Julia used `e > 1e-4`, Fortran uses `er >= sigfig(1e-5, 7, +1)`. This bug was introduced by the Phase 11 coincidence shading commit. **Impact: T34 46/53 → 51/53.**
+
+**Frobenius-Schur matrix inversion for Reich-Moore (FIXED)**: `cross_section_rm` used `inv(SMatrix{3,3,ComplexF64})` from StaticArrays (generic cofactor-based complex inverse). Fortran `csrmat` (reconr.f90:3503-3607) uses the Frobenius-Schur method: decompose `(A+iB)^{-1}` into real operations via `frobns`→`thrinv`→`abcmat`. Both compute `(I+R+iS)^{-1}` but intermediate FP rounding differs. Implemented `_frobns`, `_thrinv!`, `_abcmat` in `reich_moore.jl` matching the exact Fortran algorithm. Key: Fortran adds identity to R diagonal (lines 3430-3432) before calling frobns; thrinv is a custom inversion that internally transforms `D → (I-D)` then inverts via Gaussian elimination, effectively computing `D^{-1}`. **Impact: T34 51/53 → 52/53** (fixed MT=102 diffs at E=3.97e-5 and E=2306.767).
+
+**Trap 32 (NEW — FIXED)**: The Fortran lunion coincidence check (label 220, line 1996) uses `sigfig(|eg|,7,-1)` as the comparison target, NOT `|eg|` directly. The check only fires when the section's first breakpoint lands very close to a SHADED grid point (i.e., `sigfig(|eg|,7,-1) ≈ er`). For two sections sharing the exact same unshaded breakpoint, the check does NOT fire because `er - sigfig(er,7,-1) ≈ 1e-6*er >> 1e-8*er`. Julia was incorrectly shading in this case.
+
+**Test results after Phase 12:**
+- T34 Pu-240: 46/53 → **52/53** (+6, coincidence fix +5, frobns fix +1)
+- T01 C-nat: 29/29 (no regression)
+- T02 Pu-238: 17/17 (no regression)
+- T08 Ni-61: 18/18 (no regression)
+- T45 B-10: 53/53 (no regression)
+- T55 Fe-56 TENDL: 61/61 (no regression)
+- T27 Pu-239: 45/49 (unchanged)
+- T46 Fe-56 JEFF: 69/73 (unchanged)
