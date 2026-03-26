@@ -366,7 +366,16 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                 if abs(tab.y[k] - tab.y[k-1]) < 1.0e-9 * abs(tab.y[k-1] + 1.0e-30)
                     continue  # Same y-values → skip (already inserted one copy)
                 end
-                push!(grid, round_sigfig(e, 7, +1))
+                shaded_up = round_sigfig(e, 7, +1)
+                push!(grid, shaded_up)
+                # Fortran modifies breakpoints in-place (line 1980/2030:
+                # scr(ibase+ir*2+1)=ernext). This creates cascaded duplicates:
+                # if the shaded-up value matches the NEXT breakpoint, the next
+                # iteration will detect a new duplicate. Only update work_x
+                # when a cascade is actually present (next breakpoint matches).
+                if k < npts && abs(work_x[k+1] - shaded_up) < 1.0e-9 * shaded_up
+                    work_x[k] = shaded_up
+                end
             elseif is_histogram && k > start_k && k < npts
                 # Histogram interior breakpoint → shaded pair
                 push!(grid, round_sigfig(e, 7, -1))
@@ -374,10 +383,10 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                 push!(shaded_energies, e)
             else
                 # Cross-section coincidence check (Fortran label 220, lines
-                # 1996-2003): when a section's first breakpoint coincides with
-                # an existing grid point AND has nonzero XS, shade to a pair
-                # {sigfig(e,7,0), sigfig(e,7,+1)}. This prevents singularities
-                # when two sections share a breakpoint energy.
+                # 1996-2003): when a breakpoint coincides with an existing
+                # grid point AND has nonzero XS, shade to a pair
+                # {sigfig(e,7,0), sigfig(e,7,+1)}. Fortran applies this to
+                # ALL breakpoints in the section, not just the first one.
                 if k == start_k && e >= round_sigfig(1.0e-5, 7, +1) && abs(tab.y[k]) > 0.0
                     # Fortran lunion label 220 (lines 1992-2005):
                     # Find eg = first old grid point >= er*(1-small)
