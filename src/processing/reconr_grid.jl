@@ -373,6 +373,20 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                 push!(grid, round_sigfig(e, 7, +1))
                 push!(shaded_energies, e)
             else
+                # Cross-section coincidence check (Fortran label 220, lines
+                # 1996-2003): when a section's first breakpoint coincides with
+                # an existing grid point AND has nonzero XS, shade to a pair
+                # {sigfig(e,7,0), sigfig(e,7,+1)}. This prevents singularities
+                # when two sections share a breakpoint energy.
+                if k == start_k && e > 1.0e-4 && abs(tab.y[k]) > 0.0
+                    e_shade_dn = round_sigfig(e, 7, -1)
+                    gi = searchsortedfirst(grid, e_shade_dn)
+                    if gi <= length(grid) && abs(grid[gi] - e) <= 1.0e-8 * e
+                        # Coincident with existing grid point — shade
+                        push!(grid, round_sigfig(e, 7, 0))
+                        e = round_sigfig(e, 7, +1)
+                    end
+                end
                 push!(grid, e)
             end
         end
