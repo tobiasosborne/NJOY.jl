@@ -230,9 +230,12 @@ function read_mf10_sections(io::IO, mat::Integer)
             seek(io, pos)
             try
                 head = read_cont(io)
-                tab1 = read_tab1(io)
-                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2,
-                    TabulatedFunction(tab1.interp, tab1.x, tab1.y), Int32(10)))
+                nss = Int(head.N1)  # number of sub-sections (final states)
+                for _ in 1:max(1, nss)
+                    tab1 = read_tab1(io)
+                    push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2,
+                        TabulatedFunction(tab1.interp, tab1.x, tab1.y), Int32(10)))
+                end
                 _skip_to_send(io)
             catch e
                 @warn "read_mf10_sections: skipping MF10/MT=$mt" exception=(e, catch_backtrace())
