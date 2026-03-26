@@ -340,23 +340,43 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ---
 
-## Immediate Next Steps
+## Immediate Next Steps — ALL ARE REQUIRED WORK
 
-### Priority 1: Investigate lunion linearization (Trap 27)
+There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until proven otherwise by reading the Fortran. Previous ±1 diffs in this project were ALL traced to real bugs (missing sigfig calls, wrong accumulation order, etc.) and fixed. The same approach applies to every remaining diff.
 
-For Test 46 MT=80/82 (Fe-56 JEFF), near-threshold XS values differ because Fortran emerge reads MF3 from lunion's scratch tape (linearized data) instead of the original ENDF. Julia interpolates the original sparse MF3 table directly. This affects threshold interpolation for high-energy channels. Need to either linearize MF3 through lunion_grid or match Fortran's scratch-tape data flow.
+### 1. RECONR: Fix ±1 FP diffs (T34, T27, T19, T04/T07)
 
-### Priority 2: Grind BROADR
+These are NOT "cross-compiler precision issues." They are bugs that have not yet been investigated thoroughly enough. Evidence: T02 (SLBW+URR), T08 (Reich-Moore), T55 (61 MTs) all involve heavy FP math and are BIT-IDENTICAL. The ±1 diffs in the remaining tests are the same class of bug — a missing `round_sigfig`, wrong accumulation order, or mismatched intermediate step. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it.
 
-The oracle cache has `after_broadr.pendf` for Tests 01, 02, 07. Next module in the processing chain.
+**Start with T34 (Pu-240, 51/53)** — only 2 failing MTs (MT=1, MT=102), 5 diff points, all ±1 at 7th sigfig. Energies: 3.97e-5, 2089, 2307, 4526 eV. Trace the exact Fortran calculation at these energies through `cross_section_rm` / `merge_background_legacy` and find where Julia diverges.
 
-### Priority 3: Generate more oracle caches
+### 2. RECONR: Fix Trap 27 — lunion scratch-tape data flow (T46, T18)
 
-Only 8 test oracles exist. Generate oracles for Tests 04, 07, 09-13, 18, 20, 25, 26, 30, 47, 49, 55, 60. This enables tracking more tests.
+**What we know so far (partially traced in Phase 11):**
+- Fortran tape flow: `lunion(nin=ENDF, nout=nscr1, ngrid=nscr2)` → `emerge(nin=nscr1, ngrid=nscr2, ..., nscr=nscr4)` → `recout(iold, nscr4, nrtot)`
+- emerge reads MF3 from nscr1 (lunion's scratch tape) via gety1, writes to nscr4
+- recout reads from nscr4 for non-redundant MTs: `call tosend(nscr, nout, 0, scr)` where nscr=nscr4
+- **Key question still open**: Does emerge write re-evaluated grid-point data to nscr4, or does it just copy the original TAB1? If emerge writes evaluated data, then non-redundant MT output has grid-point evaluations, not original ENDF breakpoints. This would explain why T46 MT=80 output has 510 lines (not 77 from the ENDF). **Trace the emerge code to answer this.**
 
-### Low Priority: ±1 FP precision issues
+**Concrete diff to trace:** T46 MT=80 at E=4.527194e6: Julia=3.670210e-6 (correct interpolation between E2 and E3), Fortran=3.536400e-6 (exactly Y2 from the ENDF). The Fortran appears to use a breakpoint value at an energy 4 eV away from the breakpoint. Find why.
 
-Tests 34, 19, 27 have ±1 diffs at 7th sigfig — cross-compiler floating-point precision, not logic bugs.
+### 3. RECONR: Fix T49 (Zr-90, 1/46) grid points
+
+Two specific grid points are in the Fortran but not Julia: 7.118985e6 and 1.26989e7. These have a definite origin in the Fortran code — the Fortran is deterministic. Trace the Fortran lunion execution for the Zr-90 MF3/MF10 sections to find which code path produces these energies. MF=10 reader was added in Phase 11 but the points still don't appear.
+
+### 4. RECONR: Fix T20 (Cl-35 RML/SAMMY, 8/162)
+
+The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scoring 8/162 means it has bugs, not missing code. Grind it.
+
+### 5. Grind BROADR to bit-identical
+
+BROADR is fully implemented in `src/processing/broadr.jl` and `src/processing/sigma1.jl`. The sigma1 kernel, adaptive reconstruction, and thinning are all coded. First comparison (T09, N-nat) shows grid size mismatch (159 vs 339 pts) — the adaptive refinement and thinning parameters need tuning to match Fortran exactly. BROADR oracles exist for 13 tests. Apply the Grind Method: compare, find first diff, read Fortran `broadr.f90`, fix, repeat.
+
+### 6. Fix remaining RECONR test errors
+
+- **T15-17** (JENDL U-238): float parsing bug with old ENDF format `"2.530000-2"` — fix the parser
+- **T60** (Fe-nat IRDFF): dosimetry file, may need MF=23 support
+- **T03, T56-58, T64**: photoatomic/photonuclear files need MF=23 processing in lunion
 
 ---
 
@@ -413,10 +433,12 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 - **24, 28-29, 31-32, 35, 37-42, 44**: Fortran oracle failed (ENDF-8.0 input deck issues)
 
 ### Key Insights from Sweep (Phase 11 — 20 tests)
-1. **14 BIT-IDENTICAL** (up from 11 in Phase 10) — B-10, Pu-245, Fe-56 TENDL-19
-2. **Remaining diffs cluster**: ±1 FP precision (unfixable), near-threshold Trap 27 (architectural)
-3. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
-4. **Photonuclear data** needs MF23 support (no MF2/MT151 in those files)
+1. **14 BIT-IDENTICAL** (up from 11 in Phase 10) — B-10, Pu-245 newly passing
+2. **Every ±1 diff investigated so far was a real bug** — missing sigfig call, wrong accumulation order, wrong intermediate rounding. The remaining ±1 diffs (T34, T27, T19, T04/T07) are the same class of bug, not yet found. They are fixable.
+3. **Trap 27 is a concrete code-tracing problem**, not an architectural impossibility. The Fortran tape flow is: lunion→nscr1→emerge→nscr4→recout. Trace the exact data on nscr4 to understand what recout copies for non-redundant MTs.
+4. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
+5. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20/T49 mean bugs, not missing features.
+6. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
 
 ---
 
