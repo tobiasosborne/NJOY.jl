@@ -285,17 +285,20 @@ function reconr(endf_file::AbstractString;
 
         # Read MF=13 sections (photon production cross sections) — Fortran
         # lunion processes these alongside MF=3 (reconr.f90:1868,1880).
-        # Histogram interpolation is forced for MF=13 sections.
         mf13_sections = read_mf13_sections(io, actual_mat)
 
-        # Build full union grid from MF3 + MF12 + MF13 sections (matching Fortran lunion)
+        # Read MF=10 sections (radioactive production cross sections) — Fortran
+        # lunion processes these alongside MF=3 (reconr.f90:1868).
+        mf10_sections = read_mf10_sections(io, actual_mat)
+
+        # Build full union grid from MF3 + MF10 + MF12 + MF13 sections (matching Fortran lunion)
         mf2_nodes = Float64[]
         _add_mf2_nodes!(mf2_nodes, mf2)
         # Add URR table energy nodes (matching Fortran rdf2u1 enode)
         if urr_table !== nothing
             append!(mf2_nodes, urr_table.energies)
         end
-        all_lunion_sections = vcat(mf3_sections, mf12_sections, mf13_sections)
+        all_lunion_sections = vcat(mf3_sections, mf10_sections, mf12_sections, mf13_sections)
         # Fortran: if (eresr.lt.elim) elim=eresr (reconr.f90:1811)
         elim = min(0.99e6, eresr > 0.0 ? eresr : 0.99e6)
         bg_grid = lunion_grid(all_lunion_sections, err;

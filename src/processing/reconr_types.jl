@@ -202,6 +202,47 @@ function read_mf13_sections(io::IO, mat::Integer)
     sections
 end
 
+"""
+    read_mf10_sections(io::IO, mat::Integer) -> Vector{MF3Section}
+
+Read MF=10 radioactive production cross section sections.
+Returns them as `MF3Section` objects so they can be processed by `lunion_grid`.
+
+Matches Fortran lunion behaviour (reconr.f90:1868): MF=10 sections contribute
+energy breakpoints to the union grid. Like MF=12/13, they bypass the MT skip
+checks (line 1881: `if (mfh.ne.3) go to 180`).
+"""
+function read_mf10_sections(io::IO, mat::Integer)
+    sections = MF3Section[]
+    seekstart(io)
+
+    while !eof(io)
+        pos = position(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        mf = _parse_int(p[71:72])
+        mt = _parse_int(p[73:75])
+        mat_line = _parse_int(p[67:70])
+
+        mat_line != mat && continue
+
+        if mf == 10 && mt > 0
+            seek(io, pos)
+            try
+                head = read_cont(io)
+                tab1 = read_tab1(io)
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2,
+                    TabulatedFunction(tab1.interp, tab1.x, tab1.y), Int32(10)))
+                _skip_to_send(io)
+            catch e
+                @warn "read_mf10_sections: skipping MF10/MT=$mt" exception=(e, catch_backtrace())
+                _skip_to_send(io)
+            end
+        end
+    end
+    sections
+end
+
 function _detect_mat(io::IO, requested::Integer)
     requested > 0 && return Int32(requested)
     seekstart(io)
