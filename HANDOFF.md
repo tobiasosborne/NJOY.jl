@@ -399,65 +399,72 @@ BROADR is fully implemented in `src/processing/broadr.jl` and `src/processing/si
 
 ---
 
-## Sweep Results (Phase 11 — 8 oracle tests verified)
+## Sweep Results (Phase 13 — 23 oracle tests verified)
 
 Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reconr()` + `write_pendf_file()` + byte-for-byte MF3 comparison (columns 1-66).
 
 **IMPORTANT: err values must match the input deck, NOT the HANDOFF test table (which has errors). Always read `njoy-reference/tests/NN/input` for the correct err.**
 
-### BIT-IDENTICAL (12 tests — 5 verified with oracles)
-| Test | MAT | Material | MTs | err | Notes |
-|------|-----|----------|-----|-----|-------|
-| 01 | 1306 | C-nat | 29/29 | 0.005 | LRU=0, t511 |
-| 02 | 1050 | Pu-238 | 17/17 | 0.005 | SLBW+URR mode=11 (LSSF=0), t404 |
-| 08 | 2834 | Ni-61 | 18/18 | 0.01 | Reich-Moore LRF=3, eni61 |
-| 09 | 1301 | N-nat | 3/3 | 0.005 | LRU=0, t511 |
-| 10 | 1050 | Pu-238 | 17/17 | 0.005 | Same material, different test chain |
-| 11 | 1050 | Pu-238 | 17/17 | 0.005 | Same material, different test chain |
-| 12 | 2834 | Ni-61 | 18/18 | 0.01 | Same material, different test chain |
-| 13 | 2834 | Ni-61 | 18/18 | 0.01 | Same material, different test chain |
-| 25 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
-| 30 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
-| 26 | 9455 | Pu-245 | 23/23 | 0.001 | ENDF-8.0, **NEW Phase 11** (MT=103/107 redundancy) |
-| 45 | 525 | B-10 | 53/53 | 0.001 | LRU=0, **NEW Phase 11** (MT=103-107 redundancy) |
-| 55 | 2631 | Fe-56 | 61/61 | 0.001 | TENDL-19, Reich-Moore |
+**Full test runner**: `julia --project=. test/validation/run_all_tests.jl` runs all 84 reference tests. Fixed `tc.missing` → `tc.missing_mods` bug in Phase 13. The runner compares RECONR PENDF output against reference tapes (which may include BROADR effects, so tolerances are relaxed). For bit-exact RECONR testing, use the oracle comparison method below.
+
+### BIT-IDENTICAL (14 tests verified with oracle comparison)
+| Test | MAT | Material | MTs | err | ENDF file | Notes |
+|------|-----|----------|-----|-----|-----------|-------|
+| 01 | 1306 | C-nat | 29/29 | 0.005 | t511 | LRU=0 |
+| 02 | 1050 | Pu-238 | 17/17 | 0.005 | t404 | SLBW+URR mode=11 (LSSF=0) |
+| 08 | 2834 | Ni-61 | 18/18 | 0.01 | eni61 | Reich-Moore LRF=3 |
+| 09 | 1301 | N-nat | 3/3 | 0.005 | t511 | LRU=0 |
+| 10 | 1050 | Pu-238 | 17/17 | 0.005 | t404 | Same material as T02 |
+| 11 | 1050 | Pu-238 | 17/17 | 0.005 | t404 | Same material as T02 |
+| 12 | 2834 | Ni-61 | 18/18 | 0.01 | eni61 | Same material as T08 |
+| 13 | 2834 | Ni-61 | 18/18 | 0.01 | eni61 | Same material as T08 |
+| 19 | 9443 | Pu-241 | 23/23 | 0.02 | e6pu241c | ENDF-6, SLBW+URR. **err=0.02**. **NEW Phase 13** |
+| 25 | 125 | H-1 | 3/3 | 0.001 | n-001_H_001-ENDF8.0-Beta6.endf | ENDF-8.0, LRU=0 |
+| 26 | 9455 | Pu-245 | 23/23 | 0.001 | n-094_Pu_245-ENDF8.0-Beta6.endf | ENDF-8.0 |
+| 30 | 125 | H-1 | 3/3 | 0.001 | n-001_H_001-ENDF8.0-Beta6.endf | Same material as T25 |
+| 45 | 525 | B-10 | 53/53 | 0.001 | n-005_B_010-ENDF8.0.endf | LRU=0, MT=103-107 redundancy |
+| 55 | 2631 | Fe-56 | 61/61 | 0.001 | n-026_Fe_056-TENDL19.endf | TENDL-19, Reich-Moore |
 
 ### Near-Perfect (>85% MTs)
-| Test | MAT | Material | MTs | err | Notes |
-|------|-----|----------|-----|-----|-------|
-| 34 | 9440 | Pu-240 | 52/53 (98%) | 0.001 | Reich-Moore+URR mode=11 (LSSF=1), **+1 Phase 12** (frobns). 3 ±1 FP in MT=102 |
-| 46 | 2631 | Fe-56 | 69/73 (95%) | 0.001 | JEFF3.3, **+2 Phase 11**. Near-threshold diffs (Trap 27) |
-| 27 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Reich-Moore, ±1 FP |
-| 47 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Same as 27, different chain |
-| 19 | 9443 | Pu-241 | 21/23 (91%) | 0.02 | ENDF-6, URR, ±1 FP. **err=0.02 NOT 0.001** |
-| 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | SLBW+URR mode=12, ±1 at URR boundary. **err=0.10** |
-| 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | Same material, err=0.005 |
+| Test | MAT | Material | MTs | err | ENDF file | Notes |
+|------|-----|----------|-----|-----|-----------|-------|
+| 34 | 9440 | Pu-240 | 52/53 (98%) | 0.001 | n-094_Pu_240-ENDF8.0.endf | RM+URR(LSSF=1). 3 ±1 FP in MT=102 at boundary |
+| 46 | 2631 | Fe-56 | 72/73 (99%) | 0.001 | n-026_Fe_056-JEFF3.3.endf | JEFF3.3. **+3 Phase 13** (threshold fix). 1 MT=1 ±1 |
+| 27 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | RM. 1 missing grid point (see below) |
+| 47 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | Same as T27, different chain |
+| 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | t511 | SLBW+URR mode=12. **err=0.10** |
+| 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | t511 | Same material, err=0.005 |
+| 49 | 4025 | Zr-90 | 41/46 (89%) | 0.001 | n-040_Zr_090-ENDF8.0.endf | **+40 Phase 13** (MF=10 fix). 5 remaining |
 
 ### Close (>50% MTs)
 | Test | MAT | Material | MTs | err | Notes |
 |------|-----|----------|-----|-----|-------|
-| 18 | 9999 | Cf-252 | 5/9 (56%) | 0.001 | LRU=0, near-end diffs |
+| 18 | 9999 | Cf-252 | 5/9 (56%) | 0.001 | SLBW+URR(mode=12), NOT LRU=0. URR eval errors at E>383 eV |
 
 ### Partial (<50% MTs)
 | Test | MAT | Material | MTs | Notes |
 |------|-----|----------|-----|-------|
-| 20 | 1725 | Cl-35 | 8/162 (5%) | RML (LRF=7), SAMMY formalism |
-| 49 | 4025 | Zr-90 | 1/46 (2%) | ENDF-8.0 |
-| 60 | 2600 | Fe-nat | 0/1 (0%) | IRDFF-II dosimetry file |
+| 20 | 1725 | Cl-35 | 12/162 (7%) | RML (LRF=7), 42 missing grid points |
+| 60 | 2600 | Fe-nat | 0/1 (0%) | IRDFF-II dosimetry file, needs MF=23 |
 
 ### Errors (not in sweep)
 - **15-17**: JENDL U-238 — float parsing bug (`"2.530000-2"` old format)
 - **03**: Photon data (MAT=1) — no MF2/MT151 (photoatomic, needs MF=23 support)
 - **56-58, 64**: Photonuclear (`g-` files) — no MF2/MT151
-- **24, 28-29, 31-32, 35, 37-42, 44**: Fortran oracle failed (ENDF-8.0 input deck issues)
+- **24, 28-29, 31-32, 35, 37-42, 44**: Run in test runner with relaxed tolerance; no oracle comparison
 
-### Key Insights from Sweep (Phase 11 — 20 tests)
-1. **14 BIT-IDENTICAL** (up from 11 in Phase 10) — B-10, Pu-245 newly passing
-2. **Every ±1 diff investigated so far was a real bug** — missing sigfig call, wrong accumulation order, wrong intermediate rounding. The remaining ±1 diffs (T34, T27, T19, T04/T07) are the same class of bug, not yet found. They are fixable.
-3. **Trap 27 is a concrete code-tracing problem**, not an architectural impossibility. The Fortran tape flow is: lunion→nscr1→emerge→nscr4→recout. Trace the exact data on nscr4 to understand what recout copies for non-redundant MTs.
-4. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
-5. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20/T49 mean bugs, not missing features.
-6. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
+### Full test runner results (partial, 44/84 completed before timeout)
+Tests that PASS the relaxed-tolerance comparison (RECONR vs broadened reference): T12 (0.00%), T26 (49.8%), T35 (50.0%), T37 (43.2%), T40 (35.7%), T42 (46.6%), T43 (0.00%), T44 (0.96%), T45 (0.21%), T63 (50.0%). Tests that SKIP (no RECONR module): T05, T14, T50-54, T59, T61, T62. Most ERROR results are from the now-fixed `tc.missing` bug + tests with missing BROADR/HEATR stages.
+
+### Key Insights
+1. **14 BIT-IDENTICAL** (up from 12 in Phase 12) — Pu-241 newly passing
+2. **Every ±1 diff investigated so far was a real bug** — missing sigfig call, wrong accumulation order, threshold adjustment. The remaining ±1 diffs (T34, T27, T04/T07) are the same class of bug.
+3. **T27 root cause identified**: single missing grid point at 2500.002 = sigfig(2500.001, 7, +1). Julia's coincidence check only fires for `k == start_k` but Fortran fires for ALL breakpoints. Fix: remove the `k == start_k` restriction.
+4. **T34 deeply investigated**: 3 ±1 FP diffs are at absolute limit — small-param approximation vs standard formula gives ~1e-15 per-J-value differences. FMA ruled out. Precomputed per ruled out.
+5. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
+6. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20 mean grid/XS bugs, not missing features.
+7. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
+8. **T18 (Cf-252) is NOT LRU=0** — has SLBW(1e-5 to 366.5 eV) + URR mode=12 (366.5 to 10000 eV). Systematic URR errors (0.1% magnitude) starting at E=383 eV. Uninvestigated.
 
 ---
 
