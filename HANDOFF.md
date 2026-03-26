@@ -161,6 +161,7 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 | 1033 pts exact | **BIT-IDENTICAL** |
 | Test 02 | Pu-238 | SLBW + URR(mode=11) | 17/17 | 3567 pts exact | **BIT-IDENTICAL** |
 | Test 08 | Ni-61 | Reich-Moore (LRF=3) | 18/18 | 4825 pts exact | **BIT-IDENTICAL** |
+| Test 45 | B-10 | LRU=0 | 53/53 | 338 pts exact | **BIT-IDENTICAL** — NEW Phase 11 |
 
 ### In Progress — Test 07 (U-235, SLBW + URR mode=12)
 
@@ -341,64 +342,56 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ## Immediate Next Steps
 
-### Priority 1: Fix duplicate shading for same-y breakpoints (Trap 28)
+### Priority 1: Investigate lunion linearization (Trap 27)
 
-Julia's lunion_grid shades ALL duplicate breakpoints, but Fortran only shades those with different y-values. This creates extra grid points (e.g., Test 27 MTs 51-58 each have 2 extra). Fix: check if duplicate breakpoints have the same y-value before shading. Expected to improve Tests 27/47 (Pu-239) and possibly others.
+For Test 46 MT=80/82 (Fe-56 JEFF), near-threshold XS values differ because Fortran emerge reads MF3 from lunion's scratch tape (linearized data) instead of the original ENDF. Julia interpolates the original sparse MF3 table directly. This affects threshold interpolation for high-energy channels. Need to either linearize MF3 through lunion_grid or match Fortran's scratch-tape data flow.
 
-### Priority 2: Investigate lunion linearization (Trap 27)
-
-For Test 46 MT=103 (Fe-56 JEFF), the Fortran has a constant ~3e-5 multiplicative offset in all MF3 values. This comes from emerge reading lunion's scratch tape instead of the original ENDF. Need to understand what lunion does to the MF3 data and whether Julia needs to replicate this.
-
-### Priority 3: Investigate Test 45 (B-10) grid differences
-
-Julia has 15 FEWER grid points than Fortran for primary MTs, and MT=105 is MISSING. Grid construction issue.
-
-### Priority 4: Grind BROADR
+### Priority 2: Grind BROADR
 
 The oracle cache has `after_broadr.pendf` for Tests 01, 02, 07. Next module in the processing chain.
 
+### Priority 3: Generate more oracle caches
+
+Only 8 test oracles exist. Generate oracles for Tests 04, 07, 09-13, 18, 20, 25, 26, 30, 47, 49, 55, 60. This enables tracking more tests.
+
 ### Low Priority: ±1 FP precision issues
 
-Tests 34, 19, 07, 04 all have ±1 diffs at 7th sigfig — cross-compiler floating-point precision, not logic bugs.
+Tests 34, 19, 27 have ±1 diffs at 7th sigfig — cross-compiler floating-point precision, not logic bugs.
 
 ---
 
-## Sweep Results (Phase 9 — 24 tests with oracles)
+## Sweep Results (Phase 11 — 8 oracle tests verified)
 
 Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reconr()` + `write_pendf_file()` + byte-for-byte MF3 comparison (columns 1-66).
 
-### BIT-IDENTICAL (11 tests)
-| Test | MAT | Material | MTs | Notes |
-|------|-----|----------|-----|-------|
-| 01 | 1306 | C-nat | 29/29 | LRU=0, t511 |
-| 02 | 1050 | Pu-238 | 17/17 | SLBW+URR mode=11 (LSSF=0), t404 |
-| 08 | 2834 | Ni-61 | 18/18 | Reich-Moore LRF=3, eni61 |
-| 09 | 1301 | N-nat | 3/3 | LRU=0, t511 |
-| 10 | 1050 | Pu-238 | 17/17 | Same material, different test chain |
-| 11 | 1050 | Pu-238 | 17/17 | Same material, different test chain |
-| 12 | 2834 | Ni-61 | 18/18 | Same material, different test chain |
-| 13 | 2834 | Ni-61 | 18/18 | Same material, different test chain |
-| 25 | 125 | H-1 | 3/3 | ENDF-8.0, LRU=0 |
-| 30 | 125 | H-1 | 3/3 | ENDF-8.0, LRU=0 |
-| 55 | 2631 | Fe-56 | 61/61 | TENDL-19, Reich-Moore — NEW in Phase 9 |
+**IMPORTANT: err values must match the input deck, NOT the HANDOFF test table (which has errors). Always read `njoy-reference/tests/NN/input` for the correct err.**
+
+### BIT-IDENTICAL (12 tests — 5 verified with oracles)
+| Test | MAT | Material | MTs | err | Notes |
+|------|-----|----------|-----|-----|-------|
+| 01 | 1306 | C-nat | 29/29 | 0.005 | LRU=0, t511 |
+| 02 | 1050 | Pu-238 | 17/17 | 0.005 | SLBW+URR mode=11 (LSSF=0), t404 |
+| 08 | 2834 | Ni-61 | 18/18 | 0.01 | Reich-Moore LRF=3, eni61 |
+| 09 | 1301 | N-nat | 3/3 | 0.005 | LRU=0, t511 |
+| 10 | 1050 | Pu-238 | 17/17 | 0.005 | Same material, different test chain |
+| 11 | 1050 | Pu-238 | 17/17 | 0.005 | Same material, different test chain |
+| 12 | 2834 | Ni-61 | 18/18 | 0.01 | Same material, different test chain |
+| 13 | 2834 | Ni-61 | 18/18 | 0.01 | Same material, different test chain |
+| 25 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
+| 30 | 125 | H-1 | 3/3 | 0.001 | ENDF-8.0, LRU=0 |
+| 45 | 525 | B-10 | 53/53 | 0.001 | LRU=0, **NEW in Phase 11** (MT=103-107 redundancy) |
+| 55 | 2631 | Fe-56 | 61/61 | 0.001 | TENDL-19, Reich-Moore |
 
 ### Near-Perfect (>85% MTs)
-| Test | MAT | Material | MTs | Notes |
-|------|-----|----------|-----|-------|
-| 34 | 9440 | Pu-240 | 51/53 (96%) | Reich-Moore+URR mode=11 (LSSF=1), ±1 FP |
-| 46 | 2631 | Fe-56 | 67/73 (92%) | JEFF3.3, MT=103 lunion linearization diffs |
-| 19 | 9443 | Pu-241 | 21/23 (91%) | ENDF-6, URR, ±1 FP — **improved in Phase 10** |
-| 04 | 1395 | U-235 | 24/27 (89%) | SLBW+URR mode=12, ±1 at URR boundary |
-| 07 | 1395 | U-235 | 24/27 (89%) | Same material, err=0.005 |
-| 26 | 9455 | Pu-245 | 19/23 (83%) | ENDF-8.0, missing MT=103/107 |
-
-### Close (>50% MTs)
-| Test | MAT | Material | MTs | Notes |
-|------|-----|----------|-----|-------|
-| 27 | 9437 | Pu-239 | 45/49 (92%) | Reich-Moore, ±1 FP — **improved in Phase 10** |
-| 47 | 9437 | Pu-239 | 45/49 (92%) | Same as 27, different chain |
-| 45 | 525 | B-10 | 42/53 (79%) | LRU=0, grid deficit + MT=105 redundant |
-| 18 | 9999 | Cf-252 | 5/9 (56%) | LRU=0 with special data |
+| Test | MAT | Material | MTs | err | Notes |
+|------|-----|----------|-----|-----|-------|
+| 34 | 9440 | Pu-240 | 51/53 (96%) | 0.001 | Reich-Moore+URR mode=11 (LSSF=1), ±1 FP |
+| 46 | 2631 | Fe-56 | 69/73 (95%) | 0.001 | JEFF3.3, **+2 Phase 11**. Near-threshold diffs (Trap 27) |
+| 27 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Reich-Moore, ±1 FP |
+| 47 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | Same as 27, different chain |
+| 19 | 9443 | Pu-241 | 21/23 (91%) | 0.02 | ENDF-6, URR, ±1 FP. **err=0.02 NOT 0.001** |
+| 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | SLBW+URR mode=12, ±1 at URR boundary. **err=0.10** |
+| 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | Same material, err=0.005 |
 
 ### Partial (<50% MTs)
 | Test | MAT | Material | MTs | Notes |
@@ -433,6 +426,7 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | 01 | 1306 | t511 | 0.005 | LRU=0 | RECONR→BROADR→... | RECONR **BIT-IDENTICAL** |
 | 02 | 1050 | t404 | 0.005 | SLBW+URR(mode=11) | RECONR→BROADR→UNRESR→... | RECONR **BIT-IDENTICAL** |
 | 08 | 2834 | eni61 | 0.01 | Reich-Moore(LRF=3) | RECONR→BROADR→HEATR→... | RECONR **BIT-IDENTICAL** |
+| 45 | 525 | n-005_B_010-ENDF8.0.endf | 0.001 | LRU=0 | RECONR→BROADR→GASPR | RECONR **BIT-IDENTICAL** — NEW Phase 11 |
 | 07 | 1395 | t511 | 0.005 | SLBW+URR(mode=12) | RECONR→BROADR→... | **24/27** (±1 at URR boundary, FP precision) |
 
 ---
@@ -517,4 +511,21 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 
 **Trap 28 (NEW — FIXED)**: Duplicate MF3 breakpoints with SAME y-values should NOT be shaded in lunion_grid. The Fortran lunion (line 2092) checks `abs(srnext-sr) < small*sr` — if y-values match, skip shading. Julia was shading ALL duplicates. Fixed by checking y-values before shading. Improved Test 27 from 35/49 to 45/49.
 
-**Trap 29 (NEW)**: Fortran lunion's panel bisection operates on the CUMULATIVE grid (each section sees previous sections' contributions). Julia's `_panel_bisection` operates per-section. After combining all sections, consecutive grid points can have step ratios > stpmax that Julia misses. This causes Test 45 (B-10) to have ~47 fewer grid points at low energies. Fix: add a post-processing step-ratio enforcement pass over the cumulative grid.
+**Trap 29 (NEW — FIXED)**: Fortran lunion's panel bisection operates on the CUMULATIVE grid (each section sees previous sections' contributions). Julia's `_panel_bisection` operates per-section. After combining all sections, consecutive grid points can have step ratios > stpmax that Julia misses. Fixed by adding a post-processing step-ratio enforcement pass over the cumulative grid.
+
+### Phase 11: MT=103-107 redundant charged-particle reactions
+
+**MT=103-107 redundancy (FIXED)**: Fortran RECONR treats MT=103-107 as redundant sums when charged-particle partials exist (MT=600-649→103, 650-699→104, 700-749→105, 750-799→106, 800-849→107). Three-part fix:
+1. **lunion_grid**: Skip MT=103-107 when partials exist (Fortran lunion lines 1884-1888)
+2. **_collect_reactions + _get_legacy_section**: Output MT=103-107 as computed redundant sums (same pattern as MT=4), including synthesized MTs not in the original ENDF (e.g., MT=105 for B-10)
+3. **merge_background_legacy**: Fix `_skip` to only exclude MT=201-599 (Fortran line 4847: `mth.gt.200.and.mth.lt.mpmin` where mpmin=600). MT=600-849 partials now contribute to the total. Skip MT=103-107 when redundant to avoid double-counting.
+
+**Test 45 (B-10): 42/53 → 53/53 BIT-IDENTICAL** — All three issues resolved: MT=105 synthesized from MT=700, MT=103/107 computed as redundant sums, MT=600-849 partials included in total.
+
+**Test 46 (Fe-56 JEFF): 67/73 → 69/73** — MT=103/107 now correctly handled as redundant sums of MT=600-613,649 / MT=800-810,849. Remaining 4 diffs: MT=1/4 (±1 FP at 4.53 MeV), MT=80/82 (near-threshold Trap 27).
+
+**err value corrections (Trap 31)**: T19 input deck shows err=0.02 (not 0.001 as previously reported). T04 shows err=0.10. Using wrong err caused 4.3x grid explosion for T19 (9011 vs 2087 lines). All oracle tests now verified with correct err from input decks.
+
+**Trap 30 (NEW — FIXED)**: MT=103-107 are redundant charged-particle sums when partials exist. Fortran anlyzd (lines 567-590) detects partials: MT=600-649→MT=103, MT=650-699→MT=104, MT=700-749→MT=105, MT=750-799→MT=106, MT=800-849→MT=107. Fortran lunion skips these MTs (lines 1884-1888), emerge accumulates partials into redundant sums, and recout outputs them. Julia was: (a) not skipping MT=103-107 in lunion_grid, (b) not synthesizing MT=105 when it wasn't in the ENDF, (c) skipping MT=600-849 partials from the total via `_skip(mt > 200)`. Fixed all three. IMPORTANT: only treat MT=103-107 as redundant when partials actually exist — e.g., B-10 has MT=104 in the ENDF with no MT=650-699 partials, so MT=104 is output normally.
+
+**Trap 31 (NEW)**: The HANDOFF test table's err values are unreliable. Always read `njoy-reference/tests/NN/input` for the correct err. Known wrong err values in previous versions: T19 was listed as err=0.001 (correct: 0.02), T04 was listed as err=0.005 (correct: 0.10).
