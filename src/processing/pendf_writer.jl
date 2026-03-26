@@ -466,14 +466,25 @@ function _get_legacy_section(result, mt::Int)
         return energies, result.total, 0.0, 0.0
     elseif mt == 4
         # Redundant sum: MT=4 = sum(MT=51-91)
-        # Use the grid from the first inelastic level
+        # Use the MINIMUM threshold from any inelastic level (not just
+        # the first). Fortran emerge accumulates from ALL levels; mtrt
+        # tracking picks up wherever ANY contribution first appears.
         first_inel = findfirst(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
         first_inel === nothing && return nothing
-        sec_first = result.mf3_sections[first_inel]
-        qi_4 = sec_first.QI  # Use QI from first inelastic level
-        thrx_4 = awr > 0.0 ? -qi_4 * (awr + 1) / awr : -qi_4
-        thrxx_4 = round_sigfig(thrx_4, 7, +1)
-        # Build grid: all energies at or above threshold
+        qi_4 = result.mf3_sections[first_inel].QI
+        min_thrxx = Inf
+        for sec in result.mf3_sections
+            smt = Int(sec.mt)
+            (smt < 51 || smt > 91) && continue
+            s_qi = sec.QI
+            if s_qi < 0.0
+                s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                s_thrxx = round_sigfig(s_thrx, 7, +1)
+                min_thrxx = min(min_thrxx, s_thrxx)
+            end
+        end
+        thrxx_4 = isfinite(min_thrxx) ? min_thrxx : 0.0
+        # Build grid: all energies at or above lowest threshold
         sec_e = Float64[]
         sec_xs = Float64[]
         for e in energies
