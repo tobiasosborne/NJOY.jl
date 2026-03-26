@@ -173,8 +173,8 @@ const ENDF_OVERRIDES = Dict{Int, Dict{Int, String}}(
             print(format_result(result))
 
             # Mark skipped modules
-            if !isempty(tc.missing)
-                for m in tc.missing
+            if !isempty(tc.missing_mods)
+                for m in tc.missing_mods
                     if !(m in SKIP_MODULES)
                         @test_skip true  # mark each missing module
                     end
