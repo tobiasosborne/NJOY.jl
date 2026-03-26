@@ -494,19 +494,25 @@ function _get_legacy_section(result, mt::Int)
             for sec in result.mf3_sections
                 smt = Int(sec.mt)
                 (smt < 51 || smt > 91) && continue
-                bg = interpolate(sec.tab, e)
-                # Threshold-adjusted interpolation for each level
+                # Per-level threshold handling (matching Fortran emerge)
                 s_qi = sec.QI
+                s_thrxx = 0.0
                 if s_qi < 0.0
                     s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
-                    if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
-                       e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
-                        bg = _threshold_interp(sec.tab, e, s_thrxx)
+                    # Below threshold → skip (Fortran emerge line 4792)
+                    if s_thrxx > 1.0 && (s_thrxx - e) > 1.0e-10 * s_thrxx
+                        continue
                     end
+                    # At threshold → zero (Fortran emerge line 4795)
                     if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-9 * s_thrxx
-                        bg = 0.0
+                        continue
                     end
+                end
+                bg = if s_thrxx > 0.0 && e >= s_thrxx && sec.tab.x[1] < s_thrxx
+                    _threshold_interp(sec.tab, e, s_thrxx)
+                else
+                    interpolate(sec.tab, e)
                 end
                 total_inel += round_sigfig(bg, 7)
             end
@@ -541,18 +547,24 @@ function _get_legacy_section(result, mt::Int)
         for e in energies
             total_cp = 0.0
             for sec in partials
-                bg = interpolate(sec.tab, e)
                 s_qi = sec.QI
+                s_thrxx = 0.0
                 if s_qi < 0.0
                     s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
-                    if s_thrxx > 0.0 && e >= s_thrxx && length(sec.tab.x) >= 2 &&
-                       e < sec.tab.x[2] && sec.tab.x[1] < s_thrxx
-                        bg = _threshold_interp(sec.tab, e, s_thrxx)
+                    # Below threshold → skip
+                    if s_thrxx > 1.0 && (s_thrxx - e) > 1.0e-10 * s_thrxx
+                        continue
                     end
+                    # At threshold → zero
                     if s_thrxx > 0.0 && abs(s_thrxx - e) < 1.0e-9 * s_thrxx
-                        bg = 0.0
+                        continue
                     end
+                end
+                bg = if s_thrxx > 0.0 && e >= s_thrxx && sec.tab.x[1] < s_thrxx
+                    _threshold_interp(sec.tab, e, s_thrxx)
+                else
+                    interpolate(sec.tab, e)
                 end
                 total_cp += round_sigfig(bg, 7)
             end
