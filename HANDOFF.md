@@ -626,4 +626,38 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 
 **Trap 33 (NEW — FIXED)**: When `thrxx > x[2]` for an MF3 TAB1 (threshold above second breakpoint), the entire chain of breakpoints below thrxx must be shifted upward. Fortran lunion lines 1937-1943: `do while scr(l+2) <= scr(l); scr(l+2) = sigfig(scr(l), 7, +1); l=l+2`. Julia's `_threshold_interp` and the condition for calling it must handle this extended threshold region. Y-values are NOT modified — only X-values are shifted.
 
-**T18 (Cf-252) investigation**: HANDOFF incorrectly listed as LRU=0. Actually has LRU=1 (SLBW, 1e-5 to 366.5 eV) + LRU=2 (URR mode=12, 366.5 to 10000 eV). Diffs are systematic XS errors in the URR range starting at E=383.25 eV (0.1% magnitude, not ±1 FP). Root cause not yet identified — likely a URR evaluation issue for this specific material.
+**T18 (Cf-252) investigation**: HANDOFF incorrectly listed as LRU=0. Actually has LRU=1 (SLBW, 1e-5 to 366.5 eV) + LRU=2 (URR mode=12, 366.5 to 10000 eV). Diffs were systematic XS errors in the URR range starting at E=383.25 eV (0.1% magnitude). **FIXED in Phase 14**: Root cause was MF3 background double-counting for LSSF=0 materials (Fortran emerge line 4800 suppresses MF3 bg for primary channels in URR range).
+
+### Phase 14: Cascaded duplicate shading + LSSF=0 MF3 bg suppression + JENDL parser fix
+
+**Cascaded duplicate breakpoint shading (FIXED — Trap 34)**: Fortran lunion modifies breakpoints in-place during processing (lines 1980, 2031). When an initial duplicate {x[k], x[k+1]} is shaded, x[k+1] = sigfig(x[k+1], 7, +1). If this modified value matches x[k+2], a cascading duplicate is detected by the check-ahead (lines 2024-2033), producing sigfig(x[k+2], 7, +1). For Pu-239 at eresr=2500 eV, MT=2 has {2500.0, 2500.0, 2500.001} → cascade creates {2500.0, 2500.001, 2500.002}. Julia now updates work_x[k] after shading, but ONLY when the next breakpoint matches (to avoid spurious cascades). **Impact: T27 45/49 → 49/49, T47 45/49 → 49/49.**
+
+**MF3 background suppression for LSSF=0 (FIXED — Trap 35)**: Fortran emerge line 4800 suppresses MF3 background for primary channels (elastic, fission, capture) when `eg >= eresr && eg < eresh && itype > 0 && itype < 5`. For LSSF=0 materials, the URR table already includes MF3 background (from build_unresolved_table). Without suppression, merge_background_legacy double-counts it. For Pu-238 (T02), MF3 values are 0 in the URR range so no effect. For Cf-252 (T18), MF3 interpolates to nonzero values (e.g., MT=2 at 425 eV ≈ 0.6 barns), causing 0.1-0.5% errors. **Impact: T18 5/9 → 9/9 BIT-IDENTICAL.**
+
+**JENDL float parsing fix**: Two fixes for old-format ENDF files (JENDL-3.3 U-238): (1) `_parse_int` uses `tryparse` instead of `parse` to handle non-integer MAT/MF/MT fields in comment lines. (2) `_csunr2` uses `round(Int, x)` instead of `Int(x)` for AMUX/AMUN/AMUF, matching Fortran `nint()`. JENDL U-238 has AMUX=1.0496. **Impact: T15-T17 now run without errors.**
+
+**Trap 34 (NEW — FIXED)**: Fortran lunion modifies breakpoints in-place, creating cascaded duplicates. When a duplicate pair is shaded, the second gets sigfig(e,7,+1). If this matches the NEXT breakpoint, a new duplicate is detected. Julia must update work_x in the same way, but only when a cascade is present. Without the conditional check, the modification causes false cascades and FP regressions in other materials (T02, T08).
+
+**Trap 35 (NEW — FIXED)**: For LSSF=0, MF3 background must be suppressed for primary channels in the URR range. The URR table already includes MF3 background. Fortran emerge line 4800 sets sn=0 for itype=1-4. Materials with MF3 y=0 in the URR range (like Pu-238) are unaffected, but materials with nonzero MF3 in the URR range (like Cf-252) get double-counted.
+
+**Test results after Phase 14:**
+- T01 C-nat: 29/29 BIT-IDENTICAL (no regression)
+- T02 Pu-238: 17/17 BIT-IDENTICAL (no regression)
+- T08 Ni-61: 18/18 BIT-IDENTICAL (no regression)
+- T09 N-nat: 3/3 BIT-IDENTICAL
+- T10-T13: all BIT-IDENTICAL (no regression)
+- **T18 Cf-252: 9/9 BIT-IDENTICAL (NEW, was 5/9)**
+- T19 Pu-241: 23/23 BIT-IDENTICAL (no regression)
+- T25 H-1: 3/3 BIT-IDENTICAL
+- T26 Pu-245: 23/23 BIT-IDENTICAL
+- **T27 Pu-239: 49/49 BIT-IDENTICAL (NEW, was 45/49)**
+- T30 H-1: 3/3 BIT-IDENTICAL
+- T34 Pu-240: 52/53 (unchanged, 3 ±1 FP in MT=102)
+- T45 B-10: 53/53 BIT-IDENTICAL (no regression)
+- T46 Fe-56 JEFF: 72/73 (unchanged, ±1-3 in MT=1 total)
+- **T47 Pu-239: 49/49 BIT-IDENTICAL (NEW, was 45/49)**
+- T49 Zr-90: 41/46 (unchanged, 1 extra grid point)
+- T55 Fe-56 TENDL: 61/61 BIT-IDENTICAL (no regression)
+- T04 U-235: 24/27 (unchanged, same ±1 as T07)
+- T07 U-235: 24/27 (unchanged, ±1 at URR boundary)
+- **T15-T17: now run without errors (were crashes)**
