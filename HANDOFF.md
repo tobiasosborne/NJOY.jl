@@ -366,21 +366,40 @@ There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until pr
 
 ### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162) — HIGHEST PRIORITY, BIGGEST WIN
 
-**Status**: 12/162 PERFECT. Root cause IDENTIFIED but not yet fixed.
+**Status**: 12/162 PERFECT. Two bugs found in Phase 15, one fixed.
 
-**Root cause (confirmed by gdb + Fortran diagnostic prints in Phase 14)**: Julia's `cross_section_rml` (reconr_evaluator.jl:530-1022) has a **systematic -0.008% error in total XS** vs Fortran `cssammy` (samm.f90:79-166). At E=68.75: Fortran total=13.2270, Julia=13.2259. Elastic matches perfectly (8e-6%) but capture differs by 0.88% (amplified by subtraction: capture = total - elastic - fission). This causes 38% of Fortran panels to fail Julia's convergence, producing 2.6x grid explosion (28k vs 10k points).
+**Phase 15 findings (supersede all previous T20 analysis)**:
 
-**What was ruled out**: convergence test (nsig=4 for both), resonance positions (identical from ENDF), alpha/alphai computation (verified identical formula), R-matrix construction (verified same loop structure), GAM indexing (verified correct column mapping).
+**Bug 1 — FIXED (2x doubling)**: `reconr()` in reconr.jl:313-320 called BOTH `sigma_mf2` (→ `cross_section_sammy`) AND `build_rml_evaluator` (→ `cross_section_rml`), then ADDED the results. Both compute the full cross section, so ALL values were exactly 2x. Fix: removed the rml_eval branch. `sigma_mf2` handles RML correctly on its own. The previous "0.008% error" claim was misleading — the actual pipeline had a 100% error from doubling.
 
-**Most likely bug location**: The `betapr` computation in Julia (reconr_evaluator.jl:665-699) vs Fortran `betset` (samm.f90:1909-2074). Key difference: Fortran calls `pgh(rho, lsp, bound, hr, hi, p, dp, ds, ishift, iffy)` at line 1958, which computes penetrability WITH boundary conditions and shift factor corrections. Julia uses bare `penetrability(lsp, rho)` at line 688, which does NOT apply boundary conditions. If `pgh` modifies `p` (the penetrability) based on boundary conditions before using it in `betapr = sqrt(|gamma|/2/p)`, this would create a systematic bias in all channel widths.
+**Bug 2 — NOT YET FIXED (missing Coulomb penetrability)**: The proton channel (PP3: ZA=1, ZB=16, MT=600) requires Coulomb wavefunctions for penetrability at all energies. Without Coulomb, proton XS ≈ 0 (vs Fortran ≈ 24 barns at thermal). This causes capture to be ~20 barns too high and total ~340 barns too low across all energies, cascading to grid differences in all 162 MTs.
 
-**Concrete debugging steps**:
-1. Add diagnostic prints to Fortran `betset` (samm.f90:1981): print `p`, `betapr(j,ires)`, `rho`, `lsp`, `bound` for spin group 1, resonance 1, elastic channel. Recompile and run T20.
-2. Compute same values in Julia and compare. The first variable that differs identifies the bug.
-3. If `p` (penetrability) differs: Julia needs to call the equivalent of `pgh` (which computes `1/(S-B+iP)` and may return a modified `p`) instead of bare `penetrability()`. The `pgh` function is at samm.f90 lines ~4200-4400.
-4. Alternative: the matrix inversion differs — Julia uses `inv(Y)` (LAPACK LU) while Fortran uses specialized `onech`/`twoch`/`threech` routines (samm.f90:5046-5325). For 2-channel matrices (most Cl-35 spin groups), compare Julia's `inv(Y)` result with Fortran's `twoch` result at E=68.75.
+**What was verified (Phase 15)**:
+- **Pipeline uses `cross_section_sammy`** (sammy.jl), NOT `cross_section_rml` (reconr_evaluator.jl). The reconr_evaluator.jl implementation is UNUSED by the T20 pipeline.
+- **Elastic matches Fortran perfectly** (20.689 barns) — confirms hard-sphere channels are correct
+- **betapr values match Fortran EXACTLY** with Coulomb enabled (proton res 4: P=2.871e-4, betapr=26.39 in both Julia and Fortran — verified via Fortran diagnostic prints in betset)
+- **Coulomb P values computed correctly** via coulx translation (xsigll→asymp2→taylor→getfg→getps, all in sammy.jl lines 615-1060)
+- **Full cross section with Coulomb enabled gives WRONG total** (1892 vs Fortran 2230): the psmall scaling condition in the per-energy Y-matrix (`setr`) interacts differently across l=0 (SG1-2) and l=1 (SG3-8) spin groups
 
-**Channel structure for Cl-35**: Each spin group has 3 channels: ch[1]=gamma(MT=102, eliminated), ch[2]=elastic(MT=2, entrance), ch[3]=proton(MT=600, exit). After gamma elimination: nchan=2, nent=1. The XXXX matrix is 2x2 packed as [X11, X21, X22].
+**Cl-35 channel structure (8 spin groups)**:
+- SG1-2: AJ=1,2, l=0 for both elastic+proton (s-wave)
+- SG3-8: AJ=0,-1,-2,-1,-2,-3, l=1 for both elastic+proton (p-wave)
+- At thermal: l=0 P_elastic ≈ 3.3e-6 (hard-sphere), l=1 P_elastic ≈ 3.5e-17 (TINY!)
+- Proton P_Coulomb: l=0 ≈ 2.9e-5, l=1 ≈ 7.2e-6 (from Fortran SETR diagnostic)
+
+**Remaining issue**: The psmall condition in Julia (sammy.jl line 294) uses `p_val > 1e-8`. The Fortran (samm.f90 setr line 3415-3416) uses a more nuanced check: `NOT (ishift<=0 AND (1-p*rmat_i==1 OR p<1e-8))`. This FP-precision check (`1-p*rmat_i==1`) causes different spin groups to take psmall vs normal path depending on the actual R-matrix values. Julia has this condition implemented but the interaction between psmall scaling for channel 1 (l=1 elastic, always psmall) and normal path for channel 2 (proton, sometimes psmall) produces different XXXX matrices.
+
+**Concrete next steps for T20**:
+1. Add per-spin-group diagnostic prints to BOTH Fortran `sectio` (samm.f90) and Julia `cross_section_sammy` at E=1e-5. Print crss(1) (elastic), crss(2) (absorption), crss(3) (proton) per spin group. Find the FIRST spin group where values diverge.
+2. For the divergent spin group, print the full Y-matrix, Yinv, R-matrix, and XXXX matrix. The first matrix element that differs identifies the bug.
+3. Most likely fix: ensure the psmall scaling + matrix inversion matches Fortran's `twoch` for the mixed case (one channel psmall, one channel normal).
+4. Also need: individual channel MT output (MT=600 etc.) from the evaluator to the PENDF writer.
+
+**Infrastructure already in place** (sammy.jl):
+- `_coulomb_pen_shift_coulx`: full coulx algorithm (xsigll→asymp2→taylor→getfg→getps)
+- `_sammy_pen_coulomb`, `_sammy_pgh_coulomb`: Coulomb-aware dispatchers
+- `zeta_ch` computation per channel in `cross_section_sammy`
+- Just need to enable the TODO calls at lines ~177 and ~289 once psmall interaction is fixed
 
 ### 2. RECONR: Fix T34 ±1 FP diffs (52/53) — CONFIRMED HARD
 
