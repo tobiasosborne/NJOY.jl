@@ -125,6 +125,24 @@ function _add_peak_nodes!(nodes, params::ReichMooreParameters, el, eh)
     end
 end
 
+# SAMMY/RML (LRF=7) peak nodes — matching Fortran rdsammy (samm.f90:1151-1177)
+function _add_peak_nodes!(nodes, params::SAMMYParameters, el, eh)
+    for sg in params.spin_groups
+        nchan = Int(sg.nchan)
+        for ires in 1:Int(sg.nres)
+            er = sg.eres[ires]
+            (er <= el || er >= eh) && continue
+            # hw = gamgam/2 + Σ|gamma_j|/2 (samm.f90:1152-1155)
+            # gamgam raw (no abs), channel widths with abs — matches Fortran exactly
+            hw = sg.gamgam[ires] / 2.0
+            for ich in 1:nchan
+                hw += abs(sg.gamma[ich][ires]) / 2.0
+            end
+            _push_peak_triplet!(nodes, er, hw, el, eh)
+        end
+    end
+end
+
 # Fallback for unsupported formalisms
 function _add_peak_nodes!(nodes, ::AbstractResonanceFormalism, el, eh)
     # No peak nodes for unsupported formalisms
@@ -251,11 +269,13 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
 
         # Compute physical threshold for reactions with Q < 0
         # (matching Fortran lunion lines 1911-1921)
-        # Fortran: awrx = c2h/awin, awin=1 for neutrons → awrx = AWR
+        # Fortran reads AWR from each MF3 section's HEAD record (awrx=c2h/awin).
+        # Use per-section AWR when available; fall back to global awr.
+        sec_awr = sec.awr > 0.0 ? sec.awr : awr
         thrx = 0.0
         qx = sec.QI
         if qx < 0.0 && mt != 2 && mt != 18 && mt != 19 && mt != 102
-            thrx = awr > 0.0 ? -qx * (awr + 1) / awr : -qx
+            thrx = sec_awr > 0.0 ? -qx * (sec_awr + 1) / sec_awr : -qx
         end
 
         # Threshold replacement: Fortran REPLACES the first MF3 breakpoint

@@ -24,10 +24,12 @@ struct MF3Section
     QI::Float64
     tab::TabulatedFunction
     mf::Int32
+    awr::Float64   # AWR from section HEAD record (for per-section threshold)
 end
 
-# Backward-compatible constructor: default mf=3
-MF3Section(mt, QM, QI, tab) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(3))
+# Backward-compatible constructors
+MF3Section(mt, QM, QI, tab) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(3), 0.0)
+MF3Section(mt, QM, QI, tab, mf) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(mf), 0.0)
 
 """
     ENDFMaterial
@@ -89,7 +91,7 @@ function read_mf3_sections(io::IO, mat::Integer)
                 head = read_cont(io)
                 tab1 = read_tab1(io)
                 tf = TabulatedFunction(tab1)
-                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf))
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf, Int32(3), head.C2))
                 # Skip to SEND
                 _skip_to_send(io)
             catch e

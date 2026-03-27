@@ -478,7 +478,8 @@ function _get_legacy_section(result, mt::Int)
             (smt < 51 || smt > 91) && continue
             s_qi = sec.QI
             if s_qi < 0.0
-                s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                s_awr = sec.awr > 0.0 ? sec.awr : awr
+                s_thrx = s_awr > 0.0 ? -s_qi * (s_awr + 1) / s_awr : -s_qi
                 s_thrxx = round_sigfig(s_thrx, 7, +1)
                 min_thrxx = min(min_thrxx, s_thrxx)
             end
@@ -498,7 +499,8 @@ function _get_legacy_section(result, mt::Int)
                 s_qi = sec.QI
                 s_thrxx = 0.0
                 if s_qi < 0.0
-                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_awr = sec.awr > 0.0 ? sec.awr : awr
+                    s_thrx = s_awr > 0.0 ? -s_qi * (s_awr + 1) / s_awr : -s_qi
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
                     # Below threshold → skip (Fortran emerge line 4792)
                     if s_thrxx > 1.0 && (s_thrxx - e) > 1.0e-10 * s_thrxx
@@ -544,13 +546,16 @@ function _get_legacy_section(result, mt::Int)
         partials = filter(s -> part_lo <= Int(s.mt) <= part_hi, result.mf3_sections)
         sec_e = Float64[]
         sec_xs = Float64[]
-        for e in energies
+        has_rxs = hasproperty(result, :reaction_xs)
+        for (idx, e) in enumerate(energies)
             total_cp = 0.0
             for sec in partials
+                smt = Int(sec.mt)
                 s_qi = sec.QI
                 s_thrxx = 0.0
                 if s_qi < 0.0
-                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_awr = sec.awr > 0.0 ? sec.awr : awr
+                    s_thrx = s_awr > 0.0 ? -s_qi * (s_awr + 1) / s_awr : -s_qi
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
                     # Below threshold → skip
                     if s_thrxx > 1.0 && (s_thrxx - e) > 1.0e-10 * s_thrxx
@@ -565,6 +570,11 @@ function _get_legacy_section(result, mt::Int)
                     _threshold_interp(sec.tab, e, s_thrxx)
                 else
                     interpolate(sec.tab, e)
+                end
+                # Add RML reaction channel contribution (matching Fortran
+                # emerge: sn = gety1(bg) + res(1+itype) for reaction channels)
+                if has_rxs && haskey(result.reaction_xs, smt)
+                    bg += result.reaction_xs[smt][idx]
                 end
                 total_cp += round_sigfig(bg, 7)
             end
@@ -600,7 +610,8 @@ function _get_legacy_section(result, mt::Int)
                 s_qi = sec.QI
                 s_thrxx = 0.0
                 if s_qi < 0.0
-                    s_thrx = awr > 0.0 ? -s_qi * (awr + 1) / awr : -s_qi
+                    s_awr = sec.awr > 0.0 ? sec.awr : awr
+                    s_thrx = s_awr > 0.0 ? -s_qi * (s_awr + 1) / s_awr : -s_qi
                     s_thrxx = round_sigfig(s_thrx, 7, +1)
                 end
                 for (i, e) in enumerate(energies)
@@ -648,7 +659,10 @@ function _get_legacy_section(result, mt::Int)
         # the Q-value threshold.
         thresh = 0.0
         if qi < 0.0
-            thrx = awr > 0.0 ? -qi * (awr + 1) / awr : -qi
+            # Use per-section AWR (from MF3 HEAD) matching Fortran emerge
+            # which reads awrx from each section's CONT record (line 4753)
+            sec_awr = sec.awr > 0.0 ? sec.awr : awr
+            thrx = sec_awr > 0.0 ? -qi * (sec_awr + 1) / sec_awr : -qi
             thrxx = round_sigfig(thrx, 7, +1)
             thresh = round_sigfig(sec.tab.x[1], 7)
             if thresh < thrxx
