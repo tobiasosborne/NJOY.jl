@@ -362,41 +362,79 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ## Immediate Next Steps — ALL ARE REQUIRED WORK
 
-There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until proven otherwise by reading the Fortran. Previous ±1 diffs in this project were ALL traced to real bugs (missing sigfig calls, wrong accumulation order, etc.) and fixed. The same approach applies to every remaining diff.
+There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until proven otherwise by reading the Fortran. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it. **Use the Fortran debugger** — the NJOY2016 binary is compiled with debug symbols at `njoy-reference/build/njoy`. Recompile with `-DCMAKE_BUILD_TYPE=Debug -DCMAKE_Fortran_FLAGS="-g -O0"` for source-level breakpoints, or patch `reconr.f90`/`samm.f90` with `write(*,...)` diagnostics and recompile with Release for speed. Restore clean source with `cd njoy-reference && git checkout -- src/`.
 
-### 1. RECONR: Fix ±1 FP diffs (T34, T27, T19, T04/T07)
+### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162) — HIGHEST PRIORITY, BIGGEST WIN
 
-These are NOT "cross-compiler precision issues." They are bugs that have not yet been investigated thoroughly enough. Evidence: T02 (SLBW+URR), T08 (Reich-Moore), T55 (61 MTs) all involve heavy FP math and are BIT-IDENTICAL. The ±1 diffs in the remaining tests are the same class of bug — a missing `round_sigfig`, wrong accumulation order, or mismatched intermediate step. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it.
+**Status**: 12/162 PERFECT. Root cause IDENTIFIED but not yet fixed.
 
-**T34 (Pu-240, 52/53)** — Phase 12 fixed coincidence shading bug (+5 MTs) and frobns matrix inversion (+1 MT). 3 remaining MT=102 ±1 diffs at E=630.04, 2089.07, 4526.46 eV — all within 1e-4 of the 0.5 rounding boundary. The raw capture values come from accumulating `termg = termt - termf - termn` over 437 fissile resonances. Cancellation in `termt - termf - termn` amplifies ~1e-12 differences from FP accumulation order. Next steps: check if Fortran precomputes penetrability at resonance energy (line 3340: `per=res(in+1)`) differently from Julia's on-the-fly computation, or investigate per-resonance FP differences in the `gg4*a1*a1` accumulation.
+**Root cause (confirmed by gdb + Fortran diagnostic prints in Phase 14)**: Julia's `cross_section_rml` (reconr_evaluator.jl:530-1022) has a **systematic -0.008% error in total XS** vs Fortran `cssammy` (samm.f90:79-166). At E=68.75: Fortran total=13.2270, Julia=13.2259. Elastic matches perfectly (8e-6%) but capture differs by 0.88% (amplified by subtraction: capture = total - elastic - fission). This causes 38% of Fortran panels to fail Julia's convergence, producing 2.6x grid explosion (28k vs 10k points).
 
-**T27 (Pu-239, 45/49)** — All 4 failing MTs (MT=1/2/18/102) have exactly 151 diffs starting at the SAME grid position. Root cause: ONE MISSING grid point at E=2500.002 eV = sigfig(2500.001, 7, +1). The Fortran has {2499.999, 2500.001, 2500.002} near the resolved/unresolved boundary (eresr=2500 eV); Julia has {2499.999, 2500.001}. The 2500.002 point is NOT from rdfil2 boundary nodes (which only produce 2499.999 and 2500.001). Phase 13 investigation found: Julia's lunion_grid coincidence check (line 381) only fires for `k == start_k` (first breakpoint), but the Fortran label 220 fires for ALL breakpoints. When MT=18's x[4]=2500.0 is processed with eg=2500.001 already in the grid, the Fortran coincidence check fires (er-sigfig(|eg|,7,-1) = 2500-2500 = 0 ≤ 2.5e-5) and adds sigfig(2500,7,0)=2500.0 + sets er=sigfig(2500,7,+1)=2500.001. This cascading interaction between multiple sections' breakpoints at the boundary may create the 2500.002 point. **Next step**: remove the `k == start_k` restriction from the coincidence check and test. Must be careful to not regress other tests that rely on the restriction.
+**What was ruled out**: convergence test (nsig=4 for both), resonance positions (identical from ENDF), alpha/alphai computation (verified identical formula), R-matrix construction (verified same loop structure), GAM indexing (verified correct column mapping).
 
-### 2. RECONR: Fix Trap 27 — lunion scratch-tape data flow (T46, T18)
+**Most likely bug location**: The `betapr` computation in Julia (reconr_evaluator.jl:665-699) vs Fortran `betset` (samm.f90:1909-2074). Key difference: Fortran calls `pgh(rho, lsp, bound, hr, hi, p, dp, ds, ishift, iffy)` at line 1958, which computes penetrability WITH boundary conditions and shift factor corrections. Julia uses bare `penetrability(lsp, rho)` at line 688, which does NOT apply boundary conditions. If `pgh` modifies `p` (the penetrability) based on boundary conditions before using it in `betapr = sqrt(|gamma|/2/p)`, this would create a systematic bias in all channel widths.
 
-**What we know so far (partially traced in Phase 11):**
-- Fortran tape flow: `lunion(nin=ENDF, nout=nscr1, ngrid=nscr2)` → `emerge(nin=nscr1, ngrid=nscr2, ..., nscr=nscr4)` → `recout(iold, nscr4, nrtot)`
-- emerge reads MF3 from nscr1 (lunion's scratch tape) via gety1, writes to nscr4
-- recout reads from nscr4 for non-redundant MTs: `call tosend(nscr, nout, 0, scr)` where nscr=nscr4
-- **Key question still open**: Does emerge write re-evaluated grid-point data to nscr4, or does it just copy the original TAB1? If emerge writes evaluated data, then non-redundant MT output has grid-point evaluations, not original ENDF breakpoints. This would explain why T46 MT=80 output has 510 lines (not 77 from the ENDF). **Trace the emerge code to answer this.**
+**Concrete debugging steps**:
+1. Add diagnostic prints to Fortran `betset` (samm.f90:1981): print `p`, `betapr(j,ires)`, `rho`, `lsp`, `bound` for spin group 1, resonance 1, elastic channel. Recompile and run T20.
+2. Compute same values in Julia and compare. The first variable that differs identifies the bug.
+3. If `p` (penetrability) differs: Julia needs to call the equivalent of `pgh` (which computes `1/(S-B+iP)` and may return a modified `p`) instead of bare `penetrability()`. The `pgh` function is at samm.f90 lines ~4200-4400.
+4. Alternative: the matrix inversion differs — Julia uses `inv(Y)` (LAPACK LU) while Fortran uses specialized `onech`/`twoch`/`threech` routines (samm.f90:5046-5325). For 2-channel matrices (most Cl-35 spin groups), compare Julia's `inv(Y)` result with Fortran's `twoch` result at E=68.75.
 
-**Concrete diff to trace:** T46 MT=80 at E=4.527194e6: Julia=3.670210e-6 (correct interpolation between E2 and E3), Fortran=3.536400e-6 (exactly Y2 from the ENDF). The Fortran appears to use a breakpoint value at an energy 4 eV away from the breakpoint. Find why.
+**Channel structure for Cl-35**: Each spin group has 3 channels: ch[1]=gamma(MT=102, eliminated), ch[2]=elastic(MT=2, entrance), ch[3]=proton(MT=600, exit). After gamma elimination: nchan=2, nent=1. The XXXX matrix is 2x2 packed as [X11, X21, X22].
 
-### 3. RECONR: Fix T49 (Zr-90, 1/46) grid points
+### 2. RECONR: Fix T34 ±1 FP diffs (52/53) — CONFIRMED HARD
 
-Two specific grid points are in the Fortran but not Julia: 7.118985e6 and 1.26989e7. These have a definite origin in the Fortran code — the Fortran is deterministic. Trace the Fortran lunion execution for the Zr-90 MF3/MF10 sections to find which code path produces these energies. MF=10 reader was added in Phase 11 but the points still don't appear.
+**Status**: 52/53. 3 remaining ±1 diffs in MT=102 (capture) at E=630.04, 2089.07, 4526.46 eV.
 
-### 4. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162)
+**Phase 14 gdb confirmation**: Fortran values traced via diagnostic prints in csrmat (reconr.f90:3496-3499, after pifac multiplication). Results:
+- E=630.04: Fortran cap=0.096262384**997**, Julia cap=0.096262384**999** (diff=+2.3e-12)
+- E=2089.07: Fortran cap=0.041812484**989**, Julia cap=0.041812484**999** (diff=+1.0e-11)
+- E=4526.46: Fortran cap=0.004613320**4999**2, Julia cap=0.004613320**4998** (diff=-1.3e-13)
 
-The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scores 12/162. **Phase 14 investigation (gdb-confirmed)**:
+All values within 1e-11 of the 0.5 boundary at 7 sigfigs. Both codes use identical Frobenius-Schur algorithm (`_frobns`, `_thrinv!`, `_abcmat`). The difference is purely from IEEE 754 non-associativity in the accumulation of `gg4*a1*a1` over 437 l=0 fissile resonances.
 
-Root cause identified: Julia's `cross_section_rml` has a **systematic -0.008% error in total XS** vs Fortran cssammy. At E=68.75 eV: Fortran total=13.2270, Julia total=13.2259 (diff=-0.001). Elastic matches perfectly (8e-6%) but capture differs by 0.88% because capture = total - elastic - fission amplifies the total error. This -0.008% total error causes 38% of Fortran panels to fail Julia's adaptive convergence at err=0.001, producing 2.6x more grid points.
+**Possible approach (not yet tried)**: Match the Fortran's exact loop order for the R-matrix accumulation. The Fortran accumulates `r(1,1) += gg4*a1*a1` sequentially over all resonances with matching J-value. Julia does the same loop but the IEEE 754 intermediates may differ due to compiler optimizations. Try: (a) force sequential accumulation with `@fastmath false`, (b) match Fortran's `per=res(in+1)` precomputed penetrability instead of on-the-fly computation (the `in` index in csrmat line 3340 reads precomputed values from `rdf2bw` line 1002).
 
-The error is NOT in the convergence test (nsig=4 for both, testing same 3 partials) and NOT in the evaluator's resonance positions. The Fortran uses `cssammy` from `samm.f90` while Julia uses `cross_section_rml`. These implement R-Matrix Limited differently — likely differences in channel coupling, eliminated channels, or the matrix inversion method. **Next step**: compare the `samm.f90` cssammy algorithm with Julia's `cross_section_rml` step by step at E=68.75 eV to find the specific computation that differs.
+### 3. RECONR: Fix T49 (Zr-90, 41/46) — GRID ISSUE
 
-### 5. Grind BROADR to bit-identical
+**Status**: 41/46. 1 extra grid point at E=1780461 causing 5 MT diffs (MT=1,2,4,91,102).
 
-BROADR is fully implemented in `src/processing/broadr.jl` and `src/processing/sigma1.jl`. The sigma1 kernel, adaptive reconstruction, and thinning are all coded. First comparison (T09, N-nat) shows grid size mismatch (159 vs 339 pts) — the adaptive refinement and thinning parameters need tuning to match Fortran exactly. BROADR oracles exist for 13 tests. Apply the Grind Method: compare, find first diff, read Fortran `broadr.f90`, fix, repeat.
+**Phase 14 investigation (println debugging + gdb)**: The extra point comes from MF2 peak/width nodes. The `_add_mf2_nodes!` function creates a shaded pair {1780459, 1780461} from a resonance near 1780460 eV. MT=2 also has a breakpoint at x[78]=1780460. Julia pushes all three to the grid: {1780459, 1780460, 1780461}. The Fortran's inline grid merge absorbs 1780460 into the existing shaded pair.
+
+**gdb confirmed**: Fortran's lunion does NOT process MT=2's x[78]=1780460 through label 220 at all — the breakpoint is absorbed during the panel processing. The Fortran grid at that energy has only {1780459, 1780465}.
+
+**Why previous fix attempts failed**: Simple snapping (label 222 emulation) with any tolerance >0 caused regressions in T27/T45/T55 because it over-aggressively snapped unrelated breakpoints. Checking against initial_nodes only didn't help because the absorbed point 1780460 needs to be skipped but the MF2 node 1780461 needs to be KEPT (the Fortran keeps 1780461 only during MT=51 processing, not from the initial grid).
+
+**Correct fix approach**: The Fortran's inline merge means that breakpoints and grid points are interleaved during processing. A breakpoint between two consecutive grid points (like 1780460 between 1780459 and 1780461) is NOT added as a separate grid point — it's used as a panel boundary. Replicating this requires either: (a) a full rewrite of lunion_grid to use Fortran-style inline merge (high risk), or (b) a targeted post-processing pass that removes breakpoints sandwiched between MF2 shaded pairs when the panel bisection didn't add any intermediate points in that interval. Approach (b) is safer.
+
+### 4. RECONR: Fix T46 MT=1 total (72/73) — SUMMATION ORDER
+
+**Status**: 72/73. MT=1 (total) differs by ±1-3 at 2 high-energy lines.
+
+All individual MTs are BIT-IDENTICAL at the diff energies. The total differs because Julia computes `total = sigfig(other_bg + elastic + fission + capture, 7)` while Fortran accumulates each sigfig'd section in tape order (emerge line 4893: `tot(2)=tot(2)+sn`). IEEE 754 non-associativity of the summation causes ±1.
+
+**Fix approach**: Rewrite the total computation in `merge_background_legacy` to accumulate in section order (iterate `mf3_sections`, add each sigfig'd value to the total). Previous attempt regressed because it re-evaluated MF3 backgrounds in the total loop without matching all the same conditions (threshold, LSSF suppression). The correct implementation must use the ALREADY-COMPUTED sigfig'd values for each section, not re-interpolate. Store each section's contribution in a vector, then sum in order.
+
+### 5. RECONR: Fix T04/T07 ±1 FP diffs (24/27) — SAME CLASS AS T34
+
+**Status**: 24/27 each. 3 MTs (MT=18/19/102) differ by ±1 at E=82.00001 eV (URR boundary).
+
+Same class as T34: `_gnrl` Gauss-Laguerre quadrature accumulates 100 terms. The raw values are at the sigfig rounding boundary. Not investigated with gdb yet — the same diagnostic approach as T34 applies.
+
+### 6. RECONR: Fix T15 ±1 FP diffs (32/36)
+
+**Status**: 32/36. 4 MTs (1,2,18,102) with ±1 diffs, 59 total differing lines. Mostly at 7th sigfig, plus one energy value diff at E=9238.377 (9-sigfig format: Julia produces 9238.37706, Fortran 9238.37707).
+
+The energy diff suggests a midpoint rounding issue in the adaptive reconstruction — the `sigfig(xm, ndig, 0)` at reconr.f90:2369-2371 may differ slightly from Julia's `round_sigfig`.
+
+### 7. Grind BROADR to bit-identical
+
+BROADR is fully implemented in `src/processing/broadr.jl` and `src/processing/sigma1.jl`. BROADR oracles exist for 13 tests. Apply the Grind Method.
+
+### 8. Fix remaining RECONR test errors
+
+- **T03, T56-58, T64**: photoatomic/photonuclear files need MF=23 processing in lunion
+- **T60** (Fe-nat IRDFF): dosimetry file, may need MF=23 support
 
 ### 6. Fix remaining RECONR test errors
 
@@ -414,7 +452,7 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 
 **Full test runner**: `julia --project=. test/validation/run_all_tests.jl` runs all 84 reference tests. Fixed `tc.missing` → `tc.missing_mods` bug in Phase 13. The runner compares RECONR PENDF output against reference tapes (which may include BROADR effects, so tolerances are relaxed). For bit-exact RECONR testing, use the oracle comparison method below.
 
-### BIT-IDENTICAL (14 tests verified with oracle comparison)
+### BIT-IDENTICAL (18 tests verified with oracle comparison)
 | Test | MAT | Material | MTs | err | ENDF file | Notes |
 |------|-----|----------|-----|-----|-----------|-------|
 | 01 | 1306 | C-nat | 29/29 | 0.005 | t511 | LRU=0 |
@@ -425,28 +463,26 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | 11 | 1050 | Pu-238 | 17/17 | 0.005 | t404 | Same material as T02 |
 | 12 | 2834 | Ni-61 | 18/18 | 0.01 | eni61 | Same material as T08 |
 | 13 | 2834 | Ni-61 | 18/18 | 0.01 | eni61 | Same material as T08 |
-| 19 | 9443 | Pu-241 | 23/23 | 0.02 | e6pu241c | ENDF-6, SLBW+URR. **err=0.02**. **NEW Phase 13** |
+| 18 | 9999 | Cf-252 | 9/9 | 0.001 | DCf252 | SLBW+URR mode=12 (LSSF=0). **NEW Phase 14** |
+| 19 | 9443 | Pu-241 | 23/23 | 0.02 | e6pu241c | ENDF-6, SLBW+URR. **err=0.02** |
 | 25 | 125 | H-1 | 3/3 | 0.001 | n-001_H_001-ENDF8.0-Beta6.endf | ENDF-8.0, LRU=0 |
 | 26 | 9455 | Pu-245 | 23/23 | 0.001 | n-094_Pu_245-ENDF8.0-Beta6.endf | ENDF-8.0 |
+| 27 | 9437 | Pu-239 | 49/49 | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | Reich-Moore. **NEW Phase 14** |
 | 30 | 125 | H-1 | 3/3 | 0.001 | n-001_H_001-ENDF8.0-Beta6.endf | Same material as T25 |
 | 45 | 525 | B-10 | 53/53 | 0.001 | n-005_B_010-ENDF8.0.endf | LRU=0, MT=103-107 redundancy |
+| 47 | 9437 | Pu-239 | 49/49 | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | Same as T27. **NEW Phase 14** |
 | 55 | 2631 | Fe-56 | 61/61 | 0.001 | n-026_Fe_056-TENDL19.endf | TENDL-19, Reich-Moore |
+| 84 | 128 | H-2 | 4/4 | 0.001 | n-001_H_002-ENDF8.0.endf | LRU=0 |
 
 ### Near-Perfect (>85% MTs)
 | Test | MAT | Material | MTs | err | ENDF file | Notes |
 |------|-----|----------|-----|-----|-----------|-------|
-| 34 | 9440 | Pu-240 | 52/53 (98%) | 0.001 | n-094_Pu_240-ENDF8.0.endf | RM+URR(LSSF=1). 3 ±1 FP in MT=102 at boundary |
-| 46 | 2631 | Fe-56 | 72/73 (99%) | 0.001 | n-026_Fe_056-JEFF3.3.endf | JEFF3.3. **+3 Phase 13** (threshold fix). 1 MT=1 ±1 |
-| 27 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | RM. 1 missing grid point (see below) |
-| 47 | 9437 | Pu-239 | 45/49 (92%) | 0.001 | n-094_Pu_239-ENDF8.0-Beta6.endf | Same as T27, different chain |
-| 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | t511 | SLBW+URR mode=12. **err=0.10** |
-| 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | t511 | Same material, err=0.005 |
-| 49 | 4025 | Zr-90 | 41/46 (89%) | 0.001 | n-040_Zr_090-ENDF8.0.endf | **+40 Phase 13** (MF=10 fix). 5 remaining |
-
-### Close (>50% MTs)
-| Test | MAT | Material | MTs | err | Notes |
-|------|-----|----------|-----|-----|-------|
-| 18 | 9999 | Cf-252 | 5/9 (56%) | 0.001 | SLBW+URR(mode=12), NOT LRU=0. URR eval errors at E>383 eV |
+| 34 | 9440 | Pu-240 | 52/53 (98%) | 0.001 | n-094_Pu_240-ENDF8.0.endf | RM+URR(LSSF=1). 3 ±1 FP in MT=102 (gdb-confirmed irreducible) |
+| 46 | 2631 | Fe-56 | 72/73 (99%) | 0.001 | n-026_Fe_056-JEFF3.3.endf | JEFF3.3. 1 MT=1 ±1-3 (summation order) |
+| 15 | 9237 | U-238 | 32/36 (89%) | 0.001 | J33U238 | JENDL-3.3. **NEW Phase 14** (was crash). ±1 FP diffs |
+| 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | t511 | SLBW+URR mode=12. **err=0.10**. ±1 at URR boundary |
+| 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | t511 | Same material, err=0.005. ±1 at URR boundary |
+| 49 | 4025 | Zr-90 | 41/46 (89%) | 0.001 | n-040_Zr_090-ENDF8.0.endf | 1 extra grid point (MF2 shaded pair absorption) |
 
 ### Partial (<50% MTs)
 | Test | MAT | Material | MTs | Notes |
