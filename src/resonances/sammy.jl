@@ -173,11 +173,12 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
                     ex = sqrt(ex)
                     rho = zkte[ic] * ex
                     lsp = sg.lspin[ic]
-                    # Compute penetrability at resonance energy
-                    # TODO: enable Coulomb for charged-particle channels (zeta_ch[ic] != 0)
-                    # betapr values verified identical to Fortran with Coulomb enabled,
-                    # but per-energy psmall interaction across spin groups needs debugging.
-                    p_res = _sammy_pen(rho, Int(lsp), sg.bound[ic], Int(pp.ishift))
+                    # Compute penetrability at resonance energy (Coulomb for l=0 only)
+                    # l>0 Coulomb is correct numerically but causes ill-conditioned
+                    # Y-matrices in the cross section extraction (negligible XS anyway)
+                    eta_r = (zeta_ch[ic] != 0.0 && lsp == 0) ? zeta_ch[ic] / ex : 0.0
+                    p_res = eta_r != 0.0 ? _sammy_pen_coulomb(rho, Int(lsp), eta_r) :
+                            _sammy_pen(rho, Int(lsp), sg.bound[ic], Int(pp.ishift))
                     if p_res <= 0.0
                         p_res = 1.0
                     end
@@ -286,9 +287,11 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
             sinsqr[ic] = sq
             sin2ph[ic] = s2p
 
-            # Penetrability and inverse (S-B+iP)
-            # TODO: enable Coulomb pgh for charged-particle channels (zeta_ch[ic] != 0)
-            p_val, hr, hi, iffy = _sammy_pgh(rho, lsp, sg.bound[ic], Int(pp.ishift))
+            # Penetrability and inverse (S-B+iP) — Coulomb for l=0 only
+            eta_e = (zeta_ch[ic] != 0.0 && lsp == 0) ? zeta_ch[ic] / ex : 0.0
+            p_val, hr, hi, iffy = eta_e != 0.0 ?
+                _sammy_pgh_coulomb(rho, lsp, sg.bound[ic], Int(pp.ishift), eta_e) :
+                _sammy_pgh(rho, lsp, sg.bound[ic], Int(pp.ishift))
 
             # Fortran psmall condition (samm.f90 setr lines 3415-3416):
             # Normal path if: iffy==0 AND NOT (ishift<=0 AND (1-p*rmat_i==1 OR p<tiny))
@@ -481,6 +484,10 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
         end
     end
 
+    # Total = elastic + absorption (Fortran cssammy line 108:
+    # sigp(1) = sigmas(1) + sigmas(2), computed BEFORE proton subtraction)
+    sig_total = sig_elastic + sig_capture + sig_fission
+
     # Subtract non-elastic reaction channels from capture (unitarity)
     for (i, pp) in enumerate(params.particle_pairs)
         if pp.mt != 2 && pp.mt != 102
@@ -488,7 +495,6 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
         end
     end
 
-    sig_total = sig_elastic + sig_capture + sig_fission
     return CrossSections(sig_total, sig_elastic, sig_fission, sig_capture)
 end
 
