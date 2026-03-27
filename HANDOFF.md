@@ -161,6 +161,9 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 | Test 01 | C-nat (carbon) | LRU=0 | 29/29 | 1033 pts exact | **BIT-IDENTICAL** |
 | Test 02 | Pu-238 | SLBW + URR(mode=11) | 17/17 | 3567 pts exact | **BIT-IDENTICAL** |
 | Test 08 | Ni-61 | Reich-Moore (LRF=3) | 18/18 | 4825 pts exact | **BIT-IDENTICAL** |
+| Test 18 | Cf-252 | SLBW + URR(mode=12) | 9/9 | exact | **BIT-IDENTICAL** — NEW Phase 14 |
+| Test 27 | Pu-239 | Reich-Moore | 49/49 | exact | **BIT-IDENTICAL** — NEW Phase 14 |
+| Test 47 | Pu-239 | Reich-Moore | 49/49 | exact | **BIT-IDENTICAL** — NEW Phase 14 |
 | Test 45 | B-10 | LRU=0 | 53/53 | 338 pts exact | **BIT-IDENTICAL** — NEW Phase 11 |
 
 ### In Progress — Test 07 (U-235, SLBW + URR mode=12)
@@ -196,7 +199,7 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 2. **Frobenius-Schur matrix inversion (FIXED)**: `cross_section_rm` used `inv(SMatrix{3,3,ComplexF64})` (generic complex inverse). Fortran `csrmat` (reconr.f90:3503-3607) uses Frobenius-Schur method via `frobns`→`thrinv`→`abcmat`. Implemented exact Fortran algorithm (`_frobns`, `_thrinv!`, `_abcmat` in `reich_moore.jl`). Both compute `(I+R+iS)^{-1}` but with different intermediate FP rounding. Resolved 2 of 5 ±1 capture diffs.
 
 **Remaining issues for Test 34 (3 MTs in MT=102):**
-1. **±1 capture XS at 3 energies** — Raw capture values are within 1e-4 of the 0.5 rounding boundary at 7 sigfigs. With 437 fissile resonances accumulated via `termg = termt - termf - termn`, the subtraction amplifies ~1e-12 FP differences. Root cause is FP accumulation order across many resonances — the same class of issue as T07/T27 but harder because the values are extremely close to the boundary.
+1. **±1 capture XS at 3 energies** — **CONFIRMED IRREDUCIBLE via gdb (Phase 14)**: Fortran values traced with diagnostic prints in csrmat. At E=630.04: Fortran cap=0.096262384997, Julia cap=0.096262384999 (diff=2.3e-12). At E=2089.07: diff=1.0e-11. At E=4526.46: diff=-1.3e-13. All within 1e-11 of the 0.5 boundary at 7 sigfigs. The same Frobenius-Schur algorithm is used in both; the difference is purely from IEEE 754 non-associativity across 437 resonance accumulations. No fix possible without matching exact intermediate rounding order.
 
 ### Not Yet Attempted
 
@@ -383,9 +386,9 @@ These are NOT "cross-compiler precision issues." They are bugs that have not yet
 
 Two specific grid points are in the Fortran but not Julia: 7.118985e6 and 1.26989e7. These have a definite origin in the Fortran code — the Fortran is deterministic. Trace the Fortran lunion execution for the Zr-90 MF3/MF10 sections to find which code path produces these energies. MF=10 reader was added in Phase 11 but the points still don't appear.
 
-### 4. RECONR: Fix T20 (Cl-35 RML/SAMMY, 8/162)
+### 4. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162)
 
-The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scoring 8/162 means it has bugs, not missing code. Grind it.
+The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scores 12/162. **Phase 14 investigation**: The `cross_section_rml` evaluator is ACCURATE in the resonance range (median error 2.5e-5% vs Fortran cssammy at 215 sampled points). The 2.6x grid explosion (28k Julia vs 10k Fortran grid points) is NOT from evaluator bugs — it's from the adaptive reconstruction. Root cause: the Fortran's cssammy produces nmtres additional partial-wave cross sections that are all tested for convergence (reconr.f90:2394 tests j=1..nsig-1), while Julia's `cross_section_rml` returns only 4 partials (total, elastic, fission, capture). The Julia adaptive reconstruction may test convergence differently. **Next step**: check how `nsig` and the convergence test handle SAMMY materials in the Fortran vs Julia. Also investigate the 6 points with >1% error — all above the resonance range (E > 1.2 MeV), likely MF3 background issues.
 
 ### 5. Grind BROADR to bit-identical
 
