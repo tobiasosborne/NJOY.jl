@@ -366,7 +366,7 @@ There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until pr
 
 ### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162) — HIGHEST PRIORITY, BIGGEST WIN
 
-**Status**: 12/162 PERFECT. Two bugs found in Phase 15, one fixed.
+**Status**: 12/162 PERFECT. Three bugs found in Phase 15, two fixed. Total now matches Fortran (0.001%).
 
 **Phase 15 findings (supersede all previous T20 analysis)**:
 
@@ -389,11 +389,14 @@ There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until pr
 
 **Remaining issue**: The psmall condition in Julia (sammy.jl line 294) uses `p_val > 1e-8`. The Fortran (samm.f90 setr line 3415-3416) uses a more nuanced check: `NOT (ishift<=0 AND (1-p*rmat_i==1 OR p<1e-8))`. This FP-precision check (`1-p*rmat_i==1`) causes different spin groups to take psmall vs normal path depending on the actual R-matrix values. Julia has this condition implemented but the interaction between psmall scaling for channel 1 (l=1 elastic, always psmall) and normal path for channel 2 (proton, sometimes psmall) produces different XXXX matrices.
 
+**Bug 3 — NOT YET FIXED (80x proton XS discrepancy)**: With Coulomb l=0 enabled, Julia computes proton=0.303 barns vs Fortran=24.1 (80x too small). All inputs verified identical: betapr matches Fortran exactly (via diagnostic prints), alpha formula matches, R-matrix construction formula matches, sectio extraction formula matches. The XXXX off-diagonal |XXXX[1,2]|^2 = 1.76e-12 in Julia vs ~1.4e-10 in Fortran. The R12 ≈ 1.22 in Julia; needs ~14 for Fortran's proton. Something in the matrix computation differs despite identical inputs.
+
 **Concrete next steps for T20**:
-1. Add per-spin-group diagnostic prints to BOTH Fortran `sectio` (samm.f90) and Julia `cross_section_sammy` at E=1e-5. Print crss(1) (elastic), crss(2) (absorption), crss(3) (proton) per spin group. Find the FIRST spin group where values diverge.
-2. For the divergent spin group, print the full Y-matrix, Yinv, R-matrix, and XXXX matrix. The first matrix element that differs identifies the bug.
-3. Most likely fix: ensure the psmall scaling + matrix inversion matches Fortran's `twoch` for the mixed case (one channel psmall, one channel normal).
-4. Also need: individual channel MT output (MT=600 etc.) from the evaluator to the PENDF writer.
+1. **Add XXXX diagnostic to Fortran**: patch `setxqx` (samm.f90:6251-6282) to print xxxxr(2), xxxxi(2) for SG2 (n=2) at E=1e-5. Compare with Julia's XXXX[1,2] = -1.33e-6 + 2.01e-9i. The first value that differs identifies the bug.
+2. **Also check XQ = Yinv*R**: print xqr(1,2), xqi(1,2) in Fortran `setxqx`. Julia gives XQ[1,2] ≈ -3.97e-6i.
+3. **Also check Yinv**: print yinv(ij) for the 2x2 system. Julia gives Yinv[1,1] ≈ 3.26e-6i, Yinv[1,2] ≈ -1.15e-10.
+4. **Root cause hypothesis**: the Fortran `twoch` 2x2 matrix inversion may handle the nearly-diagonal complex Y-matrix differently from Julia's `inv()`, giving a larger Yinv[1,2] that propagates to a larger XXXX[1,2].
+5. **Also need**: individual channel MT output (MT=600 etc.) from evaluator to PENDF writer. Currently only 4 components returned.
 
 **Infrastructure already in place** (sammy.jl):
 - `_coulomb_pen_shift_coulx`: full coulx algorithm (xsigll→asymp2→taylor→getfg→getps)
