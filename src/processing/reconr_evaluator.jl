@@ -190,7 +190,9 @@ function sigma_mf2(E::Real, mf2::MF2Data)
                     elastic = max(0.0, sigp.elastic)
                     fission = max(0.0, sigp.fission)
                     capture = max(0.0, sigp.capture)
-                    sig = sig + abn * CrossSections(total, elastic, fission, capture)
+                    # Preserve individual reaction channels (RML MT=600 etc.)
+                    rxns = Dict{Int,Float64}(k => max(0.0, v) for (k,v) in sigp.reactions)
+                    sig = sig + abn * CrossSections(total, elastic, fission, capture, rxns)
                 catch e
                     @warn "sigma_mf2: cross_section failed at E=$E_f for range [$(rng.EL), $(rng.EH)]" exception=(e, catch_backtrace())
                 end
@@ -1141,6 +1143,11 @@ function merge_background_legacy(energies::Vector{Float64},
                 fission += bg
             elseif mt == 102
                 capture += bg
+            elseif haskey(res_xs[i].reactions, mt)
+                # RML reaction channel: add MF3 bg + resonance XS together,
+                # then round (matching Fortran emerge: sn = bg + res(1+itype),
+                # followed by sigfig(sn,7,0))
+                other_bg += round_sigfig(bg + res_xs[i].reactions[mt], 7)
             else
                 other_bg += round_sigfig(bg, 7)
             end

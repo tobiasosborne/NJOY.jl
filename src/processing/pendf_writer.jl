@@ -675,6 +675,11 @@ function _get_legacy_section(result, mt::Int)
             else
                 interpolate(sec.tab, e)
             end
+            # For RML reaction channels, add the resonance contribution
+            # (matching Fortran emerge: sn = gety1(bg) + res(1+itype))
+            if hasproperty(result, :reaction_xs) && haskey(result.reaction_xs, mt)
+                bg += result.reaction_xs[mt][idx]
+            end
             bg = round_sigfig(bg, 7)
 
             # Set xs=0 at threshold (line 4795): Fortran uses

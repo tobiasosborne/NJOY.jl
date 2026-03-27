@@ -367,6 +367,11 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
             xq = yinv_full * rmat_full
 
             # XXXX = sqrt(P)/L * XQ * sqrt(P)  (symmetric, lower triangular packed)
+            # Fortran setxqx computes XQ(k,i) = Σ_j R(k,j)*Yinv(j,i) = (R*Yinv)_{k,i}
+            # then uses XQ(j,i) in the XXXX loop.  For symmetric R,Yinv:
+            #   (R*Yinv)_{j,i} = (Yinv*R)_{i,j}
+            # Julia computes xq = Yinv*R, so xq[i,j] = (Yinv*R)_{i,j}.
+            # Therefore we must read xq[i,j] (not xq[j,i]) to match Fortran.
             xxxxr = zeros(typeof(float(E)), ntriag)
             xxxxi = zeros(typeof(float(E)), ntriag)
             ij = 0
@@ -375,7 +380,7 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
                 pli = rootp[i] * elinvi[i]
                 for j in 1:i
                     ij += 1
-                    xq_val = xq[j, i]
+                    xq_val = xq[i, j]
                     xqr_v = real(xq_val)
                     xqi_v = imag(xq_val)
                     xxxxr[ij] = rootp[j] * (xqr_v * plr - xqi_v * pli)
@@ -489,13 +494,18 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
     sig_total = sig_elastic + sig_capture + sig_fission
 
     # Subtract non-elastic reaction channels from capture (unitarity)
+    # and collect individual reaction channel XS
+    rxns = Dict{Int,typeof(float(E))}()
     for (i, pp) in enumerate(params.particle_pairs)
         if pp.mt != 2 && pp.mt != 102
             sig_capture -= sigmas[i]
+            if pp.mt != 18
+                rxns[pp.mt] = sigmas[i]
+            end
         end
     end
 
-    return CrossSections(sig_total, sig_elastic, sig_fission, sig_capture)
+    return CrossSections(sig_total, sig_elastic, sig_fission, sig_capture, rxns)
 end
 
 # ---- Helper: penetrability P(rho) for pgh ----

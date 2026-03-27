@@ -29,18 +29,31 @@ struct CrossSections{T<:Real}
     elastic::T     # sigma_elastic
     fission::T     # sigma_fission
     capture::T     # sigma_capture (radiative)
+    reactions::Dict{Int,T}  # mt → XS for individual reaction channels (MT=600 etc.)
 end
 
-CrossSections() = CrossSections(0.0, 0.0, 0.0, 0.0)
+# Backward-compatible constructors (no reactions)
+CrossSections(total::T, elastic::T, fission::T, capture::T) where {T<:Real} =
+    CrossSections(total, elastic, fission, capture, Dict{Int,T}())
+CrossSections() = CrossSections(0.0, 0.0, 0.0, 0.0, Dict{Int,Float64}())
 
 function Base.:+(a::CrossSections, b::CrossSections)
+    T = typeof(a.total + b.total)
+    rxns = if isempty(a.reactions) && isempty(b.reactions)
+        Dict{Int,T}()
+    else
+        merge(+, Dict{Int,T}(a.reactions), Dict{Int,T}(b.reactions))
+    end
     CrossSections(a.total + b.total, a.elastic + b.elastic,
-                  a.fission + b.fission, a.capture + b.capture)
+                  a.fission + b.fission, a.capture + b.capture, rxns)
 end
 
 function Base.:*(s::Real, xs::CrossSections)
+    T = typeof(s * xs.total)
+    rxns = isempty(xs.reactions) ? Dict{Int,T}() :
+           Dict{Int,T}(k => s*v for (k,v) in xs.reactions)
     CrossSections(s * xs.total, s * xs.elastic,
-                  s * xs.fission, s * xs.capture)
+                  s * xs.fission, s * xs.capture, rxns)
 end
 Base.:*(xs::CrossSections, s::Real) = s * xs
 

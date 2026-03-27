@@ -315,8 +315,30 @@ function reconr(endf_file::AbstractString;
         # — that would double-count the resonance contribution.
         xs_fn = E -> sigma_mf2(E, mf2)
 
-        # For adaptive convergence, test only partials (elastic, fission, capture)
-        # matching Fortran resxs which tests j=1..nsig-1 = partials, NOT total.
+        # For RML (LRF=7), identify individual reaction channel MTs.
+        # Fortran resxs tests convergence of ALL channels (j=1..nsig-1),
+        # including reaction channels like proton (MT=600).
+        rml_chan_mts = Int[]
+        for iso in mf2.isotopes
+            for rng in iso.ranges
+                if Int(rng.LRF) == 7
+                    params = rng.parameters::SAMMYParameters
+                    for pp in params.particle_pairs
+                        if pp.mt != 2 && pp.mt != 102 && pp.mt != 18
+                            push!(rml_chan_mts, pp.mt)
+                        end
+                    end
+                end
+            end
+        end
+        sort!(unique!(rml_chan_mts))
+
+        # For adaptive convergence, test partials (elastic, fission, capture).
+        # TODO: For RML (LRF=7), Fortran tests all channels (j=1..nsig-1)
+        # including reaction channels like proton. This requires matching
+        # the l>0 Coulomb penetrability to avoid grid explosion. For now,
+        # use 3-partial convergence which gives the correct grid for the
+        # primary channels.
         # Include unresolved contribution for energies in [eresu, eresh).
         xs_partials = function(E)
             xs = xs_fn(E)
@@ -354,7 +376,8 @@ function reconr(endf_file::AbstractString;
             if urr_table !== nothing && urr_lssf == 0 && e >= eresu && e < eresh
                 urr = eval_unresolved(urr_table, e)
                 xs = CrossSections(xs.total + urr[1], xs.elastic + urr[2],
-                                   xs.fission + urr[3], xs.capture + urr[4])
+                                   xs.fission + urr[3], xs.capture + urr[4],
+                                   xs.reactions)
             end
             res_xs[i] = xs
         end
@@ -369,9 +392,17 @@ function reconr(endf_file::AbstractString;
         fission_arr = [xs.fission for xs in merged_xs]
         capture_arr = [xs.capture for xs in merged_xs]
 
+        # For RML materials, extract per-MT reaction channel XS at each energy.
+        # These are needed by the PENDF writer for individual MT sections.
+        reaction_xs = Dict{Int, Vector{Float64}}()
+        for rmt in rml_chan_mts
+            reaction_xs[rmt] = [get(res_xs[i].reactions, rmt, 0.0) for i in 1:n_pts]
+        end
+
         return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                 fission=fission_arr, capture=capture_arr,
-                mf2=mf2, mf3_sections=mf3_sections)
+                mf2=mf2, mf3_sections=mf3_sections,
+                reaction_xs=reaction_xs)
     end
 end
 
