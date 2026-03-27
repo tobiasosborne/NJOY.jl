@@ -57,10 +57,14 @@ function reconstruct(endf_file::AbstractString;
         actual_mat = _detect_mat(io, mat)
 
         # Read MF2 (filter by MAT for multi-material tapes)
+        # Photonuclear/photoatomic files (g- prefix) have no MF2 — create empty
         seekstart(io)
         found = find_section(io, 2, 151; target_mat=actual_mat)
-        found || error("reconstruct: MF2/MT151 not found for MAT=$actual_mat in $endf_file")
-        mf2 = read_mf2(io)
+        mf2 = if found
+            read_mf2(io)
+        else
+            _empty_mf2(io, actual_mat)
+        end
 
         # Read MF3 sections
         mf3_sections = read_mf3_sections(io, actual_mat)
@@ -193,10 +197,14 @@ function reconr(endf_file::AbstractString;
     open(endf_file, "r") do io
         actual_mat = _detect_mat(io, mat)
 
+        # Photonuclear/photoatomic files have no MF2 — create empty
         seekstart(io)
         found = find_section(io, 2, 151; target_mat=actual_mat)
-        found || error("reconr: MF2/MT151 not found for MAT=$actual_mat in $endf_file")
-        mf2 = read_mf2(io)
+        mf2 = if found
+            read_mf2(io)
+        else
+            _empty_mf2(io, actual_mat)
+        end
 
         mf3_sections = read_mf3_sections(io, actual_mat)
 
@@ -338,16 +346,17 @@ function reconr(endf_file::AbstractString;
         # Include unresolved contribution for energies in [eresu, eresh).
         xs_partials = function(E)
             xs = xs_fn(E)
+            el = xs.elastic; fi = xs.fission; ca = xs.capture
             if urr_table !== nothing && urr_lssf == 0 && E >= eresu && E < eresh
                 urr = eval_unresolved(urr_table, E)
-                return (xs.elastic + urr[2], xs.fission + urr[3], xs.capture + urr[4])
+                el += urr[2]; fi += urr[3]; ca += urr[4]
             end
             if isempty(rml_chan_mts)
-                (xs.elastic, xs.fission, xs.capture)
+                (el, fi, ca)
             else
                 chan_vals = ntuple(i -> get(xs.reactions, rml_chan_mts[i], 0.0),
                                   length(rml_chan_mts))
-                (xs.elastic, xs.fission, xs.capture, chan_vals...)
+                (el, fi, ca, chan_vals...)
             end
         end
 

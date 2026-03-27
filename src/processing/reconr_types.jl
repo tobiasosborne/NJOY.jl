@@ -263,4 +263,30 @@ function _detect_mat(io::IO, requested::Integer)
     error("reconstruct: could not detect MAT number from file")
 end
 
+"""
+    _empty_mf2(io, mat) -> MF2Data
+
+Create a synthetic empty MF2Data for files that have no MF2/MT151 (e.g.
+photonuclear/photoatomic ENDF files). Reads ZA/AWR from the first MF1 or
+MF3 HEAD record.
+"""
+function _empty_mf2(io::IO, mat::Integer)
+    za = Float64(mat) * 1000.0  # fallback ZA
+    awr = 1.0
+    seekstart(io)
+    while !eof(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        mat_val = _parse_int(p[67:70])
+        mf_val  = _parse_int(p[71:72])
+        mt_val  = _parse_int(p[73:75])
+        if mat_val == mat && mf_val in (1, 3) && mt_val > 0
+            za  = parse_endf_float(p[1:11])
+            awr = parse_endf_float(p[12:22])
+            break
+        end
+    end
+    MF2Data(za, awr, IsotopeData[])
+end
+
 # _parse_int is already defined in endf/io.jl -- no need to redefine here
