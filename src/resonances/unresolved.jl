@@ -340,9 +340,9 @@ function _csunr2(E::Float64, urr::URR2Data)
         gfx < 1e-8 && (gfx = 0.0)
 
         gj = (2 * seq.J + 1) / (4 * spi + 2)
-        mu = Int(seq.AMUN)
-        nu = Int(seq.AMUF)
-        lamda = Int(seq.AMUX)
+        mu = round(Int, seq.AMUN)
+        nu = round(Int, seq.AMUF)
+        lamda = round(Int, seq.AMUX)
 
         vl, ps = _unfac(ll, rho, rhoc, seq.AMUN)
         vl *= e2

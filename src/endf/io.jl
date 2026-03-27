@@ -99,7 +99,7 @@ function parse_endf_line(line::AbstractString)
     return (fields, mat, mf, mt, ns)
 end
 
-_parse_int(s::AbstractString) = (t = strip(s); isempty(t) ? Int32(0) : parse(Int32, t))
+_parse_int(s::AbstractString) = (t = strip(s); isempty(t) ? Int32(0) : something(tryparse(Int32, t), Int32(0)))
 
 # --- Readers ---
 
