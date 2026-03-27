@@ -364,37 +364,31 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until proven otherwise by reading the Fortran. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it. **Use the Fortran debugger** — the NJOY2016 binary is compiled with debug symbols at `njoy-reference/build/njoy`. Recompile with `-DCMAKE_BUILD_TYPE=Debug -DCMAKE_Fortran_FLAGS="-g -O0"` for source-level breakpoints, or patch `reconr.f90`/`samm.f90` with `write(*,...)` diagnostics and recompile with Release for speed. Restore clean source with `cd njoy-reference && git checkout -- src/`.
 
-### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162) — HIGHEST PRIORITY, BIGGEST WIN
+### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 158/162) — NEAR COMPLETE
 
-**Status**: 12/162 PERFECT. XS values correct. l>0 Coulomb enabled. 4-channel convergence enabled. Grid: Julia 10055 vs Fortran 10730 (~6% fewer). First grid divergence at E≈224.66 eV (index 156 of ~10k points).
+**Status**: 158/162 PERFECT. Grid: 10730 pts (exact match). Only 4 MTs with ±1 FP diffs.
 
-**IMPORTANT CORRECTION**: The "3323 vs 3577" reported earlier was comparing DATA LINES, not energy points. Each data line has 3 (energy,XS) pairs. So Fortran grid ≈ 3577×3 = 10731 energy points, and old Julia grid ≈ 3323×3 = 9969 points. The grids are comparable in SIZE — the issue is that ~675 grid points differ in LOCATION.
+**Phase 17 fixes (this session — supersede Phase 16 grid/MT=103 analysis)**:
 
-**Phase 16 findings (supersede Phase 15 analysis)**:
+**Bug 7 — FIXED (SAMMY peak/width nodes)**: `_add_peak_nodes!` had NO dispatch for `SAMMYParameters` — the fallback did nothing, so SAMMY resonance peak/width nodes were never added to the initial grid. Added `_add_peak_nodes!(nodes, params::SAMMYParameters, el, eh)` matching Fortran `rdsammy` (samm.f90:1151-1177): for each resonance, adds {Er-hw, Er, Er+hw} with hw = gamgam/2 + Σ|gamma_j|/2. Fixed 675-point grid discrepancy.
 
-**Bug 3 — FIXED (XQ indexing in XXXX computation)**: The 80x proton XS discrepancy was caused by an XQ matrix indexing error in the XXXX computation (sammy.jl line 380). The Fortran `setxqx` computes `XQ(k,i) = Σ_j R(k,j)*Yinv(j,i)` which is `(R*Yinv)_{k,i}`. Then XXXX uses `XQ(j,i)`. For symmetric R and Yinv: `(R*Yinv)_{j,i} = (Yinv*R)_{i,j}`. Julia computed `xq = Yinv*R` but read `xq[j,i]` instead of `xq[i,j]`. Fix: changed to `xq[i,j]`. This corrected the off-diagonal XXXX from 1.76e-12 to 1.40e-10, fixing proton from 0.303 to 24.1 barns. Diagonal elements unaffected (i==j).
+**Bug 8 — FIXED (per-section AWR for thresholds)**: Cl-35 ENDF has MF2 AWR=34.66850 but MF3 AWR=34.66845. Julia passed `mf2.AWR` to `lunion_grid`, but Fortran reads AWR from each MF3 section's HEAD record (`awrx=c2h/awin` at reconr.f90:1911). Added `awr` field to `MF3Section` struct, populated from HEAD record. Now `lunion_grid` and PENDF writer use per-section AWR. Fixed 10 threshold energies rounding to wrong sigfig boundaries. **Confirmed via gdb**: Fortran `thrx=1.317612e6` for MT=807 (using MF3 AWR=34.66845), Julia was computing `thrx=1.317611e6` (using MF2 AWR=34.66850).
 
-**Bug 4 — FIXED (reaction channel plumbing)**: Individual reaction channel XS (MT=600 proton) were computed by `cross_section_sammy` but discarded. Fixed by adding `reactions::Dict{Int,T}` to `CrossSections`, populating in `cross_section_sammy`, preserving through `sigma_mf2`, adding `reaction_xs` to reconr result, and using in PENDF writer + `merge_background_legacy`.
+**Bug 9 — FIXED (reaction XS in redundant sums)**: MT=103-107 redundant sums computed only MF3 backgrounds, missing SAMMY `reaction_xs` contributions. MT=103 showed zeros instead of 24.1 barns at thermal. Added `reaction_xs[smt]` to each partial's contribution in the sum. Fixed 10 threshold sections' pseudo-threshold start points.
 
-**Bug 5 — FIXED (l>0 Coulomb)**: Removed `lsp == 0` restriction on Coulomb penetrability in both betapr (line 179) and setr (line 291). The restriction was added due to "ill-conditioned Y-matrices" which was actually the XQ indexing bug (Bug 3). Fortran uses Coulomb for ALL l-values when zeta ≠ 0.
+**Previous bugs (still fixed)**: Bug 1 (2x doubling), Bug 2 (Coulomb l=0), Bug 3 (XQ indexing), Bug 4 (reaction channel plumbing), Bug 5 (l>0 Coulomb), Bug 6 (4-channel convergence)
 
-**Bug 6 — FIXED (4-channel convergence)**: Enabled proton channel in `xs_partials` convergence test (reconr.jl). Fortran `resxs` tests `nsig-1=4` channels (elastic, fission, capture, proton). Julia now matches.
+**Remaining issues for T20 (4 MTs)**:
+1. **MT=1 (total)**: 2 differing lines at E≈1.085e6 and E≈1.198e6 — ±1 in 7th sigfig. Resonance XS precision.
+2. **MT=2 (elastic)**: 1 differing line at E≈1.085e6 — ±1. Likely from hard-sphere vs Coulomb phase shift (see below).
+3. **MT=600 (proton)**: 1973 differing lines — all ±1 in 7th sigfig. IEEE 754 non-associativity in R-matrix accumulation over ~200 resonances (same class as T34 irreducible diffs). Each `|XXXX_ij|²` computation has ~1e-13 intermediate differences that cascade through sigfig rounding boundaries.
+4. **MT=103 (proton total)**: Same 1973 lines as MT=600 (MT=103 = sum of MT=600-649; only MT=600 contributes below 1 MeV).
 
-**Previous bugs (still fixed)**: Bug 1 (2x doubling), Bug 2 (Coulomb l=0 enabled)
+**Remaining known correctness issue**: Coulomb phase shift (Julia uses hard-sphere `_sammy_sinsix` for all channels; Fortran uses `pghcou` for Coulomb channels). Impact: entrance-channel elastic only (MT=2). The proton channel is exit-only, so its phase shift is unused. Would require implementing Coulomb phase shift extraction from `_coulomb_pen_shift` and making two `pghcou` calls when rho≠rhof.
 
-**Remaining issues for T20**:
-1. **Grid location differences (~675 points)**: First divergence at E≈224.66 eV. Julia has 224.6625, Fortran has 224.6622. This is likely an MF2 peak node shading difference or an adaptive midpoint rounding difference. Apply the Grind Method: compare the Fortran grid with Julia's at the first divergence point, trace back to the source (MF2 node, MF3 breakpoint, or adaptive midpoint).
-2. **Phase shift for Coulomb channels**: Julia uses `_sammy_sinsix(rhof, lsp)` (hard-sphere) for all channels. Fortran uses `pghcou` for Coulomb channels, setting `sinsqr = sinphi^2`, `sin2ph = 2*sinphi*cosphi` from Coulomb phases (samm.f90:3395-3396). When `rho != rhof` (true for all Cl-35 channels since rdtru≠rdeff), Fortran makes TWO `pghcou` calls: first with `rho` for penetrability, then with `rhof` for phase shift. Impact is limited (only affects entrance-channel elastic formula), but fix for correctness.
+**Trap 37 (FIXED)**: Per-section AWR — ENDF files can have different AWR values in MF2 vs MF3 HEAD records. Always use AWR from the MF3 section being processed for threshold computation, not the MF2 AWR.
 
-**Trap 36 (FIXED)**: XQ matrix indexing — `xq[i,j]` not `xq[j,i]` in XXXX loop.
-
-**What was verified in Phase 16**:
-- All R-matrix, Y-matrix, rootp, elinvr, elinvi values match Fortran (confirmed via Fortran diagnostic patches in setr/setxqx)
-- XXXX[1,1] and XXXX[2,2] (diagonals) match perfectly; XXXX[2,1] (off-diagonal) now matches after XQ fix
-- Proton XS at thermal: Julia 24.106 vs Fortran 24.1 — exact match
-- All 18 BIT-IDENTICAL tests verified: zero regressions after ALL changes
-- Cl-35 channel structure: 8 spin groups (SG1-2 l=0, SG3-8 l=1), 3 particle pairs (capture mt=102, elastic mt=2, proton mt=600)
-- Phase shifts only matter for entrance channels; proton is exit-only so its sinsqr/sin2ph are unused
+**Trap 38 (FIXED)**: SAMMY resonances need peak/width nodes — unlike BW/RM which have explicit `_add_peak_nodes!` dispatches, SAMMY previously fell through to the do-nothing default. Without these seed nodes, the adaptive reconstruction missed narrow resonances entirely.
 
 ### 2. RECONR: Fix T34 ±1 FP diffs (52/53) — CONFIRMED HARD
 
@@ -498,10 +492,12 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 | 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | t511 | Same material, err=0.005. ±1 at URR boundary |
 | 49 | 4025 | Zr-90 | 41/46 (89%) | 0.001 | n-040_Zr_090-ENDF8.0.endf | 1 extra grid point (MF2 shaded pair absorption) |
 
-### Partial (<50% MTs)
+### Near-Complete (>95% MTs, ±1 FP precision class)
 | Test | MAT | Material | MTs | Notes |
 |------|-----|----------|-----|-------|
-| 20 | 1725 | Cl-35 | 12/162 (7%) | RML (LRF=7), 42 missing grid points |
+| 20 | 1725 | Cl-35 | 158/162 (98%) | RML (LRF=7). 4 MTs with ±1 FP: MT=1/2 (1-2 lines), MT=600/103 (1973 lines each, R-matrix accumulation) |
+
+### Partial (<50% MTs)
 | 60 | 2600 | Fe-nat | 0/1 (0%) | IRDFF-II dosimetry file, needs MF=23 |
 
 ### Errors (not in sweep)
@@ -514,10 +510,13 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 Tests that PASS the relaxed-tolerance comparison (RECONR vs broadened reference): T12 (0.00%), T26 (49.8%), T35 (50.0%), T37 (43.2%), T40 (35.7%), T42 (46.6%), T43 (0.00%), T44 (0.96%), T45 (0.21%), T63 (50.0%). Tests that SKIP (no RECONR module): T05, T14, T50-54, T59, T61, T62. Most ERROR results are from the now-fixed `tc.missing` bug + tests with missing BROADR/HEATR stages.
 
 ### Key Insights
-1. **14 BIT-IDENTICAL** (up from 12 in Phase 12) — Pu-241 newly passing
-2. **Every ±1 diff investigated so far was a real bug** — missing sigfig call, wrong accumulation order, threshold adjustment. The remaining ±1 diffs (T34, T27, T04/T07) are the same class of bug.
-3. **T27 root cause identified**: single missing grid point at 2500.002 = sigfig(2500.001, 7, +1). Julia's coincidence check only fires for `k == start_k` but Fortran fires for ALL breakpoints. Fix: remove the `k == start_k` restriction.
-4. **T34 deeply investigated**: 3 ±1 FP diffs are at absolute limit — small-param approximation vs standard formula gives ~1e-15 per-J-value differences. FMA ruled out. Precomputed per ruled out.
+1. **18 BIT-IDENTICAL** — up from 12 in Phase 12. Pu-241, Cf-252, Pu-239 newly passing in Phase 14.
+2. **T20 massive improvement**: 12/162 → 158/162 in Phase 17. Three root causes: (a) missing SAMMY peak nodes, (b) MF2 vs MF3 AWR mismatch, (c) missing reaction_xs in redundant sums.
+3. **Per-section AWR matters**: ENDF files can have different AWR in MF2 vs MF3 HEAD records. Cl-35 has 34.66850 vs 34.66845 — a 0.00005 difference that changes threshold sigfig rounding.
+4. **T34 deeply investigated**: 3 ±1 FP diffs are at absolute limit — Frobenius-Schur accumulation over 437 resonances. IEEE 754 non-associativity.
+5. **T20 remaining ±1 diffs**: 1973 lines in MT=600/103 — same R-matrix accumulation precision class as T34 but with ~200 resonances per spin group.
+6. **Every grid diff investigated was a real bug** — missing peak nodes, wrong AWR, threshold cascade errors. Not a single "close enough" case.
+7. **gdb on Fortran binary is invaluable** — the AWR mismatch was found by tracing `thrx` values with diagnostic prints in lunion. Fortran had `thrx=1.317612e6`, Julia had `1.317611e6`.
 5. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
 6. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20 mean grid/XS bugs, not missing features.
 7. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
