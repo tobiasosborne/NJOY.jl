@@ -333,12 +333,8 @@ function reconr(endf_file::AbstractString;
         end
         sort!(unique!(rml_chan_mts))
 
-        # For adaptive convergence, test partials (elastic, fission, capture).
-        # TODO: For RML (LRF=7), Fortran tests all channels (j=1..nsig-1)
-        # including reaction channels like proton. This requires matching
-        # the l>0 Coulomb penetrability to avoid grid explosion. For now,
-        # use 3-partial convergence which gives the correct grid for the
-        # primary channels.
+        # For adaptive convergence, test partials (elastic, fission, capture)
+        # plus any RML reaction channels, matching Fortran resxs j=1..nsig-1.
         # Include unresolved contribution for energies in [eresu, eresh).
         xs_partials = function(E)
             xs = xs_fn(E)
@@ -346,7 +342,13 @@ function reconr(endf_file::AbstractString;
                 urr = eval_unresolved(urr_table, E)
                 return (xs.elastic + urr[2], xs.fission + urr[3], xs.capture + urr[4])
             end
-            (xs.elastic, xs.fission, xs.capture)
+            if isempty(rml_chan_mts)
+                (xs.elastic, xs.fission, xs.capture)
+            else
+                chan_vals = ntuple(i -> get(xs.reactions, rml_chan_mts[i], 0.0),
+                                  length(rml_chan_mts))
+                (xs.elastic, xs.fission, xs.capture, chan_vals...)
+            end
         end
 
         # Adaptive reconstruction in full resonance range (matching Fortran resxs)

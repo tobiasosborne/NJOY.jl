@@ -173,10 +173,9 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
                     ex = sqrt(ex)
                     rho = zkte[ic] * ex
                     lsp = sg.lspin[ic]
-                    # Compute penetrability at resonance energy (Coulomb for l=0 only)
-                    # l>0 Coulomb is correct numerically but causes ill-conditioned
-                    # Y-matrices in the cross section extraction (negligible XS anyway)
-                    eta_r = (zeta_ch[ic] != 0.0 && lsp == 0) ? zeta_ch[ic] / ex : 0.0
+                    # Compute penetrability at resonance energy (Coulomb for charged particles)
+                    # Fortran betset uses Coulomb for ALL l-values when zeta != 0
+                    eta_r = zeta_ch[ic] != 0.0 ? zeta_ch[ic] / ex : 0.0
                     p_res = eta_r != 0.0 ? _sammy_pen_coulomb(rho, Int(lsp), eta_r) :
                             _sammy_pen(rho, Int(lsp), sg.bound[ic], Int(pp.ishift))
                     if p_res <= 0.0
@@ -287,8 +286,9 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
             sinsqr[ic] = sq
             sin2ph[ic] = s2p
 
-            # Penetrability and inverse (S-B+iP) — Coulomb for l=0 only
-            eta_e = (zeta_ch[ic] != 0.0 && lsp == 0) ? zeta_ch[ic] / ex : 0.0
+            # Penetrability and inverse (S-B+iP) — Coulomb for charged particles
+            # Fortran setr uses Coulomb for ALL l-values when zeta != 0
+            eta_e = zeta_ch[ic] != 0.0 ? zeta_ch[ic] / ex : 0.0
             p_val, hr, hi, iffy = eta_e != 0.0 ?
                 _sammy_pgh_coulomb(rho, lsp, sg.bound[ic], Int(pp.ishift), eta_e) :
                 _sammy_pgh(rho, lsp, sg.bound[ic], Int(pp.ishift))
