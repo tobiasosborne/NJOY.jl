@@ -55,6 +55,39 @@ Launch multiple **research** subagents in parallel for maximum efficiency:
 
 ---
 
+## Test Infrastructure
+
+### Oracle system
+Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
+- `after_reconr.pendf` — ASCII PENDF after reconr (the main comparison target)
+- `after_broadr.pendf` — ASCII PENDF after broadr (if the test chain includes broadr)
+- `run_reconr/input` — truncated input deck
+- `run_reconr/tape20` — ASCII ENDF input tape (preferred for Julia)
+- `run_reconr/tape21` or `tape22` — may be binary (from moder) — avoid with Julia
+
+### Quick comparison script
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e '
+using NJOY
+r = reconr("test/validation/oracle_cache/testNN/run_reconr/tape20"; mat=MAT, err=ERR)
+write_pendf_file("/tmp/testNN.pendf", r; mat=MAT, err=ERR)
+# ... then parse and compare MF3 columns 1-66 ...
+'
+```
+
+### Tape selection
+- **Always prefer tape20** (ASCII). Some tests use `moder` to convert ASCII→binary before reconr.
+- If only binary tapes exist (tape21/tape22), you need Julia's `moder()` function first, or find the original ASCII source in `njoy-reference/tests/resources/`.
+- The reconr input deck tells you which tape reconr reads (the first number after `reconr`). Negative = binary.
+
+### Current oracle coverage
+- **30 tests have oracle caches**: T01-04, T07-13, T15-21, T24-27, T30, T34, T45-47, T49, T55-58, T60, T63-65, T84
+- **16 tests need oracles**: T24\*, T28, T29, T31, T32, T35-44, T63\* (\*have cache dirs but no run_reconr)
+- **11 tests skip** (no RECONR in chain): T05, T14, T50-54, T59, T61, T62
+
+---
+
 ## The Grind Method
 
 This is how we achieve bit-identical output. It works. Don't skip steps.
@@ -360,11 +393,60 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ---
 
-## Immediate Next Steps — ALL ARE REQUIRED WORK
+## Immediate Next Steps — PRIORITY ORDER
 
-There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until proven otherwise by reading the Fortran. The Grind Method works: find the first differing byte, read the Fortran, trace the calculation step by step, find the discrepancy, fix it. **Use the Fortran debugger** — the NJOY2016 binary is compiled with debug symbols at `njoy-reference/build/njoy`. Recompile with `-DCMAKE_BUILD_TYPE=Debug -DCMAKE_Fortran_FLAGS="-g -O0"` for source-level breakpoints, or patch `reconr.f90`/`samm.f90` with `write(*,...)` diagnostics and recompile with Release for speed. Restore clean source with `cd njoy-reference && git checkout -- src/`.
+**Use the Fortran debugger** — the NJOY2016 binary is compiled with debug symbols at `njoy-reference/build/njoy`. Patch `reconr.f90`/`samm.f90` with `write(*,...)` diagnostics and recompile for speed. Restore clean source with `cd njoy-reference && git checkout -- src/`.
 
-### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 158/162) — NEAR COMPLETE
+### 0. PRIORITY: Generate Oracle Caches for All 84 Tests
+
+**Why this matters**: Only 30 of 84 tests have oracle caches. Without oracles, we can't verify correctness. Many "untested" tests may already work perfectly — we just don't know.
+
+**The oracle system**: `test/validation/diagnose_harness.jl` generates per-module Fortran reference output. For each test, it runs the Fortran NJOY binary with a truncated input deck (stopping after RECONR or BROADR) and caches the ASCII PENDF output. Oracles are stored in `test/validation/oracle_cache/testNN/`.
+
+**How to generate an oracle**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/diagnose_harness.jl <test_number>
+```
+This creates `test/validation/oracle_cache/testNN/after_reconr.pendf` and `run_reconr/` with the input deck and tapes.
+
+**Tests that need oracles** (16 tests, no oracle cache at all):
+T24, T28, T29, T31, T32, T35, T36, T37, T38, T39, T40, T41, T42, T43, T44, T63
+
+**Tests with oracles but not yet compared** (newly discovered in Phase 17):
+| Test | MAT | err | Material | Status | Tape Issue |
+|------|-----|-----|----------|--------|------------|
+| T17 | 9237 | 0.001 | U-238 JENDL | No tape20 | Needs `moder` to create ASCII tape |
+| T21 | 2637 | 0.001 | Fe-58 ENDF/B-8 | **54/79** | Use tape20. Grid shortfall (34k vs 50k) — adaptive reconstruction density in dense RM region (262 resonances, err=0.001) |
+| T65 | 9228 | 0.001 | U-235 ENDF/B-8 | **42/87** | Use tape20. XS precision diffs, likely URR boundary class |
+
+**Binary tape issue**: Some tests use `moder` to convert ASCII→binary before reconr reads. The oracle caches store BOTH tape20 (ASCII original) and tape21 (binary from moder). Julia's reconr reads ASCII only. **Always use tape20** (ASCII) when available. If only tape21 (binary) exists, you need to run `moder` first or find the ASCII source.
+
+Affected tests: T16 (tape20 works), T17 (no tape20 — needs moder), T58/T60/T64/T65 (tape20 works)
+
+**Photonuclear tests (WILL CRASH — expected)**:
+T03, T56, T57, T58, T64 — these use photon-induced ENDF files with NO MF2/MT151. reconr currently requires MF2. These need a new code path (MF=23 processing) and are NOT expected to pass. Skip them for now but note the error.
+
+**Dosimetry test (T60 — produces 0 points)**:
+Fe-nat IRDFF-II has no MF=3 sections, only MF=10 and MF=40. reconr produces 0 energy points. Needs investigation — the Fortran somehow produces 1 MT.
+
+**How to run a comparison after generating oracle**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e '
+using NJOY
+# Read oracle input to find MAT and err (see input deck in oracle_cache/testNN/run_reconr/input)
+r = reconr("test/validation/oracle_cache/testNN/run_reconr/tape20"; mat=MAT, err=ERR)
+write_pendf_file("/tmp/testNN.pendf", r; mat=MAT, err=ERR)
+# Then compare MF3 columns 1-66
+'
+```
+
+**What to record for each test**: Run status (OK/ERROR/CRASH), grid size (Julia vs Fortran), MTs PERFECT/total, error classification (grid diff, XS ±1, missing MTs, crash reason).
+
+**Goal**: Build a complete test matrix showing which tests run, which pass, and what the failure mode is for each. This lets us identify which code paths are brittle and prioritize fixes.
+
+### 1. RECONR: T20 (Cl-35 RML/SAMMY, 158/162) — NEAR COMPLETE
 
 **Status**: 158/162 PERFECT. Grid: 10730 pts (exact match). Only 4 MTs with ±1 FP diffs.
 
@@ -441,14 +523,10 @@ BROADR is fully implemented in `src/processing/broadr.jl` and `src/processing/si
 
 ### 8. Fix remaining RECONR test errors
 
-- **T03, T56-58, T64**: photoatomic/photonuclear files need MF=23 processing in lunion
-- **T60** (Fe-nat IRDFF): dosimetry file, may need MF=23 support
-
-### 6. Fix remaining RECONR test errors
-
-- **T15-17** (JENDL U-238): float parsing bug with old ENDF format `"2.530000-2"` — fix the parser
-- **T60** (Fe-nat IRDFF): dosimetry file, may need MF=23 support
-- **T03, T56-58, T64**: photoatomic/photonuclear files need MF=23 processing in lunion
+- **T03, T56-58, T64**: photoatomic/photonuclear files need MF=23 processing in lunion (no MF2/MT151)
+- **T60** (Fe-nat IRDFF): dosimetry file with no MF=3 (only MF=10 + MF=40), needs new code path
+- **T21** (Fe-58): adaptive reconstruction density shortfall in dense RM region. 34k vs 50k grid points. Root cause unclear — peak nodes are present but adaptive reconstruction converges earlier than Fortran's
+- **T65** (U-235 ENDF/B-8): 42/87, 43 XS-only diffs + 2 grid diffs. Likely URR boundary precision class
 
 ---
 
@@ -495,16 +573,30 @@ Oracle cache at `test/validation/oracle_cache/testNN/`. Run each test with `reco
 ### Near-Complete (>95% MTs, ±1 FP precision class)
 | Test | MAT | Material | MTs | Notes |
 |------|-----|----------|-----|-------|
-| 20 | 1725 | Cl-35 | 158/162 (98%) | RML (LRF=7). 4 MTs with ±1 FP: MT=1/2 (1-2 lines), MT=600/103 (1973 lines each, R-matrix accumulation) |
+| 20 | 1725 | Cl-35 | 158/162 (98%) | RML (LRF=7). 4 MTs with ±1 FP: MT=1/2 (1-2 lines), MT=600/103 (1973 lines each, R-matrix accumulation). **NEW Phase 17** |
 
-### Partial (<50% MTs)
-| 60 | 2600 | Fe-nat | 0/1 (0%) | IRDFF-II dosimetry file, needs MF=23 |
+### Partial (50-85% MTs)
+| Test | MAT | Material | MTs | Notes |
+|------|-----|----------|-----|-------|
+| 21 | 2637 | Fe-58 | 54/79 (68%) | ENDF/B-8 RM. Grid shortfall: Julia 34k vs Fortran 50k in 100-350 keV range. Adaptive reconstruction density issue with 262 dense RM resonances at err=0.001. Use tape20. **NEW Phase 17** |
+| 65 | 9228 | U-235 | 42/87 (48%) | ENDF/B-8. 2 grid diffs + 43 XS diffs. Use tape20. Likely URR boundary ±1 class. **NEW Phase 17** |
 
-### Errors (not in sweep)
-- **15-17**: JENDL U-238 — float parsing bug (`"2.530000-2"` old format)
-- **03**: Photon data (MAT=1) — no MF2/MT151 (photoatomic, needs MF=23 support)
-- **56-58, 64**: Photonuclear (`g-` files) — no MF2/MT151
-- **24, 28-29, 31-32, 35, 37-42, 44**: Run in test runner with relaxed tolerance; no oracle comparison
+### Crashes/Errors
+| Test | Material | Error | Root Cause |
+|------|----------|-------|------------|
+| 03 | Photon (MAT=1) | No MF2/MT151 | Photoatomic — needs MF=23 processing |
+| 56 | U-235 photonuclear | No MF2/MT151 | Photonuclear `g-` file |
+| 57 | Bi-209 photonuclear | No MF2/MT151 | Photonuclear `g-` file |
+| 58 | Mn-55 photonuclear | No MF2/MT151 | Photonuclear `g-` file (also binary tape; tape20 works for reading but still crashes) |
+| 60 | Fe-nat IRDFF-II | 0 pts produced | Dosimetry: no MF3, only MF=10+MF=40. Fortran produces 1 MT |
+| 64 | Ra-226 photonuclear | No MF2/MT151 | Photonuclear `g-` file |
+| 17 | U-238 JENDL | No ASCII tape | Needs `moder` to convert binary tape21→ASCII. Same material as T15/T16 |
+
+### No Oracle (need to generate — 16 tests)
+T24, T28, T29, T31, T32, T35, T36, T37, T38, T39, T40, T41, T42, T43, T44, T63
+
+### Tests that SKIP (no RECONR module in chain)
+T05, T14, T50-54, T59, T61, T62
 
 ### Full test runner results (partial, 44/84 completed before timeout)
 Tests that PASS the relaxed-tolerance comparison (RECONR vs broadened reference): T12 (0.00%), T26 (49.8%), T35 (50.0%), T37 (43.2%), T40 (35.7%), T42 (46.6%), T43 (0.00%), T44 (0.96%), T45 (0.21%), T63 (50.0%). Tests that SKIP (no RECONR module): T05, T14, T50-54, T59, T61, T62. Most ERROR results are from the now-fixed `tc.missing` bug + tests with missing BROADR/HEATR stages.
@@ -517,10 +609,24 @@ Tests that PASS the relaxed-tolerance comparison (RECONR vs broadened reference)
 5. **T20 remaining ±1 diffs**: 1973 lines in MT=600/103 — same R-matrix accumulation precision class as T34 but with ~200 resonances per spin group.
 6. **Every grid diff investigated was a real bug** — missing peak nodes, wrong AWR, threshold cascade errors. Not a single "close enough" case.
 7. **gdb on Fortran binary is invaluable** — the AWR mismatch was found by tracing `thrx` values with diagnostic prints in lunion. Fortran had `thrx=1.317612e6`, Julia had `1.317611e6`.
-5. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
-6. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20 mean grid/XS bugs, not missing features.
-7. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
-8. **T18 (Cf-252) is NOT LRU=0** — has SLBW(1e-5 to 366.5 eV) + URR mode=12 (366.5 to 10000 eV). Systematic URR errors (0.1% magnitude) starting at E=383 eV. Uninvestigated.
+8. **LSSF flag is critical**: LSSF=0 → URR table includes MF3 bg; LSSF=1 → URR table is bare csunr
+9. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12). Low scores on T20 mean grid/XS bugs, not missing features.
+10. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR
+11. **T18 (Cf-252) is NOT LRU=0** — has SLBW(1e-5 to 366.5 eV) + URR mode=12 (366.5 to 10000 eV). BIT-IDENTICAL at Phase 14.
+
+### Brittleness Analysis (Phase 17)
+
+**Module brittleness ranking** (most bugs found → fewest):
+1. **Grid construction** (`reconr_grid.jl` / `lunion_grid`) — Most complex. Bugs: missing SAMMY peak nodes, wrong AWR for thresholds, coincidence shading, histogram shading, threshold cascade, pseudo-threshold advancement. Every grid diff investigated was a real bug.
+2. **PENDF writer** (`pendf_writer.jl` / `_get_legacy_section`) — Threshold handling, redundant sums, reaction XS inclusion, per-section AWR. 3 bugs fixed in Phase 17 alone.
+3. **Adaptive reconstruction** (`adaptive_grid.jl`) — T21 shortfall: Julia 34k vs Fortran 50k points in dense RM region. Cause unclear (peak nodes present, convergence test correct). May be midpoint rounding or step guard subtle difference.
+4. **URR evaluation** (`unresolved.jl`) — T04/T07/T65 ±1 at resolved/unresolved boundary. Gauss-Laguerre 100-term accumulation FP precision.
+5. **R-matrix evaluation** (`reich_moore.jl`, `sammy.jl`) — T34 ±1 irreducible FP. T20 proton channel 94% biased ±1 (5133 values). Frobenius-Schur / Y-matrix inversion accumulation order.
+
+**Feature gaps** (not bugs — missing functionality):
+- Photonuclear: reconr needs to handle materials with MF=23 cross sections instead of MF=3+MF=2
+- Dosimetry: reconr needs to handle MF=10-only materials (no MF=3)
+- Binary ENDF: `moder` module exists but Julia reconr always reads ASCII
 
 ---
 
