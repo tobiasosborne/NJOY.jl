@@ -174,8 +174,9 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
                     rho = zkte[ic] * ex
                     lsp = sg.lspin[ic]
                     # Compute penetrability at resonance energy
-                    # TODO: use Coulomb penetrability for charged-particle channels
-                    # (zeta_ch[ic] != 0) once coulx/coulfg is fully implemented
+                    # TODO: enable Coulomb for charged-particle channels (zeta_ch[ic] != 0)
+                    # betapr values verified identical to Fortran with Coulomb enabled,
+                    # but per-energy psmall interaction across spin groups needs debugging.
                     p_res = _sammy_pen(rho, Int(lsp), sg.bound[ic], Int(pp.ishift))
                     if p_res <= 0.0
                         p_res = 1.0
@@ -286,10 +287,15 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
             sin2ph[ic] = s2p
 
             # Penetrability and inverse (S-B+iP)
-            # TODO: use Coulomb pgh for charged-particle channels (zeta_ch[ic] != 0)
+            # TODO: enable Coulomb pgh for charged-particle channels (zeta_ch[ic] != 0)
             p_val, hr, hi, iffy = _sammy_pgh(rho, lsp, sg.bound[ic], Int(pp.ishift))
 
-            if iffy == 0 && p_val > 1.0e-8
+            # Fortran psmall condition (samm.f90 setr lines 3415-3416):
+            # Normal path if: iffy==0 AND NOT (ishift<=0 AND (1-p*rmat_i==1 OR p<tiny))
+            ishift_ch = Int(pp.ishift)
+            use_normal = iffy == 0 && !(ishift_ch <= 0 &&
+                (1.0 - p_val * rmat_i[ii] == 1.0 || p_val < 1.0e-8))
+            if use_normal
                 rootp[ic] = sqrt(p_val)
                 elinvr[ic] = hr
                 elinvi[ic] = hi
@@ -602,9 +608,465 @@ function _jwkb(x::Float64, eta::Float64, xl::Float64)
     return (fjwkb, gjwkb, iexp)
 end
 
+# ---- coulx algorithm: Coulomb wavefunctions for small rho (samm.f90) ----
+# Translated from NJOY2016 samm.f90 subroutines xsigll, asymp2, taylor,
+# getfg, getps. Used for rho values where Steed/coulfg is unreliable.
+
+"""
+    _xsigll(eta, lmax) -> (sigma, sigma0)
+
+Compute Coulomb phase shift sigma_0 and sigma(L) for L=0..lmax.
+Translated from samm.f90:4429-4517.
+"""
+function _xsigll(eeta::Float64, lmax::Int)
+    small = 0.000001
+    ber = (0.1666666666666666666666666666666666667,
+           -0.0333333333333333333333333333333333333,
+            0.0238095238095238095238095238095238095,
+           -0.0333333333333333333333333333333333333,
+            0.0757575757575757575757575757575757576)
+    mmmxxx = 100000
+
+    eta = eeta
+    peta = abs(eta)
+    sigma0 = 0.0
+
+    if peta >= 3.0
+        sum_ = 0.0
+        for i in 1:5
+            xi = Float64(i)
+            m = 2*i - 1
+            xm = Float64(m)
+            sum_ += ber[i] / (2*xi * xm * peta^m)
+        end
+        sigma0 = 3.141592653589793238 / 4 + peta * (log(peta) - 1) - sum_
+    else
+        sumas = 0.0
+        for is_ in 1:mmmxxx
+            s = Float64(is_)
+            temp1 = peta / s
+            if s <= 2*peta
+                as_ = temp1 - atan(temp1)
+            else
+                as_ = 0.0
+                k = 0
+                for j in 1:mmmxxx
+                    m = j + j + 1
+                    xm = Float64(m)
+                    add = temp1^m / xm
+                    if k == 0
+                        as_ = as_ + add
+                        k = 1
+                    else
+                        as_ = as_ - add
+                        k = 0
+                    end
+                    if abs(add / as_) <= small
+                        break
+                    end
+                end
+            end
+            sumas += as_
+            if abs(as_ / sumas) <= small
+                break
+            end
+        end
+        sigma0 = -0.57721566490153286 * peta + sumas
+    end
+
+    if eta < 0
+        sigma0 = -sigma0
+    end
+
+    sigma = Vector{Float64}(undef, lmax + 1)
+    sigma[1] = sigma0
+    if lmax > 0
+        for ll in 1:lmax
+            xl = Float64(ll)
+            sigma[ll+1] = sigma[ll] + atan(eta / xl)
+        end
+    end
+
+    return (sigma, sigma0)
+end
+
+"""
+    _asymp2(eta, rho, sigma0) -> (u, upr, rhoi)
+
+Compute G_0 and G_0' at a large asymptotic radius rhoi using
+the asymptotic expansion. Translated from samm.f90:4519-4601.
+"""
+function _asymp2(eeta::Float64, rrho::Float64, sigma0::Float64)
+    del = 100.0
+    epslon = 0.000001
+
+    eta = eeta
+    rho = rrho
+    rhoi = max(rho * 2, 10.0, 10.0 * eta)
+
+    @label start_asymp2
+    xn = 0.0
+    zold = [1.0, 0.0, 0.0, 1.0 - eta / rhoi]
+    z = copy(zold)
+    bigz = [abs(z[i]) for i in 1:4]
+    jcheck = 0
+
+    for n in 1:100
+        temp = 2 * (xn + 1) * rhoi
+        an = (2*xn + 1) * eta / temp
+        bn = (eta*eta - xn*(xn+1)) / temp
+        xn += 1.0
+        znew = Vector{Float64}(undef, 4)
+        znew[1] = an*zold[1] - bn*zold[2]
+        znew[2] = an*zold[2] + bn*zold[1]
+        znew[3] = an*zold[3] - bn*zold[4] - znew[1]/rhoi
+        znew[4] = an*zold[4] + bn*zold[3] - znew[2]/rhoi
+        icheck = 0
+        diverged = false
+        for i in 1:4
+            z[i] += znew[i]
+            zold[i] = znew[i]
+            bigz[i] = max(bigz[i], abs(z[i]))
+            temp2 = abs(z[i])
+            if bigz[i] / temp2 > del
+                diverged = true
+                break
+            end
+            if abs(znew[i] / z[i]) <= epslon
+                icheck += 1
+            end
+        end
+        if diverged
+            rhoi *= 2
+            @goto start_asymp2
+        end
+        w = z[1]*z[4] - z[2]*z[3]
+        if abs(w) > 10.0
+            rhoi *= 2
+            @goto start_asymp2
+        end
+        if icheck == 4
+            jcheck += 1
+            if jcheck >= 4
+                @goto converged_asymp2
+            end
+        else
+            jcheck = 0
+        end
+    end
+    # If we fall through (no convergence in 100 iterations), double rhoi and retry
+    rhoi *= 2
+    @goto start_asymp2
+
+    @label converged_asymp2
+    phi = rhoi - eta * log(2*rhoi) + sigma0
+    cosphi = cos(phi)
+    sinphi = sin(phi)
+    g0 = z[1]*cosphi - z[2]*sinphi
+    g0pr = z[3]*cosphi - z[4]*sinphi
+    u = g0
+    upr = g0pr
+    return (u, upr, rhoi)
+end
+
+"""
+    _taylor(eta, rho, u, upr, rhoi) -> (u, upr)
+
+Integrate G_0 from rhoi back to the target rho using Taylor expansion.
+Translated from samm.f90:4603-4735.
+"""
+function _taylor(eeta::Float64, rrho::Float64, u::Float64, upr::Float64, rhoi_in::Float64)
+    epslon = 1.0e-6
+    bigger = 1.0e10
+    biggst = 1.0e30
+    del = 100.0
+
+    eta = eeta
+    rho = rrho
+    rhoi = rhoi_in
+    delta = rho - rhoi
+
+    if delta == 0.0
+        return (u, upr)
+    end
+
+    @label label10
+    a = Vector{Float64}(undef, 100)
+    a[1] = u
+    a[2] = delta * upr
+    a[3] = -delta*delta / 2 * (1 - 2*eta/rhoi) * a[1]
+    nstart = 4
+
+    @label label20
+    jcheck = 0
+    sum_ = 0.0
+    sumpr = 0.0
+    big = 0.0
+    bigpr = 0.0
+
+    for n in 1:100
+        xn = Float64(n - 1)
+        if n >= nstart
+            a[n] = -(delta*(xn-1)*(xn-2)*a[n-1] +
+                      (rhoi - 2*eta)*(delta^2)*a[n-2] +
+                      (delta^3)*a[n-3]) /
+                    (rhoi*(xn-1)*xn)
+            if a[n] > bigger
+                # goto 40: halve delta and retry
+                nstart = max(nstart, n + 1)
+                m = nstart - 1
+                delta = delta / 2
+                temp = 2.0
+                for nn in 1:m
+                    temp /= 2
+                    a[nn] *= temp
+                end
+                @goto label20
+            end
+        end
+        sum_ += a[n]
+        sumpr += xn * a[n]
+        if sum_ >= biggst
+            nstart = max(nstart, n + 1)
+            m = nstart - 1
+            delta = delta / 2
+            temp = 2.0
+            for nn in 1:m
+                temp /= 2
+                a[nn] *= temp
+            end
+            @goto label20
+        end
+        if sumpr >= biggst
+            nstart = max(nstart, n + 1)
+            m = nstart - 1
+            delta = delta / 2
+            temp = 2.0
+            for nn in 1:m
+                temp /= 2
+                a[nn] *= temp
+            end
+            @goto label20
+        end
+        big = max(big, abs(sum_))
+        bigpr = max(bigpr, abs(sumpr))
+        if sum_ == 0.0 || sumpr == 0.0
+            jcheck = 0
+        else
+            if abs(big / sum_) >= del
+                nstart = max(nstart, n + 1)
+                m = nstart - 1
+                delta = delta / 2
+                temp = 2.0
+                for nn in 1:m
+                    temp /= 2
+                    a[nn] *= temp
+                end
+                @goto label20
+            end
+            if abs(bigpr / sumpr) >= del
+                nstart = max(nstart, n + 1)
+                m = nstart - 1
+                delta = delta / 2
+                temp = 2.0
+                for nn in 1:m
+                    temp /= 2
+                    a[nn] *= temp
+                end
+                @goto label20
+            end
+            if abs(a[n] / sum_) >= epslon || abs(xn * a[n] / sumpr) >= epslon
+                jcheck = 0
+            else
+                jcheck += 1
+                if jcheck >= 4
+                    @goto label60
+                end
+            end
+        end
+    end
+    # n=100, fall through to label 40 equivalent
+    n_final = 100
+    nstart = max(nstart, n_final + 1)
+    m = nstart - 1
+    delta = delta / 2
+    temp = 2.0
+    for nn in 1:m
+        temp /= 2
+        a[nn] *= temp
+    end
+    @goto label20
+
+    @label label60
+    u = sum_
+    upr = sumpr / delta
+    rhoi = rhoi + delta
+    delta = rho - rhoi
+    if abs(delta) >= epslon
+        @goto label10
+    end
+
+    return (u, upr)
+end
+
+"""
+    _getfg(eta, rho, lmax, lll) -> (f, fpr, g, gpr, llmax_out)
+
+Construct F(L) and G(L) from G_0, G_0' using recurrence.
+Translated from samm.f90:4753-4850. g0 and g0pr are passed as
+the initial values in g[1] and gpr[1].
+"""
+function _getfg(eta::Float64, rho::Float64, llmax::Int, lll::Int,
+                g0::Float64, g0pr::Float64)
+    big = 1.0e12
+    lmax = llmax
+    limit = max(3, lmax + 1)
+
+    # Allocate arrays large enough for upward + downward recurrence
+    maxsize = limit + 10000 + 10  # generous upper bound
+    f   = zeros(Float64, maxsize)
+    fpr = zeros(Float64, maxsize)
+    g   = zeros(Float64, maxsize)
+    gpr = zeros(Float64, maxsize)
+
+    g[1] = g0
+    gpr[1] = g0pr
+
+    # Upward recurrence for G
+    g[2] = ((eta + 1/rho)*g[1] - gpr[1]) / sqrt(eta^2 + 1)
+    for l in 3:limit
+        xl = Float64(l - 1)
+        temp1 = sqrt(xl*xl + eta*eta)
+        g[l] = (2*xl - 1)/temp1 * (eta/(xl-1) + xl/rho) * g[l-1] -
+               xl/temp1 * sqrt(1 + (eta/(xl-1))^2) * g[l-2]
+        if abs(g[l]) > big && l > lll
+            limit = l
+            break
+        end
+    end
+
+    # Continue upward recurrence for G until ratio decays
+    gm2 = g[limit-1]
+    gm1 = g[limit]
+    il = -1
+    j_final = limit
+    for j in limit:10000
+        xl = Float64(j)
+        temp1 = sqrt(xl*xl + eta*eta)
+        gm = (2*xl - 1)/temp1 * (eta/(xl-1) + xl/rho) * gm1 -
+             xl/temp1 * sqrt(1 + (eta/(xl-1))^2) * gm2
+        if abs(g[limit] / gm) > 1.0e-4
+            il = -2
+        end
+        if il > 0
+            j_final = j
+            break
+        end
+        il += 1
+        gm2 = gm1
+        gm1 = gm
+        j_final = j
+    end
+
+    # Downward recurrence for f
+    xl = Float64(j_final)
+    fp1 = xl / gm1 / sqrt(xl^2 + eta^2)   # gm1 is gm at j_final
+    fp2 = 0.0
+    l = j_final - 1
+
+    # First phase: down to limit+3
+    for ll in 1:(j_final - 3 - limit)
+        l -= 1
+        xl = Float64(l)
+        temp2 = sqrt((xl+1)^2 + eta^2)
+        fp = ((2*xl + 3)*(eta/(xl+2) + (xl+1)/rho)*fp1 -
+              (xl+1)*sqrt(1 + (eta/(xl+2))^2)*fp2) / temp2
+        fp2 = fp1
+        fp1 = fp
+    end
+
+    # Second phase: down to 0, storing f values
+    for ll in 1:(limit + 2)
+        l -= 1
+        xl = Float64(l)
+        temp2 = sqrt((xl+1)^2 + eta^2)
+        fp = ((2*xl + 3)*(eta/(xl+2) + (xl+1)/rho)*fp1 -
+              (xl+1)*sqrt(1 + (eta/(xl+2))^2)*fp2) / temp2
+        f[l+1] = fp
+        fp2 = fp1
+        fp1 = fp
+    end
+
+    # Compute derivatives
+    fpr[1] = (1/rho + eta)*f[1] - sqrt(1 + eta^2)*f[2]
+    for l in 2:limit
+        xl = Float64(l)
+        fpr[l] = (xl/rho + eta/xl)*f[l] - sqrt(1 + (eta/xl)^2)*f[l+1]
+        temp1 = eta / (xl - 1)
+        gpr[l] = sqrt(1 + temp1^2)*g[l-1] - ((xl-1)/rho + temp1)*g[l]
+    end
+
+    llmax_out = lmax
+    if limit <= lmax
+        llmax_out = limit - 1
+    end
+
+    return (f, fpr, g, gpr, llmax_out)
+end
+
+"""
+    _getps(rho, lll, f, fpr, g, gpr) -> (p, s)
+
+Extract penetrability P and shift factor S from F, G, F', G'.
+Translated from samm.f90:4969-4996.
+"""
+function _getps(rho::Float64, lll::Int, f::Vector{Float64}, fpr::Vector{Float64},
+                g::Vector{Float64}, gpr::Vector{Float64})
+    n = lll + 1
+    asq = f[n]^2 + g[n]^2
+    a = sqrt(asq)
+    p = rho / asq
+    ss = rho * (f[n]*fpr[n] + g[n]*gpr[n]) / asq
+    return (p, ss)
+end
+
+"""
+    _coulomb_pen_shift_coulx(rho, l, eta) -> (P, S)
+
+Compute Coulomb penetrability and shift factor using the coulx algorithm
+(xsigll -> asymp2 -> taylor -> getfg -> getps). This is the path used
+in NJOY2016/SAMMY for small rho values where Steed's method (coulfg) fails.
+"""
+function _coulomb_pen_shift_coulx(rho::Float64, l::Int, eta::Float64)
+    lmax = l
+
+    # Step 1: Coulomb phase shift
+    sigma, sigma0 = _xsigll(eta, lmax)
+
+    # Step 2: Asymptotic G_0 at large radius
+    u, upr, rhoi = _asymp2(eta, rho, sigma0)
+
+    # Step 3: Integrate G_0 back to target rho
+    u, upr = _taylor(eta, rho, u, upr, rhoi)
+
+    # Check for overflow (coulx line 4388: if abs(g0) > 1e25, call end1)
+    if abs(u) > 1.0e25
+        return (0.0, 0.0)
+    end
+
+    # Step 4: Construct F(L) and G(L) from G_0
+    f, fpr, g, gpr, _ = _getfg(eta, rho, lmax, l, u, upr)
+
+    # Step 5: Extract P and S
+    p, s = _getps(rho, l, f, fpr, g, gpr)
+
+    return (p, s)
+end
+
 # ---- Coulomb penetrability using Steed's method (samm.f90 coulfg) ----
 # Returns (P, S) = penetrability and shift factor for Coulomb channels.
 # Translated from NJOY2016 samm.f90 coulfg + jwkb for the case llmin=0.
+# For small rho (< 1.02), dispatches to the coulx algorithm instead.
 function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
     accur = 1.0e-16
     acc = accur
@@ -615,6 +1077,11 @@ function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
     if rho <= acch
         # Very small rho: return zero penetrability
         return (0.0, 0.0)
+    end
+
+    # For small rho where Steed/coulfg is unreliable, use coulx algorithm
+    if rho < 1.02
+        return _coulomb_pen_shift_coulx(rho, l, eta)
     end
 
     x = rho
