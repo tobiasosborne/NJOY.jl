@@ -310,17 +310,10 @@ function reconr(endf_file::AbstractString;
         isempty(res_grid) && error("reconr: no grid points in resonance range [$eresl, $eresh)")
 
         # Build cross section function: resolved (SLBW) + unresolved (URR table)
-        xs_fn = if rml_data !== nothing
-            rml_eval = build_rml_evaluator(rml_data)
-            function(E)
-                sig = sigma_mf2(E, mf2)
-                rml_xs = rml_eval(Float64(E))
-                CrossSections(sig.total + rml_xs[1], sig.elastic + rml_xs[2],
-                              sig.fission + rml_xs[3], sig.capture + rml_xs[4])
-            end
-        else
-            E -> sigma_mf2(E, mf2)
-        end
+        # For RML (LRF=7), sigma_mf2 already dispatches to cross_section_sammy
+        # which returns the complete cross section.  Do NOT add rml_eval on top
+        # — that would double-count the resonance contribution.
+        xs_fn = E -> sigma_mf2(E, mf2)
 
         # For adaptive convergence, test only partials (elastic, fission, capture)
         # matching Fortran resxs which tests j=1..nsig-1 = partials, NOT total.
