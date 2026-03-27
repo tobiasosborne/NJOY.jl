@@ -388,7 +388,11 @@ Two specific grid points are in the Fortran but not Julia: 7.118985e6 and 1.2698
 
 ### 4. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162)
 
-The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scores 12/162. **Phase 14 investigation**: The `cross_section_rml` evaluator is ACCURATE in the resonance range (median error 2.5e-5% vs Fortran cssammy at 215 sampled points). The 2.6x grid explosion (28k Julia vs 10k Fortran grid points) is NOT from evaluator bugs — it's from the adaptive reconstruction. Root cause: the Fortran's cssammy produces nmtres additional partial-wave cross sections that are all tested for convergence (reconr.f90:2394 tests j=1..nsig-1), while Julia's `cross_section_rml` returns only 4 partials (total, elastic, fission, capture). The Julia adaptive reconstruction may test convergence differently. **Next step**: check how `nsig` and the convergence test handle SAMMY materials in the Fortran vs Julia. Also investigate the 6 points with >1% error — all above the resonance range (E > 1.2 MeV), likely MF3 background issues.
+The SAMMY/RML formalism (LRF=7) is fully implemented (`_read_sammy_params`, `build_rml_evaluator`). T20 scores 12/162. **Phase 14 investigation (gdb-confirmed)**:
+
+Root cause identified: Julia's `cross_section_rml` has a **systematic -0.008% error in total XS** vs Fortran cssammy. At E=68.75 eV: Fortran total=13.2270, Julia total=13.2259 (diff=-0.001). Elastic matches perfectly (8e-6%) but capture differs by 0.88% because capture = total - elastic - fission amplifies the total error. This -0.008% total error causes 38% of Fortran panels to fail Julia's adaptive convergence at err=0.001, producing 2.6x more grid points.
+
+The error is NOT in the convergence test (nsig=4 for both, testing same 3 partials) and NOT in the evaluator's resonance positions. The Fortran uses `cssammy` from `samm.f90` while Julia uses `cross_section_rml`. These implement R-Matrix Limited differently — likely differences in channel coupling, eliminated channels, or the matrix inversion method. **Next step**: compare the `samm.f90` cssammy algorithm with Julia's `cross_section_rml` step by step at E=68.75 eV to find the specific computation that differs.
 
 ### 5. Grind BROADR to bit-identical
 
