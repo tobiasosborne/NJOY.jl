@@ -367,7 +367,9 @@ function reconr(endf_file::AbstractString;
         end
 
         merged_xs = merge_background_legacy(all_energies, res_xs, mf3_sections;
-                                            awr=mf2.AWR)
+                                            awr=mf2.AWR,
+                                            eresr=eresr, eresh=eresh,
+                                            urr_lssf=urr_lssf)
 
         total_arr = [xs.total for xs in merged_xs]
         elastic_arr = [xs.elastic for xs in merged_xs]

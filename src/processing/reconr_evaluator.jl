@@ -1054,7 +1054,10 @@ end
 function merge_background_legacy(energies::Vector{Float64},
                                   res_xs::Vector{<:CrossSections},
                                   mf3_sections::Vector{MF3Section};
-                                  awr::Float64 = 0.0)
+                                  awr::Float64 = 0.0,
+                                  eresr::Float64 = 0.0,
+                                  eresh::Float64 = 0.0,
+                                  urr_lssf::Int = -1)
     # MTs to skip entirely (redundant sums or non-cross-section quantities):
     #   MT=1   : total (redundant — recomputed from partials)
     #   MT=3   : nonelastic (redundant — total - elastic)
@@ -1121,6 +1124,13 @@ function merge_background_legacy(energies::Vector{Float64},
                 interpolate(tab, e)
             end
             bg == 0.0 && continue
+            # Fortran emerge line 4800: suppress MF3 background for primary
+            # channels (itype=1-4) in the URR range when LSSF=0, because the
+            # URR table already includes the MF3 background.
+            is_primary = (mt == 2 || mt == 18 || mt == 19 || mt == 102)
+            if is_primary && urr_lssf == 0 && e >= eresr && e < eresh
+                continue
+            end
             # Fortran emerge: sn = gety1(bg) + resonance, then sigfig(sn,7,0).
             # Primary channels add UNROUNDED bg to resonance (the combined
             # value is rounded to 7 sigfigs only at output and for the total).
