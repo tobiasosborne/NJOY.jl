@@ -366,43 +366,34 @@ There is no "low priority." Rule 1: zero tolerance. Every diff is a bug until pr
 
 ### 1. RECONR: Fix T20 (Cl-35 RML/SAMMY, 12/162) — HIGHEST PRIORITY, BIGGEST WIN
 
-**Status**: 12/162 PERFECT. Three bugs found in Phase 15, two fixed. Total now matches Fortran (0.001%).
+**Status**: 12/162 PERFECT. XS values now correct (proton=24.1 barns matches Fortran). Grid differs (9968 vs 3577).
 
-**Phase 15 findings (supersede all previous T20 analysis)**:
+**Phase 16 findings (supersede Phase 15 analysis)**:
 
-**Bug 1 — FIXED (2x doubling)**: `reconr()` in reconr.jl:313-320 called BOTH `sigma_mf2` (→ `cross_section_sammy`) AND `build_rml_evaluator` (→ `cross_section_rml`), then ADDED the results. Both compute the full cross section, so ALL values were exactly 2x. Fix: removed the rml_eval branch. `sigma_mf2` handles RML correctly on its own. The previous "0.008% error" claim was misleading — the actual pipeline had a 100% error from doubling.
+**Bug 3 — FIXED (XQ indexing in XXXX computation)**: The 80x proton XS discrepancy was caused by an XQ matrix indexing error in the XXXX computation (sammy.jl). The Fortran `setxqx` computes `XQ(k,i) = Σ_j R(k,j)*Yinv(j,i)` which is `(R*Yinv)_{k,i}`. Then XXXX uses `XQ(j,i)`. For symmetric R and Yinv: `(R*Yinv)_{j,i} = (Yinv*R)_{i,j}`. Julia computed `xq = Yinv*R` (standard) but read `xq[j,i]` instead of `xq[i,j]`. Fix: changed to `xq[i,j]` (sammy.jl line 380). This corrected the off-diagonal XXXX from 1.76e-12 to 1.40e-10 (matching Fortran), fixing proton from 0.303 to 24.1 barns. Diagonal elements were unaffected (i==j explains why elastic always matched).
 
-**Bug 2 — NOT YET FIXED (missing Coulomb penetrability)**: The proton channel (PP3: ZA=1, ZB=16, MT=600) requires Coulomb wavefunctions for penetrability at all energies. Without Coulomb, proton XS ≈ 0 (vs Fortran ≈ 24 barns at thermal). This causes capture to be ~20 barns too high and total ~340 barns too low across all energies, cascading to grid differences in all 162 MTs.
+**Bug 4 — FIXED (reaction channel plumbing)**: Individual reaction channel XS (MT=600 proton) were computed by `cross_section_sammy` but discarded. Fixed by:
+- Adding `reactions::Dict{Int,T}` field to `CrossSections` (types.jl)
+- Populating reactions in `cross_section_sammy` from the `sigmas` array
+- Preserving reactions through `sigma_mf2` (reconr_evaluator.jl)
+- Adding `reaction_xs` to reconr result and using it in PENDF writer
+- Adding resonance contribution to MF3 background in `merge_background_legacy`
 
-**What was verified (Phase 15)**:
-- **Pipeline uses `cross_section_sammy`** (sammy.jl), NOT `cross_section_rml` (reconr_evaluator.jl). The reconr_evaluator.jl implementation is UNUSED by the T20 pipeline.
-- **Elastic matches Fortran perfectly** (20.689 barns) — confirms hard-sphere channels are correct
-- **betapr values match Fortran EXACTLY** with Coulomb enabled (proton res 4: P=2.871e-4, betapr=26.39 in both Julia and Fortran — verified via Fortran diagnostic prints in betset)
-- **Coulomb P values computed correctly** via coulx translation (xsigll→asymp2→taylor→getfg→getps, all in sammy.jl lines 615-1060)
-- **Full cross section with Coulomb enabled gives WRONG total** (1892 vs Fortran 2230): the psmall scaling condition in the per-energy Y-matrix (`setr`) interacts differently across l=0 (SG1-2) and l=1 (SG3-8) spin groups
+**Previous bugs (still fixed)**:
+- **Bug 1 — FIXED (2x doubling, Phase 15)**
+- **Bug 2 — FIXED (Coulomb l=0 enabled, Phase 15)**
 
-**Cl-35 channel structure (8 spin groups)**:
-- SG1-2: AJ=1,2, l=0 for both elastic+proton (s-wave)
-- SG3-8: AJ=0,-1,-2,-1,-2,-3, l=1 for both elastic+proton (p-wave)
-- At thermal: l=0 P_elastic ≈ 3.3e-6 (hard-sphere), l=1 P_elastic ≈ 3.5e-17 (TINY!)
-- Proton P_Coulomb: l=0 ≈ 2.9e-5, l=1 ≈ 7.2e-6 (from Fortran SETR diagnostic)
+**Remaining issues for T20**:
+1. **Grid explosion (9968 vs 3577)**: The correct proton XS changes capture by ~1% at all energies. This cascades through the adaptive reconstruction to produce a very different grid. The Fortran tests convergence of all 4 channels (elastic, fission, capture, proton — `nsig=5`). Enabling 4-channel convergence in Julia causes 10k grid points (vs Fortran's 3577) because l=1 Coulomb penetrability differs (Julia uses hard-sphere for l>0, Fortran uses Coulomb for all l). Disabling proton convergence keeps the 3-partial grid but misses ~254 Fortran-required points.
+2. **l>0 Coulomb penetrability**: Julia restricts Coulomb to l=0 in both betapr (line 179) and setr (line 291). The l=0 restriction was added because l>0 Coulomb caused "ill-conditioned Y-matrices" — but this was actually the XQ indexing bug (now fixed). Try enabling Coulomb for all l-values and verify the XS values match.
+3. **Phase shift for Coulomb channels**: Julia uses `_sammy_sinsix(rhof, lsp)` (hard-sphere) for all channels. Fortran uses `pghcou` for Coulomb channels to compute sinphi/cosphi, then sets `sinsqr = sinphi^2`, `sin2ph = 2*sinphi*cosphi` (samm.f90:3395-3396). This only affects entrance-channel elastic XS formula, so impact is limited, but should be fixed for correctness.
 
-**Remaining issue**: The psmall condition in Julia (sammy.jl line 294) uses `p_val > 1e-8`. The Fortran (samm.f90 setr line 3415-3416) uses a more nuanced check: `NOT (ishift<=0 AND (1-p*rmat_i==1 OR p<1e-8))`. This FP-precision check (`1-p*rmat_i==1`) causes different spin groups to take psmall vs normal path depending on the actual R-matrix values. Julia has this condition implemented but the interaction between psmall scaling for channel 1 (l=1 elastic, always psmall) and normal path for channel 2 (proton, sometimes psmall) produces different XXXX matrices.
-
-**Bug 3 — NOT YET FIXED (80x proton XS discrepancy)**: With Coulomb l=0 enabled, Julia computes proton=0.303 barns vs Fortran=24.1 (80x too small). All inputs verified identical: betapr matches Fortran exactly (via diagnostic prints), alpha formula matches, R-matrix construction formula matches, sectio extraction formula matches. The XXXX off-diagonal |XXXX[1,2]|^2 = 1.76e-12 in Julia vs ~1.4e-10 in Fortran. The R12 ≈ 1.22 in Julia; needs ~14 for Fortran's proton. Something in the matrix computation differs despite identical inputs.
+**Trap 36 (NEW — FIXED)**: The Fortran `setxqx` computes `XQ(k,i) = Σ_j Yinv(j,i) * R(k,j)`, which is NOT the standard matrix product `Yinv*R`. For symmetric matrices, `XQ_fortran(j,i) = (Yinv*R)_{i,j}`. Julia's `xq = Yinv*R` gives `xq[i,j] = (Yinv*R)_{i,j}`. When the XXXX loop reads `XQ(j,i)`, Julia must read `xq[i,j]`, not `xq[j,i]`. The swap only matters for off-diagonal elements (diagonals are unaffected since i==j). This explains why elastic (diagonal XXXX[1,1]) always matched but proton (off-diagonal XXXX[2,1]) was 8.9x wrong.
 
 **Concrete next steps for T20**:
-1. **Add XXXX diagnostic to Fortran**: patch `setxqx` (samm.f90:6251-6282) to print xxxxr(2), xxxxi(2) for SG2 (n=2) at E=1e-5. Compare with Julia's XXXX[1,2] = -1.33e-6 + 2.01e-9i. The first value that differs identifies the bug.
-2. **Also check XQ = Yinv*R**: print xqr(1,2), xqi(1,2) in Fortran `setxqx`. Julia gives XQ[1,2] ≈ -3.97e-6i.
-3. **Also check Yinv**: print yinv(ij) for the 2x2 system. Julia gives Yinv[1,1] ≈ 3.26e-6i, Yinv[1,2] ≈ -1.15e-10.
-4. **Root cause hypothesis**: the Fortran `twoch` 2x2 matrix inversion may handle the nearly-diagonal complex Y-matrix differently from Julia's `inv()`, giving a larger Yinv[1,2] that propagates to a larger XXXX[1,2].
-5. **Also need**: individual channel MT output (MT=600 etc.) from evaluator to PENDF writer. Currently only 4 components returned.
-
-**Infrastructure already in place** (sammy.jl):
-- `_coulomb_pen_shift_coulx`: full coulx algorithm (xsigll→asymp2→taylor→getfg→getps)
-- `_sammy_pen_coulomb`, `_sammy_pgh_coulomb`: Coulomb-aware dispatchers
-- `zeta_ch` computation per channel in `cross_section_sammy`
-- Just need to enable the TODO calls at lines ~177 and ~289 once psmall interaction is fixed
+1. **Enable l>0 Coulomb**: Remove the `lsp == 0` restriction on lines 179 and 291 of sammy.jl. The XQ fix may have resolved the "ill-conditioned" issue. Test and compare with Fortran.
+2. **Enable 4-channel convergence**: Once l>0 Coulomb matches Fortran, enable proton in `xs_partials` convergence test (reconr.jl). This should give the correct grid (~3577 points).
+3. **Fix Coulomb phase shift**: For Coulomb channels, compute sinsqr/sin2ph from `pghcou` output instead of `sinsix`.
 
 ### 2. RECONR: Fix T34 ±1 FP diffs (52/53) — CONFIRMED HARD
 
@@ -726,3 +717,27 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 - T04 U-235: 24/27 (unchanged, same ±1 as T07)
 - T07 U-235: 24/27 (unchanged, ±1 at URR boundary)
 - **T15-T17: now run without errors (were crashes)**
+
+### Phase 16: SAMMY XQ indexing fix + RML reaction channel plumbing
+
+**XQ matrix indexing bug in XXXX computation (FIXED — Trap 36)**: Root cause of the 80x proton XS discrepancy for all RML/SAMMY (LRF=7) materials. The Fortran `setxqx` computes `XQ(k,i) = Σ_j R(k,j)*Yinv(j,i)`, which gives `XQ_F(j,i) = (Yinv*R)_{i,j}` for symmetric matrices. Julia computed `xq = Yinv*R` (giving `xq[i,j] = (Yinv*R)_{i,j}`) but read `xq[j,i]` in the XXXX loop. Since `(Yinv*R)_{j,i} ≠ (Yinv*R)_{i,j}` for the product of two symmetric matrices, off-diagonal XXXX elements were wrong. Diagonal elements were unaffected (j==i). Fix: changed `xq[j,i]` to `xq[i,j]` at sammy.jl line 380. Verified by adding Fortran diagnostics to setr/setxqx — all R-matrix and Y-matrix values matched between Julia and Fortran, confirming the bug was purely in the XXXX indexing.
+
+**Diagnostic approach that found the bug**:
+1. Wrote Julia diagnostic script printing all intermediate values for SG2 at E=1e-5
+2. Patched Fortran samm.f90 setr to print R-matrix, Y-matrix, rootp, elinvr, elinvi
+3. Patched setxqx to print XXXX elements
+4. Compared side-by-side: R/Y/rootp/elinv matched, XXXX[1,1] and XXXX[2,2] matched, but XXXX[2,1] differed by 8.9x
+5. Traced through the XQ computation formula and identified the index swap
+
+**RML reaction channel plumbing (FIXED)**: Extended the reconr pipeline to carry individual reaction channel XS (like MT=600 proton) from `cross_section_sammy` through to the PENDF output:
+- Added `reactions::Dict{Int,T}` field to `CrossSections` struct (backward-compatible constructors)
+- `cross_section_sammy` now populates reactions dict from the internal `sigmas` array
+- `sigma_mf2` preserves reactions when constructing CrossSections
+- `reconr` extracts `reaction_xs` for the PENDF writer
+- `merge_background_legacy` adds resonance XS to MF3 background for reaction MTs
+- `_get_legacy_section` in pendf_writer adds resonance contribution to reaction MT sections
+
+**Test results after Phase 16:**
+- All 18 BIT-IDENTICAL tests: no regression (T01, T02, T08, T09-T13, T18, T19, T25-T27, T30, T45, T47, T55, T84)
+- T20 Cl-35: XS values correct (proton=24.1 barns at thermal, matches Fortran). Grid differs (9968 vs 3577) due to capture changing ~1% from correct proton subtraction, cascading through adaptive reconstruction. Still 12/162 PERFECT due to grid diff.
+- T20 remaining work: enable l>0 Coulomb (the "ill-conditioned" issue was actually the XQ indexing bug), then enable 4-channel convergence to match Fortran grid
