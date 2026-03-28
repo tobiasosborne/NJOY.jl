@@ -225,22 +225,27 @@ function write_full_pendf(io::IO, result::NamedTuple;
         imt = Int(mt)
         ns[] = 1
 
+        qm = 0.0; qi = 0.0
         if haskey(override_mf3, imt)
             sec_e, sec_xs = override_mf3[imt]
+            # Get QM/QI from _get_legacy_section (handles redundant MTs correctly)
+            sec_orig = _get_legacy_section(result, imt)
+            if sec_orig !== nothing
+                qm, qi = sec_orig[3], sec_orig[4]
+            end
         elseif haskey(extra_mf3, imt)
             sec_e, sec_xs = extra_mf3[imt]
         else
             sec = _get_legacy_section(result, imt)
             sec === nothing && continue
-            sec_e, sec_xs = sec[1], sec[2]
+            sec_e, sec_xs, qm, qi = sec
         end
 
-        # HEAD
-        lr = mt == 1 ? 99 : 0
-        _write_cont_line(io, za, awr, 0, lr, 0, 0, Int(actual_mat), 3, imt, ns)
-        # TAB1
+        # HEAD: LR=99 for all PENDF MTs (Fortran reconr emerge convention)
+        _write_cont_line(io, za, awr, 0, 99, 0, 0, Int(actual_mat), 3, imt, ns)
+        # TAB1: QM, QI from MF3 section
         np = length(sec_e)
-        _write_cont_line(io, 0.0, 0.0, 0, 0, 1, np, Int(actual_mat), 3, imt, ns)
+        _write_cont_line(io, qm, qi, 0, 0, 1, np, Int(actual_mat), 3, imt, ns)
         # Interpolation
         @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n", np, 2, "", Int(actual_mat), 3, imt, ns[])
         ns[] += 1
