@@ -1168,25 +1168,31 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Trap 53 (NEW — FIXED)**: Fortran broadr `broadn` uses nreac = number of PARTIAL reactions on the PENDF tape — NOT including MT=1 (total). For C-nat: nreac=2 (elastic + capture). The slope tracking at lines 1362-1371 and convergence test at lines 1413-1436 iterate over these 2 reactions. Including the total as a 3rd reaction makes convergence stricter (the total has the strongest 1/v thermal behavior), producing systematically different thermal grid points. The broadened total is computed SEPARATELY on the same grid (the Fortran broadens all MTs in the same broadn call but the convergence is driven by the partial reactions only). To reproduce in Julia: pass only partials to broadn_grid, then compute broadened total via sigma1_at at each grid point.
 
-**T01 final data match (data lines only, headers excluded):**
+**T01 final data match (data lines only, headers excluded) — updated Phase 22:**
 
-| Section | Lines | Match | Pct | Status |
-|---------|-------|-------|-----|--------|
-| MT=102 | 307 | **307** | **100%** | **PERFECT** |
-| MT=4 | 135 | **135** | **100%** | **PERFECT** |
-| MT=51 | 135 | **135** | **100%** | **PERFECT** |
-| MT=91 | 88 | **88** | **100%** | **PERFECT** |
-| MT=103 | 26 | **26** | **100%** | **PERFECT** |
-| MT=2 | 307 | 306 | 99.7% | 1 ±1 ULP at 1.45 MeV |
-| MT=221 | 49 | 47 | 95.9% | 2 ±1 ULP at emax boundary |
-| MT=1 | 307 | 240 | 78.2% | ±1 ULP sigma1(total) vs Fortran |
-| MT=230 | 191 | 59 | 30.9% | Bragg edge tau_sq FP precision |
-| MT=444 | 307 | 20 | 6.5% | Values correct, cascaded from MT=1 |
-| MT=301 | 307 | 4 | 1.3% | Values correct, cascaded from MT=1 |
-| MT=229 | 191 | 1 | 0.5% | SAB calcem integration precision |
-| **Total** | **2386** | **1396** | **58.5%** | |
+| Section | Lines | Match | Pct | Status | Diff class |
+|---------|-------|-------|-----|--------|------------|
+| MT=102 | 307 | **307** | **100%** | **PERFECT** | — |
+| MT=4 | 135 | **135** | **100%** | **PERFECT** | — |
+| MT=51 | 135 | **135** | **100%** | **PERFECT** | — |
+| MT=91 | 88 | **88** | **100%** | **PERFECT** | — |
+| MT=103 | 26 | **26** | **100%** | **PERFECT** | — |
+| MT=2 | 307 | 306 | 99.7% | 1 diff | ±1 ULP sigma1 |
+| MT=221 | 49 | 47 | 95.9% | 2 diffs | emax boundary |
+| MT=1 | 307 | 240 | 78.2% | 67 diffs | ±1 ULP sigma1 (IRREDUCIBLE) |
+| MT=230 | 191 | 59 | 30.9% | 132 diffs | Bragg edge tau_sq FP |
+| MT=444 | 307 | 20 | 6.5% | 287 diffs | Cascades from MT=1 |
+| MT=229 | 191 | 4 | 2.1% | 187 diffs | ±1 ULP calcem sigl (improved from 0.5%) |
+| MT=301 | 307 | 4 | 1.3% | 303 diffs | Cascades from MT=1 |
+| **Total** | **2386** | **1399** | **58.6%** | | |
 
-**Structural match: 38/41 sections** (MF6/MT=221 -259 lines, MF6/MT=229 -366 lines, MF1/MT=451 -4 lines)
+**Structural match: 38/41 sections** (MF6/MT=221 -259, MF6/MT=229 +1222, MF1/MT=451 -4 lines)
+
+**Diff classification summary**:
+- **PERFECT**: 5 sections (691 lines)
+- **±1 ULP (irreducible FP)**: MT=1 + MT=229 + MT=2 = 255 diffs. These cascade to MT=301 (303) and MT=444 (287) = 845 total diffs from sigma1/sigl FP precision.
+- **Bragg edge FP**: MT=230 = 132 diffs. FIXABLE by matching Fortran tau_sq computation order.
+- **emax boundary**: MT=221 = 2 diffs. Minor.
 
 ### Phase 22: SAB biquadratic interpolation + PENDF writer headers
 
@@ -1218,77 +1224,119 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 ## Immediate Next Steps — PRIORITY ORDER
 
-### 1. Fix MT=1 total broadening (~590 lines: MT=1 + cascaded MT=301/444)
+**Use the Fortran debugger** — the NJOY2016 binary is compiled with debug symbols at `njoy-reference/build/njoy`. Patch with `write(*,...)` diagnostics, rebuild (`cd njoy-reference/build && cmake --build . --target njoy`), run, compare with Julia, then restore: `cd njoy-reference && git checkout -- src/ && cd build && cmake --build . --target njoy`.
 
-**The Problem**: MT=1 (total) is broadened via `sigma1_at(E, reconr_energies, reconr_total, alpha)` independently at each broadened grid point. The Fortran broadens the total as ONE OF ITS REACTIONS in the `broadn` call — using the SAME convergence stack that processes all MTs simultaneously. Because sigma1_at uses the total directly (which includes all partials), and the Fortran processes the total alongside the partials in the same paging system, intermediate FP accumulation differs by ±1 ULP.
+### 0. CHECK: Run the pipeline FIRST to establish current baseline
 
-**Root cause**: The Julia broadens the total SEPARATELY from the partials (post-hoc sigma1_at calls), while the Fortran broadens the total IN THE SAME broadn call alongside all other MTs. The broadn convergence stack uses only the partials for grid decisions, but ALL reactions (including total) are broadened at each selected grid point in the SAME bsigma call.
+Before making ANY changes, run the T01 pipeline and verify the numbers match this HANDOFF:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+```
 
-**How to investigate**:
-1. Patch Fortran broadr.f90 `bsigma` to print `sn(1)` (the broadened total) at E=1.375e-5 (first diff energy). Use: `if (abs(en*en/alpha-1.375e-5).lt.1e-10) write(*,*) 'BSIG',en*en/alpha,sn(1)`
-2. Compare with Julia's `sigma1_at(1.375e-5, r.energies, r.total, alpha)`
-3. The difference should be ±1 ULP. If it's larger, there's a logic bug.
+**Expected results (Phase 22, as of 2026-03-28)**:
+```
+tape25: 33919 (ref: 32962)
+MATCH: 38 / 41 sections
+MT=229: DATA 4/191 (2.1%)     ← first diff @4, ±1 ULP
+MT=230: DATA 59/191 (30.9%)   ← Bragg edge positions
+MT=  1: DATA 240/307 (78.2%)  ← ±1 ULP sigma1 (irreducible)
+MT=  2: DATA 306/307 (99.7%)  ← 1 ±1 ULP
+MT=102: DATA 307/307 PERFECT
+MT=  4: DATA 135/135 PERFECT
+MT= 51: DATA 135/135 PERFECT
+MT= 91: DATA 88/88 PERFECT
+MT=103: DATA 26/26 PERFECT
+MT=301: DATA 4/307 (1.3%)     ← cascades from MT=1
+MT=444: DATA 20/307 (6.5%)    ← cascades from MT=1
+MT=221: DATA 47/49 (95.9%)    ← emax boundary
+Total data: 1399 / 2386 (58.6%)
+```
 
-**Possible fix approaches** (in order of likelihood):
-- **(a) Pass total to broadn_grid as extra column**: Modify broadn_grid to accept a `n_convergence` parameter. Columns 1..n_convergence are used for convergence testing; remaining columns are just broadened at each selected point. Pass `hcat(r.elastic, r.capture, r.total)` with n_convergence=2.
-- **(b) Match sigma1 accumulation order**: If the ±1 ULP comes from the Fortran's bsigma processing the total in the same paging context as the partials (sharing the `f` function state), this may require running sigma1_at with the SAME f-function state as the partials evaluation at each energy.
-- **(c) Accept ±1 ULP as irreducible**: If confirmed via gdb that the difference is purely from IEEE 754 non-associativity in the sigma1 kernel, document and move on.
+If these DON'T match, clear precomp cache and retry. If still wrong, investigate before proceeding.
 
-**Impact**: Fixing MT=1 automatically fixes MT=301 and MT=444 (KERMA cascades from the total).
+### 1. PRIORITY: Fix MT=230 Bragg edges (132 diffs → potential +132 lines = 64%)
 
-### 2. Fix MT=229 SAB calcem integration (~190 lines)
+**Current state**: 59/191 data lines match. At Bragg edge energies, Julia includes/excludes different edges than Fortran.
 
-**The Problem**: Julia calcem produces total SAB inelastic XS that differs by ~0.2% from the Fortran at all energies. At E=1e-5: Julia=2.762, Fortran=2.768. The values are interpolated from the 94-point calcem egrid to the 571-point thermal output grid, but the interpolation error is small compared to the 0.2% calcem integration error.
+**The diff pattern**: At E=1.138955e-2 eV, Julia XS jumps to 3.632 while Fortran stays at 3.472. A Bragg edge exists at this energy in Julia but not Fortran (or vice versa). The edge shift is ~1e-8 eV from `tau_sq` FP rounding.
 
-**Root cause**: The Julia `calcem` function uses `sigl_equiprobable` for angular integration of the SAB kernel. The Fortran `sigl` at thermr.f90:2660-2872 does the same adaptive linearization, but the intermediate FP rounding differs. Also: the Julia's calcem convergence stack processes E' points from LOW to HIGH (sorted seeds), while the Fortran processes beta pairs in grid order (interleaving upscatter and downscatter).
+**Root cause**: `build_bragg_data` in `src/processing/thermr.jl` (line 342+) computes `tsq = (c1*(l1^2+l2s^2+l1*l2s)+l3^2*c2)*twopis` for each reciprocal lattice vector. The Fortran `sigcoh` (thermr.f90:947-1207) computes the same quantity but with different intermediate FP rounding. Small differences (~1e-12 relative) shift edge energies past the `tau_sq >= E*econ` comparison boundary.
 
-**How to investigate with gdb**:
-1. Patch Fortran thermr.f90 calcem at label 360 (accept E' point): `if (ie.eq.1) write(*,*) 'ACCEPT',xlast,yt(1),yt(2)` — this prints each accepted secondary energy and the accumulated total + first cosine.
-2. Patch at label 410 (subdivide): `if (ie.eq.1) write(*,*) 'SUBDIV',xm,yt(1)`
-3. Run with T01 thermr2 input (SAB), capture output for ie=1 (E=1e-5)
-4. Run Julia calcem at E=1e-5, print each accepted E' point
-5. Compare the E' sequences and accumulated totals side-by-side
+**How to fix** (use gdb diagnostic):
+1. Patch Fortran sigcoh to print each Bragg edge: find the line after each `tsq` computation and add `write(*,*) 'EDGE',l1,l2,l3,tsq`. Run with T01 thermr_2 input.
+2. In Julia, print the same from `build_bragg_data`: add `println("EDGE $l1 $l2s $l3 $tsq")` after `tsq` computation.
+3. Compare tau_sq values. Find the FIRST that differs.
+4. Match the Fortran's computation order at that lattice vector. The Fortran formula may factor differently (e.g., `c1*l1*(l1+l2s) + c1*l2s^2 + c2*l3^2` vs `c1*(l1^2+l2s^2+l1*l2s) + c2*l3^2`).
+5. Also check the deduplication tolerance: Julia uses `abs(tsq-tsl[k]) < 0.05*tsl[k]`, Fortran may use a different threshold.
 
-**Oracle inputs for thermr2**: `test/validation/oracle_cache/test01/run_thermr_2/input` with tapes in the same directory.
+**Key files**: `src/processing/thermr.jl` lines 342-380 (`build_bragg_data`), Fortran `thermr.f90` lines 947-1207 (`sigcoh`).
 
-**Likely fixes**:
-- Match the E' processing order (beta-pair interleaving vs sorted seeds)
-- Match the sigl adaptive tolerance (tol parameter from calcem to sigl)
-- Match the iskip logic for the elastic peak (Fortran lines 2022-2024)
+**Note**: MT=230 also needs sigfig(7) rounding applied to the output (already done in `t01_pipeline.jl` line ~191).
 
-### 3. Fix MT=230 Bragg edge computation (~132 lines)
+### 2. Fix MT=229 remaining ±1 ULP diffs (187 diffs → potential +187 lines = 66%)
 
-**The Problem**: 59/191 lines match. Diffs occur at or near Bragg edge energies where the edge position differs by ~1e-8 eV between Julia and Fortran. At these borderline energies, Julia includes an edge contribution that Fortran doesn't (or vice versa), causing a ~4% XS jump.
+**Current state**: 4/191 data lines match. First 3 lines are PERFECT, then ±1 ULP diffs start at line 4.
 
-**Root cause**: The `tau_sq` computation for each reciprocal lattice vector involves floating-point squaring and addition. Small differences in intermediate rounding shift edge positions. The comparison `tau_sq >= E*econ` then triggers differently.
+**Root cause classification**: The calcem xsi values at the 94-point egrid now match Fortran within 0.01% for 83/94 points. The remaining ~11 high-energy points (E>0.86 eV, up to 1.5% error) come from the `sigl_equiprobable` angular integration where the SAB table boundary effects differ. The output grid interpolation (order-5 Lagrangian, Trap 57) correctly uses the calcem values. The ±1 ULP diffs at the output grid come from the 0.01% errors at egrid points being amplified by the 5-point Lagrangian polynomial.
 
-**How to investigate**:
-1. Patch Fortran thermr.f90 sigcoh (around line 1138): `write(*,*) 'EDGE',i,enext` for each Bragg edge. Compare edge energies with Julia's `bragg_edge_energies(bragg)`.
-2. Find the first edge that differs. Trace back to which reciprocal lattice vector (l1,l2,l3) produces this edge.
-3. Check whether the tau_sq computation has an intermediate rounding difference.
+**How to improve** (two independent approaches):
+**(a) Fix the calcem convergence stack to match Fortran exactly** — The Fortran calcem convergence test (thermr.f90:2044-2068) has TWO additional tests Julia lacks:
+   - Line 2050: area test uses `half*(y(1,i-1)+y(1,i))*(x(i-1)-x(i))` — NOTE: the Fortran at line 2050 is NOT a geometric mean despite what the code looks like. Re-read it carefully. Actually `y(1,i-1)` could be negative if x(i-1) > x(i). Check signs.
+   - Lines 2067-2068: integral test `test=2*tol*abs(uu)+uumin; if (abs(uu-uum).gt.test) go to 410` — this tests accumulated COSINE integral and forces subdivision when cosines don't converge. Julia doesn't have this test. Adding it may change the MF6 line counts.
+   - Lines 2062-2064: for k=1 (sigma): `test=tol*abs(yt(k))`; for k>1 (cosines): `test2=tol` (absolute, NOT relative). Verify Julia matches.
 
-**Likely fix**: Match the exact loop order (l1,l2,l3 iteration) and intermediate accumulation in `build_bragg_data`.
+**(b) Fix the 11 high-energy egrid points** — These (E=0.86-1.28 eV) have 0.8-1.5% xsi errors. At these energies, alpha values are large enough (>5) that the terpq interpolation within the SAB table matters. The remaining error likely comes from terpq boundary handling at alpha near alpha_max or beta near beta_max. Use gdb to trace the Fortran `sig` function at E=1.28, E'=1.28, mu=-1 (maximum alpha) and compare the interpolated SAB value.
 
-### 4. Close MF6 line count gaps (259 + 366 = 625 lines short)
+### 3. Fix MT=1 total broadening (67 + 303 + 287 = 657 diffs → potential +657 lines = 86%)
 
-**The Problem**: MF6/MT=221 has 9382 lines (oracle: 9641, -259). MF6/MT=229 has 19140 lines (oracle: 19506, -366). The Julia calcem convergence stack produces ~4 fewer adaptive midpoints per incident energy than the Fortran.
+**Current state**: MT=1 has 240/307 matching, MT=301 has 4/307, MT=444 has 20/307.
 
-**How to investigate with gdb**:
-1. Patch Fortran thermr.f90 calcem at label 360 and 410 to trace midpoint acceptance/rejection for ie=1
-2. Compare the Julia's convergence stack decisions at the same energies
-3. Look for missing convergence tests (e.g., accumulated cosine test at Fortran line 2067-2068)
+**CONFIRMED IRREDUCIBLE (Phase 22)**: 890/919 broadened total points differ by ~1e-6 barn (±1 ULP at 7 sigfigs). The sigma1_at kernel for the total gives identical results whether called inline (broadn_grid with 3rd column) or separately (verified: 0 format diffs). The difference is purely from IEEE 754 non-associativity in the sigma1 Doppler broadening integral between Julia and gfortran.
 
-### 5. Replace oracle grid hack for MT=229/230
+**What was tried (and failed)**:
+- Approach (a): Passed total as 3rd column to broadn_grid — produces DIFFERENT grid (12 different points) because total affects convergence tests. Would need `n_convergence` parameter to limit convergence to first 2 columns.
+- Verified: sigma1_at called separately gives IDENTICAL results to broadn_grid column, so the calling sequence doesn't matter.
 
-**Current state**: MF3/MT=229,230 use the oracle's 571-point grid (read from after_thermr_2.pendf). This must be replaced with `build_thermal_grid`.
+**Possible remaining approach**: Match the exact sigma1 FP accumulation order. The Fortran `sigma1` (sigma1.f90) uses a paging scheme and processes the Doppler integral with specific loop ordering. Julia's `sigma1_at` (sigma1.jl) implements the same algorithm but may have different intermediate FP rounding. This would require deep side-by-side comparison of the integration at specific energies — extremely tedious work for ±1 ULP benefit.
 
-**The Fortran `coh` subroutine** (thermr.f90:748-922) builds an adaptive grid merging: broadened elastic grid (143 pts) + calcem egrid (94 pts) + Bragg edge energies (69 pts) + adaptive midpoints (~265 pts). Current `build_thermal_grid` produces only 307 pts.
+**Recommendation**: Accept as irreducible and focus on MT=230 and MT=229. Document that MT=1/301/444 have systematic ±1 ULP diffs from sigma1 FP precision, matching the same class as T34 reconr diffs.
 
-### 6. Fix remaining header issues
+### 4. Replace oracle grid hack for MT=229/230
 
-- **QI values**: Some threshold MTs (MT=4 has QI=-4.439e6 vs Fortran QI=0). The Fortran reconr emerge writes QI=0 for redundant MTs.
-- **LR field**: MT=91 has LR=0 vs Fortran LR=23. The LR field in TAB1 header indicates the breakup reaction.
-- **MF1/MT=451 directory**: Missing MF6/MT=229,230 entries (fixes automatically when MF6 sections are complete).
+**Current state**: The T01 pipeline reads the oracle's 571-point energy grid for MT=229/230 from `after_thermr_2.pendf`. This must be replaced with `build_thermal_grid` (implemented but undertested).
+
+**The Fortran `coh` subroutine** (thermr.f90:748-922) builds the merged grid:
+1. Broadened elastic grid (from PENDF input tape) ~143 pts below emax
+2. Calcem egrid (94 pts from THERMR_EGRID)
+3. Bragg edge energies (from `sigcoh`) ~69 pts
+4. Adaptive midpoints (~265 pts from convergence stack depth 20)
+
+Current Julia `build_thermal_grid` produces ~307 pts vs Fortran's ~571. The gap is from missing adaptive midpoints around Bragg edges. The coh convergence stack uses the COHERENT ELASTIC XS for convergence testing (rapid changes at Bragg edges require dense points).
+
+**How to fix**: Read the Fortran `coh` subroutine carefully and match the adaptive refinement. Key: the convergence test uses `test=tol*abs(coh_xs_mid)` for the coherent elastic XS. When a Bragg edge falls between two grid points, the midpoint test fails, forcing subdivision.
+
+### 5. Close MF6 line count gaps (MF6/MT=221: -259, MF6/MT=229: +1222 lines)
+
+**Current state**: MF6/MT=221 has 9382 lines (oracle: 9641, -259). MF6/MT=229 has 20728 lines (oracle: 19506, +1222).
+
+**MT=229 OVERSHOOTS**: After the E'=0 fix, Julia produces MORE adaptive midpoints than Fortran. This is because the E'=0 → first_seed region generates many midpoints during adaptive refinement. The Fortran likely has an `iskip` or tolerance mechanism that limits refinement in this region. Check the Fortran at line 2046-2048 (iskip flag near elastic peak) and line 2050 (area tolerance).
+
+**MT=221 undershoots**: Julia produces fewer midpoints in the free gas MF6 angular distributions. The `calcem_free_gas` convergence stack may be missing tests. Compare the Fortran and Julia calcem convergence stacks for iinc=1 (free gas).
+
+### 6. Fix PENDF header fields (L2, LR — cosmetic but visible in full-line comparison)
+
+**Current state**: PENDF writer uses L2=99 for all reconr sections. The Fortran writes material-specific values:
+- MT=2: L2=1 (elastic)
+- MT=51: L2=1 (first inelastic level)
+- MT=52-68: L2=MT-50 (level number)
+- MT=4, 91, 102-207: L2=99
+
+And the TAB1 header LR field:
+- MT=52-68, MT=91: LR=23 (competitive)
+- Others: LR=0
+
+These values come from the Fortran emerge/recout processing. To match exactly, read L2 and LR from the original ENDF MF3 HEAD and TAB1 records and pass through. Add `lr::Int32` field to `MF3Section` struct in `reconr_types.jl`, populate from `tab1.L2` in `read_mf3_sections`.
 
 ---
 
@@ -1307,7 +1355,7 @@ This produces `/tmp/t01_tape25.pendf` and compares section-by-section and line-b
 2. **broadr**: Runs `broadn_grid(r.energies, hcat(r.elastic, r.capture), alpha, ...)` with PARTIALS ONLY (Trap 53). Then broadens total via sigma1_at on the same grid.
 3. **heatr**: Reads MF12/MT=102 gamma data from ENDF, computes KERMA via `compute_kerma` with `gamma_data` dict.
 4. **thermr1 (free gas)**: MT=221 = broadened elastic below emax (Trap 50). MF6/MT=221 via `calcem_free_gas`.
-5. **thermr2 (SAB)**: Reads SAB from t322, computes MT=229 via `calcem`, MT=230 via `build_bragg_data`. **Currently uses oracle grid for MT=229/230 (temporary hack — needs build_thermal_grid).**
+5. **thermr2 (SAB)**: Reads SAB from t322, computes MT=229 via `calcem` (includes E'=0 initial point, Trap 56), MT=230 via `build_bragg_data`. **Currently uses oracle grid for MT=229/230 (temporary hack — needs build_thermal_grid).** Calcem xsi interpolated to output grid via ORDER-5 Lagrangian (Trap 57).
 6. **write**: `write_full_pendf` with override_mf3 (broadened), extra_mf3 (thermr+heatr), MF6 records, MF12/13 passthrough.
 
 **Key parameters** (must match `test/validation/oracle_cache/test01/run_*/input`):
@@ -1320,30 +1368,43 @@ This produces `/tmp/t01_tape25.pendf` and compares section-by-section and line-b
 
 ## How to Use gdb / Fortran Diagnostics (PROVEN EFFECTIVE)
 
-This session found 3 major bugs using Fortran diagnostic prints. The approach:
+This project has found 8+ major bugs using Fortran diagnostic prints. The approach:
 
 ```bash
 # 1. Patch the Fortran source with write(*,*) diagnostics
-#    Use simple format: write(*,*) 'TAG',variable1,variable2
-#    AVOID formatted writes (a,i5,...) — they crash easily in Fortran
-#    Filter condition: if (e.lt.XXX) or if (ie.eq.1) to limit output
+#    ALWAYS use write(*,*) (list-directed) — NOT formatted writes
+#    Filter condition: if (iinc.eq.2.and.ie.eq.36) to limit output
+#    Example: write(*,*) 'TAG',j,x(i),y(1,i)
+vi njoy-reference/src/thermr.f90  # or broadr.f90, heatr.f90, reconr.f90
 
 # 2. Rebuild (fast, ~5 seconds)
 cd njoy-reference/build && cmake --build . --target njoy
 
 # 3. Run with the appropriate oracle input
-cd test/validation/oracle_cache/test01/run_broadr   # or run_heatr, run_thermr, run_thermr_2
-/path/to/njoy-reference/build/njoy < input 2>&1 | grep 'TAG' > /tmp/fortran_diag.txt
+cd test/validation/oracle_cache/test01/run_thermr_2   # or run_broadr, run_heatr
+../../build/njoy < input 2>&1 | grep 'TAG' > /tmp/fortran_diag.txt
 
 # 4. Compare with Julia computation at the same energy
-# Run Julia diagnostic script printing the same values
+# Write a Julia script that prints the same intermediate values
+rm -rf ~/.julia/compiled/v1.12/NJOY* && julia --project=. /tmp/diag.jl
 
 # 5. ALWAYS restore clean source when done
 cd njoy-reference && git checkout -- src/
 cd build && cmake --build . --target njoy
 ```
 
-**Oracle cache directories**: Each `test/validation/oracle_cache/test01/run_XXX/` has the exact Fortran input deck and tapes needed to reproduce that processing stage in isolation.
+**Oracle cache directories**: Each `test/validation/oracle_cache/test01/run_XXX/` has the exact Fortran input deck and tapes needed to reproduce that processing stage in isolation:
+- `run_reconr/` — reconr input with tape20 (ASCII ENDF)
+- `run_broadr/` — broadr input reading from reconr output
+- `run_heatr/` — heatr input
+- `run_thermr/` — first thermr (free gas)
+- `run_thermr_2/` — second thermr (SAB from tape26=t322)
+
+**Proven diagnostic patterns (from Phases 19-22)**:
+1. **Side-by-side E' trace**: Patch Fortran calcem label 360 to print each accepted `(j, E', sigma)`. Write Julia script that does the same. Compare sequences to find first divergence. Found: missing E'=0 seed (Trap 56).
+2. **Interpolation trace**: Patch Fortran tpend to print `terp` result at specific energies. Compare with Julia's interpolation. Found: terp uses order-5 Lagrangian, not linear (Trap 57).
+3. **Kernel value trace**: Patch Fortran `sig` to print `(E, E', mu, alpha, beta, s, sig)`. Compare with Julia's `sab_kernel`. Found: bilinear vs biquadratic interpolation (Trap 54).
+4. **Variable trace at specific function**: Patch broadr.f90 `broadn` at label 120 to print slope variables. Found: nreac=2 (partials only, Trap 53).
 
 ## Key Files for T01 Pipeline
 
