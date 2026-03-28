@@ -1043,7 +1043,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             push!(seed_coss, cos)
         end
 
-        # Adaptive refinement with iskip for elastic peak (Fortran lines 2022-2024, 2050-2052)
+        # Adaptive refinement (Fortran calcem lines 2041-2162)
         entries = NTuple{10, Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
@@ -1054,26 +1054,20 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             if j_count > 1
                 total_xs += (ep - xlast) * (sig + ylast) * 0.5
             end
-            # Fortran j==3 / xsi<tolmin (lines 2095-2096)
             if j_count == 3 && total_xs < tolmin_area
                 j_count = 2
                 xlast = ep; ylast = sig
                 if sig > 1e-32
                     entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
                                    k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
-                    if !isempty(entries)
-                        entries[end] = entry
-                    else
-                        push!(entries, entry)
-                    end
+                    !isempty(entries) ? (entries[end] = entry) : push!(entries, entry)
                 end
                 return
             end
             xlast = ep; ylast = sig
             if sig > 1e-32
-                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
-                push!(entries, entry)
+                push!(entries, ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10))
             end
         end
 
@@ -1087,14 +1081,14 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                 if is_elastic_panel
                     emit_point!(seeds[idx-1], seed_sigs[idx-1], seed_coss[idx-1])
                 else
-                    # Convergence stack
+                    # Convergence stack between seeds[idx-1] and seeds[idx]
                     stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
                     stk_c = [zeros(nbin) for _ in 1:imax_stack]
                     stk_e[1] = seeds[idx]; stk_s[1] = seed_sigs[idx]; stk_c[1] .= seed_coss[idx]
                     stk_e[2] = seeds[idx-1]; stk_s[2] = seed_sigs[idx-1]; stk_c[2] .= seed_coss[idx-1]
                     depth = 2
                     while depth >= 2
-                        area = 0.5 * abs(stk_s[depth] + stk_s[depth-1]) * abs(stk_e[depth-1] - stk_e[depth])
+                        area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
                         if depth >= imax_stack || area < tolmin_area
                             emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
                             depth -= 1; continue
@@ -1106,7 +1100,6 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                         end
                         sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
 
-                        # Convergence tests (Fortran lines 2057-2068)
                         ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
                         pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
 
@@ -1114,19 +1107,15 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                         if pass
                             for k in 1:nbin
                                 ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
-                                uu += cos_m[k]
-                                uum += ym_c
+                                uu += cos_m[k]; uum += ym_c
                                 if abs(cos_m[k] - ym_c) > tol
                                     pass = false; break
                                 end
                             end
                         end
-
                         if pass
                             test_uu = 2.0 * tol * abs(uu) + 1e-5
-                            if abs(uu - uum) > test_uu
-                                pass = false
-                            end
+                            abs(uu - uum) > test_uu && (pass = false)
                         end
 
                         if pass
