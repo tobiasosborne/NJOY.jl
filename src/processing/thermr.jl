@@ -768,6 +768,9 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
     kT = PhysicsConstants.bk * T
     tevz = 0.0253
     kT_eff = sab.lat == 1 ? tevz : kT
+    tolmin_area = 5e-7  # Fortran tolmin (line 1611)
+    imax_stack = 20     # max refinement depth (Fortran line 1573)
+    nl = nbin + 1       # total components: sigma + nbin cosines (Fortran nl)
 
     nne = something(findfirst(e -> e > emax, THERMR_EGRID), length(THERMR_EGRID))
     egrid = THERMR_EGRID[1:nne]
@@ -782,30 +785,109 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         E = egrid[ie]
         esi[ie] = E
 
-        # Secondary energy grid from beta values
-        ep_list = Float64[]
+        # Build beta-derived E' seed points (Fortran lines 2003-2031)
+        seeds = Float64[]
         for beta in sab.beta
             ep_down = E - beta * kT_eff
-            ep_down > 0 && push!(ep_list, ep_down)
-            push!(ep_list, E + beta * kT_eff)
+            ep_down > 0 && push!(seeds, round_sigfig(ep_down, 8, 0))
+            ep_up = E + beta * kT_eff
+            push!(seeds, round_sigfig(ep_up, 8, 0))
         end
-        sort!(unique!(ep_list))
-        filter!(ep -> ep > 0, ep_list)
+        sort!(unique!(seeds))
+        filter!(ep -> ep > 0, seeds)
 
+        # Evaluate sigl at each seed point
+        seed_data = Vector{Tuple{Float64, Float64, Vector{Float64}}}()
+        for Ep in seeds
+            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
+            push!(seed_data, (Ep, sigma, cosines))
+        end
+
+        # Adaptive refinement between consecutive seed points (Fortran lines 2041-2162)
         entries = NTuple{10, Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
 
-        for (j, Ep) in enumerate(ep_list)
-            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
-            if j > 1
-                total_xs += (Ep - xlast) * (sigma + ylast) * 0.5
+        function emit_point!(ep, sigma, cosines)
+            if xlast > 0
+                total_xs += (ep - xlast) * (sigma + ylast) * 0.5
             end
-            xlast = Ep; ylast = sigma
+            xlast = ep; ylast = sigma
             if sigma > 1e-32
-                entry = ntuple(k -> k == 1 ? Ep : k == 2 ? sigma :
+                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
                                k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
                 push!(entries, entry)
+            end
+        end
+
+        # Process seed points with adaptive refinement between them
+        for idx in 1:length(seed_data)
+            ep_hi, sig_hi, cos_hi = seed_data[idx]
+
+            if idx > 1
+                ep_lo, sig_lo, cos_lo = seed_data[idx-1]
+                # Convergence stack between ep_lo and ep_hi
+                stk_e = zeros(imax_stack)
+                stk_s = zeros(imax_stack)
+                stk_c = [zeros(nbin) for _ in 1:imax_stack]
+                stk_e[1] = ep_hi; stk_s[1] = sig_hi; stk_c[1] .= cos_hi
+                stk_e[2] = ep_lo; stk_s[2] = sig_lo; stk_c[2] .= cos_lo
+                depth = 2
+
+                while depth >= 2
+                    # Check area threshold (Fortran line 2053)
+                    area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
+                    if depth >= imax_stack || area < tolmin_area
+                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                        depth -= 1
+                        continue
+                    end
+
+                    xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
+                    if xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                        depth -= 1
+                        continue
+                    end
+
+                    # Evaluate at midpoint
+                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+
+                    # Convergence test (Fortran lines 2057-2065)
+                    ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])  # linear interp of sigma
+                    test_s = max(tol * abs(sig_m), tolmin_area)
+                    pass = abs(sig_m - ym_s) <= test_s
+
+                    # Also test cosines (Fortran lines 2059-2060)
+                    if pass
+                        for k in 1:nbin
+                            ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                            if abs(cos_m[k] - ym_c) > tol
+                                pass = false; break
+                            end
+                        end
+                    end
+
+                    if pass
+                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                        depth -= 1
+                    else
+                        # Subdivide: push midpoint
+                        depth += 1
+                        if depth > imax_stack; depth = imax_stack; end
+                        stk_e[depth] = stk_e[depth-1]
+                        stk_s[depth] = stk_s[depth-1]
+                        stk_c[depth] .= stk_c[depth-1]
+                        stk_e[depth-1] = xm
+                        stk_s[depth-1] = sig_m
+                        stk_c[depth-1] .= cos_m
+                    end
+                end
+            end
+
+            # Emit the current seed point (last in pair becomes first of next)
+            if idx == length(seed_data)
+                emit_point!(ep_hi, sig_hi, cos_hi)
             end
         end
 
