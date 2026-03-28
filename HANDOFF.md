@@ -1224,7 +1224,25 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 - **MT=230 Bragg edge positions**: 59/191 data lines match. Format difference (9-sigfig fixed vs 7-sigfig scientific) accounts for many diffs, but ~40 lines have real XS value differences (~4%) at energies near Bragg edges. Root cause: tau_sq = (c1*(l1²+l2²+l1*l2)+l3²*c2)*twopis has FP rounding differences shifting edge positions by ~1e-8 eV. Applied sigfig(7) rounding to bragg_edges output in pipeline.
 
-- **Reconr regression (PRE-EXISTING)**: T01 reconr 29/29 → appeared as 1/29 in full-line comparison. The regression is NOT from this session's changes — same behavior before and after. Root cause: comparison was checking ALL 66 characters including headers (L2, LR, QI fields). With DATA-ONLY comparison (skipping 3 header lines per section), all tests remain BIT-IDENTICAL. The header fields (L2 level numbers, LR breakup type) are material-specific and require reading from the original ENDF to match exactly.
+- **Reconr regression (PRE-EXISTING)**: T01 reconr 29/29 → appeared as 1/29 in full-line comparison. Root cause: comparison checking ALL 66 characters including headers (L2, LR, QI). With DATA-ONLY comparison, all tests remain BIT-IDENTICAL.
+
+### Phase 23: Bragg edge merge fix + sigma_b fix + calcem convergence
+
+**MT=230 Bragg edges: 59/191 → 191/191 PERFECT**. Two bugs in `build_bragg_data`:
+1. Missing `tsqx = econ/20` merge threshold (Fortran line 1014): below this, Fortran NEVER merges nearby edges. Julia was merging with 5% tolerance, combining form factors from different lattice indices.
+2. One-sided merge: Fortran uses `tsl[k] <= tsq < 1.05*tsl[k]`; Julia used symmetric abs check.
+
+**Free gas sigma_b: 48x error found via gdb**. Fortran thermr line 1913-1914: `smz=1; sb=((az+1)/az)^2 ≈ 1.175`. Pipeline was using `sb = A*elastic ≈ 56.38`. Confirmed: Julia sigl matches Fortran to 1e-13 relative with correct sigma_b.
+
+**Calcem convergence tests** now match Fortran: per-component cosine tests, integral cosine test (lines 2067-2068), j==3 skip, sigma test without floor. Confirmed nnl=-nl (line 1637) = equi-probable cosine mode.
+
+**Trap 58 (NEW — FIXED)**: Free gas sigma_b is `((AWR+1)/AWR)^2`, NOT `A*sigma_free`.
+**Trap 59 (NEW — FIXED)**: build_bragg_data: tsqx=econ/20 threshold + one-sided merge.
+**Trap 60 (NEW)**: calcem passes nnl=-nl to sigl = equi-probable cosine mode, not Legendre.
+
+**T01 data: 1399/2386 (58.6%) → 1528/2386 (64.0%)**. MT=230 PERFECT.
+
+**Remaining MF6 gap**: MT=221 elastic peak skip too wide (skips 2 panels, Fortran skips only narrow [sigfig(E,8,-1), sigfig(E,8,+1)]). MT=229 SAB boundary overshoot at high IEs. Next: rewrite calcem_free_gas to process seeds sequentially like Fortran, matching exact intervals.
 
 ---
 
