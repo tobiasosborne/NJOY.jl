@@ -930,3 +930,70 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 - 16 DIFFS (known precision/grid/feature-gap issues)
 - **0 CRASH** (was 8 before Phase 18)
 - Unit tests: 16728 passed, 686 failed
+
+### Phase 19: Full-pipeline PENDF infrastructure for T01 official test passing
+
+**Goal**: Run T01's full chain (reconr→broadr→heatr→thermr×2→groupr→moder) and produce a tape25 matching referenceTape25 per execute.py (rel_tol=1e-9, abs_tol=1e-10).
+
+**T01 test structure** (from CMakeLists + execute.py):
+- Input: tape20 (t511, C-nat ENDF), tape26 (t322, graphite S(α,β))
+- Chain: moder→reconr→broadr→heatr→thermr(free)→thermr(S(α,β))→groupr→moder
+- Comparison: tape25 vs referenceTape25 (32,962 lines, rel=1e-9)
+- groupr output NOT compared (writes to tape24)
+
+**T01 oracle caches** (complete 5-stage): after_reconr.pendf (2848 lines), after_broadr.pendf (2734), after_heatr.pendf (3358), after_thermr.pendf (13056), after_thermr_2.pendf (32962 = referenceTape25).
+
+**broadr.jl rewrite — broadn_grid (Bug 12)**:
+- Julia's broadr was using reconr's `adaptive_reconstruct` — fundamentally wrong algorithm. Fortran broadr uses `broadn` (broadr.f90:1256-1508): a convergence stack (max depth 12) that walks the original grid, selecting nodes via slope-direction tracking, testing 5 convergence criteria (sigfig resolution, linear interpolation, monotonicity ratio 3.0, integrated error, step-size guard 4.1), with thermal tightening 5x below 0.4999 eV.
+- Implemented `broadn_grid` matching Fortran exactly. **T01 result: 919/919 points match Fortran, 907/919 energies identical** (12 diffs in thermal range 1e-5 to 2.3e-5 eV from sigfig rounding detail).
+- **Critical discovery: thnmax=4.81207e6 eV** (from Fortran broadr output log, NOT the full energy range). This is the MT=51 threshold for C-12. Broadening only happens below this energy; above it, original reconr data is copied directly.
+- **Fortran does NOT thin after broadn** (only calls thinb when tempef=0). broadn's convergence stack already produces an optimal grid.
+- sigma1 kernel values confirmed CORRECT to 1e-8 relative at all 919 Fortran energy points.
+- thin_xs fixed: `tol*xs` without abs() matching Fortran's `errthn*s(i,k)`, added thnmax guard, reciprocal multiply.
+
+**thermr.jl — sigl_equiprobable + MF6 data (Bug 13)**:
+- Implemented `sigl_equiprobable` matching Fortran sigl (thermr.f90:2660-2872): two-phase adaptive linearization of σ(μ) for total XS, then CDF inversion for equi-probable cosine bins. nbin=8 produces 8 equi-probable cosine values per (E, E') pair.
+- Implemented `compute_mf6_thermal`: driver producing `MF6ListRecord` per incident energy with NL=10 values per secondary energy (E', σ, μ₁...μ₈).
+- T01 result: 76 incident energies, 3203 secondary energies, 5437 data lines (oracle: 9641 — needs denser secondary energy grid matching Fortran's calcem).
+
+**pendf_writer.jl — write_full_pendf**:
+- New `write_full_pendf` function: per-MT energy grids via `override_mf3`/`extra_mf3` dicts, MF12/MF13 raw-line passthrough, MF6 TAB2+LIST record writer using existing ENDF I/O building blocks (write_cont, write_tab1, write_tab2, write_list).
+- T01 result: **29/41 section line counts match reference exactly** (24 MF3 + MF2 + MF12/MT102 + MF13/MT51 + 2 format sections).
+
+**test_executor.jl pipeline fixes**:
+- `reconr_to_pendf`: now carries all 29 MTs via `_collect_reactions` + `_get_legacy_section` (was only 4 MTs: total/elastic/fission/capture).
+- `execute_heatr`: merges KERMAResult (MT=301/444) into PointwiseMaterial (was discarding results).
+- `execute_thermr`: adds thermal MTs (221/229) as new columns (was replacing MT=2).
+
+**T01 section match summary (Phase 19)**:
+
+| Section | Julia | Reference | Status |
+|---------|-------|-----------|--------|
+| MF1/MT451 | 41 | 47 | Missing MF6/229,230 directory entries |
+| MF2/MT151 | 4 | 4 | **MATCH** |
+| MF3 (24 non-broadened MTs) | correct | correct | **24/24 MATCH** |
+| MF3/MT=1,2,102 | 348 | 310 | Need broadened grid (919 pts, have it in broadn_grid) |
+| MF3/MT=301,444 | 348 | 310 | Need heatr on broadened grid |
+| MF3/MT=221 | 20 | 52 | Need real thermal grid |
+| MF3/MT=229,230 | 20 | 194 | Need S(α,β) from tape26 |
+| MF6/MT=221 | 5437 | 9641 | Need denser secondary E grid |
+| MF6/MT=229 | 0 | 19506 | Need S(α,β) MF6 computation |
+| MF6/MT=230 | 0 | 4 | Need coherent elastic stub |
+| MF12/MT=102 | 348 | 348 | **MATCH** |
+| MF13/MT=51 | 139 | 139 | **MATCH** |
+
+**Remaining work for T01**:
+1. Wire broadn_grid output as override_mf3 for MT=1,2,102 (919 pts) + compute thnmax from thresholds
+2. Wire heatr on broadened grid for MT=301,444
+3. Compute real thermr MF3/MF6 data for MT=221 (free gas with Fortran's calcem energy grid)
+4. Read tape26 (t322) S(α,β) data and compute MT=229,230 + MF6/MT=229
+5. Write MF6/MT=230 coherent elastic stub (4 lines, LIP=-294)
+6. Grind 12 thermal-range broadr energy diffs
+7. Fix format_endf_float for XS values (7-sigfig scientific vs 9-sigfig fixed)
+8. Full chain grinding to bit-identical
+
+**Trap 39 (NEW)**: Fortran broadr's `thnmax` is NOT the full energy range — it's dynamically computed from reaction thresholds. For C-nat T01, thnmax=4.81207e6 (the MT=51 threshold × some factor). Above thnmax, original reconr data is copied without broadening/thinning. The Fortran output log says: "final maximum energy for broadening/thinning = 4.81207E+06 eV".
+
+**Trap 40 (NEW)**: Fortran broadr does NOT call thinb after broadn when tempef > 0. The broadn convergence stack already produces an optimal grid. Julia was applying thin_xs after broadn_grid, reducing 919→434 pts. Remove the thinning step.
+
+**Trap 41 (NEW)**: MF6 thermal angular distributions use LANG=3 (equi-probable cosines), NL=nbin+2=10 values per secondary energy: (E', σ, μ₁...μ₈). The MF6 structure is: HEAD + product TAB1 (yield=1.0) + TAB2 (NE incident energies) + NE LIST records. Each LIST has NW=n_secondary*10 data words.
