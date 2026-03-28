@@ -828,10 +828,11 @@ function compute_mf6_thermal(pendf_energies::Vector{Float64},
                              A::Float64, T::Float64, nbin::Int;
                              model::Symbol=:free_gas,
                              sab_data::Union{SABData, Nothing}=nothing,
-                             sigma_b::Union{Float64, Nothing}=nothing)
+                             sigma_b::Union{Float64, Nothing}=nothing,
+                             emax::Float64=0.0)
     kT = PhysicsConstants.bk * T
     tev = kT
-    emax = 10.0 * kT  # maximum secondary energy
+    emax = emax > 0 ? emax : 10.0 * kT  # default: 10*kT for backward compat
 
     # Bound scattering cross section
     if sigma_b === nothing
@@ -848,9 +849,9 @@ function compute_mf6_thermal(pendf_energies::Vector{Float64},
         error("Invalid model=$model or missing sab_data")
     end
 
-    # Use the standard thermr energy grid for incident energies
-    egrid = filter(e -> e <= 10.0 * kT, THERMR_EGRID)
-    isempty(egrid) && (egrid = [kT])
+    # Use the standard thermr energy grid for incident energies (up to emax)
+    nne = something(findfirst(e -> e > emax, THERMR_EGRID), length(THERMR_EGRID))
+    egrid = THERMR_EGRID[1:nne]
 
     records = MF6ListRecord[]
     for E in egrid
