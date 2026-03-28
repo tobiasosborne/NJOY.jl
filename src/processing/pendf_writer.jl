@@ -139,6 +139,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           override_mf3::Dict{Int, <:Tuple} = Dict{Int, Tuple{Vector{Float64},Vector{Float64}}}(),
                           extra_mf3::Dict{Int, <:Tuple} = Dict{Int, Tuple{Vector{Float64},Vector{Float64}}}(),
                           mf6_records::Dict{Int, <:Any} = Dict{Int, Any}(),
+                          mf6_stubs::Dict{Int, <:NamedTuple} = Dict{Int, NamedTuple}(),
                           mf12_lines::Vector{String} = String[],
                           mf13_lines::Vector{String} = String[])
     mf2 = result.mf2
@@ -175,6 +176,11 @@ function write_full_pendf(io::IO, result::NamedTuple;
             np = length(sec[1])
         end
         section_lines[(3, imt)] = 3 + cld(np, 3)
+    end
+
+    # MF6 stub line counts (coherent elastic: HEAD + TAB1 = 4 lines + SEND)
+    for (mt, _) in mf6_stubs
+        section_lines[(6, mt)] = 4 + 1  # HEAD + TAB1(3) + SEND
     end
 
     # MF6 line counts (HEAD + TAB1 + TAB2 + LIST records per MT)
@@ -259,12 +265,18 @@ function write_full_pendf(io::IO, result::NamedTuple;
     end
     _write_fend_zero(io, Int(actual_mat))
 
-    # MF6 sections (if any)
-    # MF6 sections (thermal angular distributions)
-    for (mt, records) in sort(collect(mf6_records))
-        _write_mf6_section(io, Int(actual_mat), mt, za, awr, records, tempr)
+    # MF6 sections (thermal angular distributions + coherent elastic stubs)
+    all_mf6_mts = sort(collect(union(keys(mf6_records), keys(mf6_stubs))))
+    for mt in all_mf6_mts
+        if haskey(mf6_records, mt)
+            _write_mf6_section(io, Int(actual_mat), mt, za, awr, mf6_records[mt], tempr)
+        elseif haskey(mf6_stubs, mt)
+            s = mf6_stubs[mt]
+            _write_mf6_coherent_stub(io, Int(actual_mat), mt, za, awr,
+                                      s.nbragg, s.emin, s.emax)
+        end
     end
-    if !isempty(mf6_records)
+    if !isempty(all_mf6_mts)
         _write_fend_zero(io, Int(actual_mat))
     end
 
@@ -380,6 +392,26 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
     end
 
     # SEND
+    _write_send(io, mat, 6)
+end
+
+"""
+    _write_mf6_coherent_stub(io, mat, mt, za, awr, nbragg, emin, emax)
+
+Write MF6/MT=230 coherent elastic stub (4 lines).
+LIP=-nbragg, LAW=0 (no angular distribution). Matches Fortran thermr coh output.
+"""
+function _write_mf6_coherent_stub(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64,
+                                    nbragg::Int, emin::Float64, emax::Float64)
+    id = MaterialId(Int32(mat), Int32(6), Int32(mt))
+    ns = Ref(1)
+    # HEAD: ZA, AWR, 0, LCT=1, NK=1, 0
+    ns[] = write_cont(io, ContRecord(za, awr, Int32(0), Int32(1), Int32(1), Int32(0), id); ns=ns[])
+    # Product TAB1: ZAP=1, AWP=1, LIP=-nbragg, LAW=0
+    interp = InterpolationTable(Int32[2], [LinLin])
+    tab1 = Tab1Record(1.0, 1.0, Int32(-nbragg), Int32(0), interp,
+                      [emin, emax], [1.0, 1.0], id)
+    ns[] = write_tab1(io, tab1; ns=ns[])
     _write_send(io, mat, 6)
 end
 

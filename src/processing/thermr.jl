@@ -27,6 +27,106 @@ struct ThermalResult
     elastic_xs::Vector{Float64}; model::Symbol
 end
 
+# ---- MF7/MT4 reader ----
+
+"""
+    read_mf7_mt4(filename, mat, T) -> SABData
+
+Read S(α,β) thermal scattering law from ENDF MF7/MT4.
+Extracts data at temperature `T` [K] for material `mat`.
+Returns SABData with log(S) values.
+
+Matches Fortran thermr calcem (thermr.f90:1659-1779).
+"""
+function read_mf7_mt4(filename::AbstractString, mat::Integer, T::Real)
+    open(filename) do io
+        find_section(io, 7, 4; target_mat=mat) ||
+            error("MF7/MT4 not found for MAT=$mat in $filename")
+        head = read_cont(io)
+        lasym = head.N1
+        lat = head.L2
+
+        # B(n) constants (LIST record)
+        blist = read_list(io)
+        sigma_free = blist.data[1]  # free atom XS [barn]
+        dw_integral = blist.data[2]  # Debye-Waller integral
+        az = blist.data[3]           # atomic mass of principal scatterer
+        natom = max(1, round(Int, blist.data[4]))
+        smz = sigma_free / natom
+        sigma_b = smz * ((az + 1) / az)^2  # bound atom XS
+
+        # TAB2: beta grid dimensions
+        tab2 = read_tab2(io)
+        nbeta = tab2.NZ
+
+        # Read alpha grid and S(α,β) at target temperature
+        alpha_grid = Float64[]
+        beta_grid = Float64[]
+        sab_matrix = Matrix{Float64}(undef, 0, 0)
+        sabflg = -225.0
+        first_beta = true
+        ttol = T / 500.0  # temperature tolerance (Fortran line 1720)
+
+        for ib in 1:nbeta
+            # TAB1: temperature, beta, LT, 0, NR, NA with (alpha, S) pairs
+            tab1 = read_tab1(io)
+            t1 = tab1.C1
+            beta_val = tab1.C2
+            lt = tab1.L1  # number of additional temperatures
+            na = length(tab1.x)  # number of alpha values
+
+            push!(beta_grid, beta_val)
+
+            if first_beta
+                alpha_grid = copy(tab1.x)
+                sab_matrix = Matrix{Float64}(undef, na, nbeta)
+                first_beta = false
+            end
+
+            # Store S values at first temperature (tab1.y)
+            if abs(t1 - T) <= ttol
+                for ia in 1:na
+                    v = tab1.y[ia]
+                    sab_matrix[ia, ib] = v > exp(sabflg) ? log(v) : sabflg
+                end
+            else
+                # Wrong temperature — check additional temps
+                found_t = false
+                for it in 1:lt
+                    tlist = read_list(io)
+                    if !found_t && abs(tlist.C1 - T) <= ttol
+                        found_t = true
+                        for ia in 1:na
+                            v = tlist.data[ia]
+                            sab_matrix[ia, ib] = v > exp(sabflg) ? log(v) : sabflg
+                        end
+                    end
+                end
+                found_t || error("Temperature $T not found in MF7/MT4 (available: $t1 + $lt more)")
+                continue  # already consumed all LT records
+            end
+
+            # Skip remaining LT additional temperature records
+            for it in 1:lt
+                read_list(io)
+            end
+        end
+
+        # Effective temperature from blist
+        t_eff = blist.data[1]  # Fortran uses smz for free XS, T_eff from separate source
+
+        # Effective temperature for SCT fallback (Fortran thermr line 1779)
+        # Default: teff = az * 0.0253 eV when not stored in file
+        tevz_const = 0.0253  # room temperature in eV
+        teff_eV = az * tevz_const
+        teff_K = teff_eV / PhysicsConstants.bk  # convert to Kelvin
+
+        SABData(alpha_grid, beta_grid, sab_matrix,
+                smz, az, teff_K,
+                lasym, lat)
+    end
+end
+
 # ---- Free-gas model (sig() lines 2600-2608) ----
 
 """
@@ -87,6 +187,19 @@ function _interp_sab(a::Real, b::Real, data::SABData)
     sabflg = -225.0
     al, be, sab = data.alpha, data.beta, data.sab
     (a <= 0 || a > al[end]) && return sabflg
+    # For a < al[1]: log-log extrapolation matching Fortran terpa INT=4
+    if a < al[1]
+        bv = data.lasym == 0 ? abs(b) : b
+        (bv > be[end] || bv < be[1]) && return sabflg
+        ib = clamp(searchsortedlast(be, bv), 1, length(be)-1)
+        fb = clamp((bv - be[ib])/(be[ib+1] - be[ib]), 0.0, 1.0)
+        la = log(a); la1 = log(al[1]); la2 = log(al[2])
+        s1_b = (1-fb)*sab[1,ib] + fb*sab[1,ib+1]
+        s2_b = (1-fb)*sab[2,ib] + fb*sab[2,ib+1]
+        any(v -> v <= sabflg, (s1_b, s2_b)) && return sabflg
+        slope = (s2_b - s1_b) / (la2 - la1)
+        return s1_b + slope * (la - la1)
+    end
     bv = data.lasym == 0 ? abs(b) : b
     (bv > be[end] || bv < be[1]) && return sabflg
     ia = clamp(searchsortedlast(al, a), 1, length(al)-1)
@@ -229,6 +342,107 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
     end; end; end; end
     p = sortperm(tsl)
     BraggData(tsl[p], ffl[p], econ, scon, length(tsl))
+end
+
+# ---- Thermal output grid (matching Fortran coh adaptive merge) ----
+
+"""
+    build_thermal_grid(bragg, elastic_grid, calcem_grid, emax; tol=0.05)
+
+Build the merged thermal output grid matching Fortran thermr coh (lines 790-883).
+Uses a convergence stack (depth 20) to adaptively refine around Bragg edges,
+ensuring linear interpolation of coherent elastic XS within tolerance.
+Also includes all input elastic + calcem grid points.
+"""
+function build_thermal_grid(bragg::BraggData, elastic_grid::AbstractVector{Float64},
+                            calcem_grid::AbstractVector{Float64}, emax::Float64;
+                            tol::Float64=0.05)
+    eps_coh = 3e-5
+    tolmin = 1e-6
+    imax = 20  # max stack depth (Fortran coh line 762)
+
+    # Sorted input grid points below emax (these must ALL appear in output)
+    input_pts = sort(unique(vcat(
+        filter(e -> e > 0 && e <= emax, elastic_grid),
+        filter(e -> e > 0 && e <= emax, calcem_grid),
+    )))
+
+    # Get all Bragg edge energies below emax
+    bragg_e = sort(filter(e -> e > 0 && e <= emax, bragg_edge_energies(bragg)))
+
+    # Output grid
+    result = Float64[]
+
+    # Add input points below first Bragg edge (Fortran coh lines 100-103)
+    first_bragg = isempty(bragg_e) ? emax : bragg_e[1]
+    for e in input_pts
+        e < first_bragg && push!(result, e)
+    end
+
+    # Convergence stack for adaptive refinement of Bragg XS
+    # Stack stores (energy, xs) pairs
+    stk_e = zeros(imax)
+    stk_xs = zeros(imax)
+
+    # Process intervals between consecutive "seed" points
+    # Seed points = Bragg edges + input grid points above first Bragg
+    seed_pts = sort(unique(vcat(bragg_e, filter(e -> e >= first_bragg, input_pts))))
+    push!(seed_pts, emax)  # ensure we go up to emax
+
+    for iseed in 1:length(seed_pts)-1
+        e_lo = seed_pts[iseed]
+        e_hi = seed_pts[iseed+1]
+
+        # Initialize stack with the two endpoints
+        xs_lo = bragg_edges(e_lo, bragg)
+        xs_hi = bragg_edges(e_hi, bragg)
+        stk_e[1] = e_hi; stk_xs[1] = xs_hi
+        stk_e[2] = e_lo; stk_xs[2] = xs_lo
+        depth = 2
+
+        while depth >= 2
+            # Check midpoint convergence
+            if depth >= imax
+                # Stack full — accept top point
+                push!(result, stk_e[depth])
+                depth -= 1
+                continue
+            end
+
+            xm = round_sigfig(0.5 * (stk_e[depth] + stk_e[depth-1]), 7, 0)
+            if stk_e[depth] - stk_e[depth-1] < eps_coh * xm || xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                # Interval too small — accept
+                push!(result, stk_e[depth])
+                depth -= 1
+                continue
+            end
+
+            xsm = bragg_edges(xm, bragg)
+            ym = 0.5 * (stk_xs[depth] + stk_xs[depth-1])
+            test = max(tol * abs(xsm), tolmin)
+
+            if abs(xsm - ym) <= test
+                # Converged — accept top point
+                push!(result, stk_e[depth])
+                depth -= 1
+            else
+                # Subdivide: push midpoint onto stack
+                depth += 1
+                stk_e[depth] = stk_e[depth-1]
+                stk_xs[depth] = stk_xs[depth-1]
+                stk_e[depth-1] = xm
+                stk_xs[depth-1] = xsm
+            end
+        end
+        # Accept the remaining point (e_lo was the start)
+        push!(result, e_lo)
+    end
+    push!(result, emax)
+
+    # Add boundary: sigfig(emax, 7, +1)
+    push!(result, round_sigfig(emax, 7, 1))
+    sort!(unique!(result))
+    return result
 end
 
 # ---- Incoherent elastic (iel(), thermr.f90:1244-1425) ----
@@ -491,6 +705,115 @@ end
 struct MF6ListRecord
     E_incident::Float64
     entries::Vector{NTuple{10, Float64}}  # (E', σ, μ₁...μ₈) per secondary energy
+end
+
+# ---- Calcem: Fortran-style thermal XS + angular computation ----
+
+"""
+    calcem_xs(sab, T, emax; nep=500, nmu=40) -> (esi, xsi)
+
+Compute total incoherent inelastic XS on the calcem egrid.
+Fast path: trapezoidal integration over (E', μ) without angular bins.
+Returns incident energies and total XS [barn].
+"""
+function calcem_xs(sab::SABData, T::Real, emax::Real;
+                   nep::Int=500, nmu::Int=40)
+    kT = PhysicsConstants.bk * T
+    tevz = 0.0253
+    kT_eff = sab.lat == 1 ? tevz : kT
+
+    nne = something(findfirst(e -> e > emax, THERMR_EGRID), length(THERMR_EGRID))
+    egrid = THERMR_EGRID[1:nne]
+
+    kernel = (E, Ep, mu) -> sab_kernel(E, Ep, mu, sab, T)
+
+    esi = zeros(nne)
+    xsi = zeros(nne)
+
+    for ie in 1:nne
+        E = egrid[ie]
+        esi[ie] = E
+        ep_max = E + sab.beta[end] * kT_eff
+        dep = ep_max / nep
+        total = 0.0
+        sp = 0.0
+        for j in 1:nep
+            Ep = j * dep
+            # Trapezoidal angular integration
+            sig = 0.0
+            for imu in 0:nmu
+                mu = -1.0 + 2.0 * imu / nmu
+                w = (imu == 0 || imu == nmu) ? 0.5 : 1.0
+                sig += w * kernel(E, Ep, mu) * (2.0 / nmu)
+            end
+            total += (sig + sp) * dep * 0.5
+            sp = sig
+        end
+        xsi[ie] = round_sigfig(total, 9, 0)
+    end
+
+    return (esi, xsi)
+end
+
+"""
+    calcem(sab, T, emax, nbin; tol=0.05) -> (esi, xsi, records)
+
+Compute thermal inelastic XS and MF6 angular distributions on the calcem
+egrid, matching Fortran thermr calcem (thermr.f90:1541-2480).
+
+Returns: (esi, xsi, records) — energies, total XS, MF6 angular data.
+"""
+function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
+                tol::Float64=0.05)
+    kT = PhysicsConstants.bk * T
+    tevz = 0.0253
+    kT_eff = sab.lat == 1 ? tevz : kT
+
+    nne = something(findfirst(e -> e > emax, THERMR_EGRID), length(THERMR_EGRID))
+    egrid = THERMR_EGRID[1:nne]
+
+    kernel = (E, Ep, mu) -> sab_kernel(E, Ep, mu, sab, T)
+
+    esi = zeros(nne)
+    xsi = zeros(nne)
+    records = Vector{MF6ListRecord}()
+
+    for ie in 1:nne
+        E = egrid[ie]
+        esi[ie] = E
+
+        # Secondary energy grid from beta values
+        ep_list = Float64[]
+        for beta in sab.beta
+            ep_down = E - beta * kT_eff
+            ep_down > 0 && push!(ep_list, ep_down)
+            push!(ep_list, E + beta * kT_eff)
+        end
+        sort!(unique!(ep_list))
+        filter!(ep -> ep > 0, ep_list)
+
+        entries = NTuple{10, Float64}[]
+        total_xs = 0.0
+        xlast = 0.0; ylast = 0.0
+
+        for (j, Ep) in enumerate(ep_list)
+            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
+            if j > 1
+                total_xs += (Ep - xlast) * (sigma + ylast) * 0.5
+            end
+            xlast = Ep; ylast = sigma
+            if sigma > 1e-32
+                entry = ntuple(k -> k == 1 ? Ep : k == 2 ? sigma :
+                               k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
+                push!(entries, entry)
+            end
+        end
+
+        xsi[ie] = round_sigfig(total_xs, 9, 0)
+        push!(records, MF6ListRecord(E, entries))
+    end
+
+    return (esi, xsi, records)
 end
 
 """
