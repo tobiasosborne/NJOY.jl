@@ -720,15 +720,16 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
 
         sec_e, sec_xs, qm, qi = sec_data
 
-        # HEAD: ZA, AWR, 0, LR, 0, 0
-        # LR=99 only for MT=1 (total), matching Fortran emerge
-        lr = mt == 1 ? 99 : 0
-        _write_cont_line(io, za, awr, 0, lr, 0, 0,
+        # HEAD: ZA, AWR, 0, L2, 0, 0
+        # L2=99 for reconr output (Fortran emerge convention)
+        _write_cont_line(io, za, awr, 0, 99, 0, 0,
                          Int(mat), 3, Int(mt), ns)
 
-        # TAB1: QM, QI, 0, 0, NR=1, NP
+        # TAB1: QM, QI, 0, LR, NR=1, NP
+        # Fortran emerge: QI=0 for redundant sums (MT=1,4)
+        qi_out = (mt == 1 || mt == 4) ? 0.0 : qi
         np = length(sec_e)
-        _write_cont_line(io, qm, qi, 0, 0, 1, np,
+        _write_cont_line(io, qm, qi_out, 0, 0, 1, np,
                          Int(mat), 3, Int(mt), ns)
 
         # Interpolation table: NBT, INT as integers (Fortran format)
