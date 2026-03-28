@@ -125,12 +125,12 @@ function run_t01()
     if isempty(mt221_e) || mt221_e[end] < emax_thermr
         idx = searchsortedfirst(b_e, emax_thermr)
         if idx <= 1
-            xs_emax = b_xs[1, 2]
+            xs_emax = b_xs[1, 1]
         elseif idx > length(b_e)
-            xs_emax = b_xs[end, 2]
+            xs_emax = b_xs[end, 1]
         else
             f = (emax_thermr - b_e[idx-1]) / (b_e[idx] - b_e[idx-1])
-            xs_emax = b_xs[idx-1, 2] + f * (b_xs[idx, 2] - b_xs[idx-1, 2])
+            xs_emax = b_xs[idx-1, 1] + f * (b_xs[idx, 1] - b_xs[idx-1, 1])
         end
         push!(mt221_e, emax_thermr); push!(mt221_xs, xs_emax)
     end
