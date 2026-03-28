@@ -325,3 +325,228 @@ function compute_thermal_xs(energies::AbstractVector{<:Real},
     mxs = vcat(txs, sigma_elastic[energies .> em])
     p = sortperm(me); (me[p], mxs[p])
 end
+
+# ---- Equi-probable angular bins (Fortran sigl, thermr.f90:2660-2872) ----
+
+"""
+    sigl_equiprobable(E, E_prime, nbin, kernel, tev; tol=0.001) -> (sigma, cosines)
+
+Compute equi-probable cosine bins for scattering from E to E_prime.
+`kernel(E, E', mu)` returns d²σ/(dE'dμ). Returns total cross section
+and `nbin` equi-probable cosine values (average μ within each bin).
+
+Matches Fortran thermr.f90 sigl (lines 2660-2872) with nlin < 0 path.
+"""
+function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
+                           kernel, tev::Float64; tol::Float64=0.001)
+    # Constants matching Fortran (thermr.f90:2686-2698)
+    imax = 20; xtol = 1e-5; ytol = 1e-3; sigmin = 1e-32
+    eps_peak = 1e-3; shade = 0.99999999
+    half_tol = 0.5 * tol
+
+    # Scattering peak location (Fortran lines 2710-2714)
+    b = abs(E_prime - E) / tev
+    s1bb = sqrt(1 + b*b)
+    x_peak = E_prime > 0 ? 0.5*(E + E_prime - (s1bb - 1)*tev) / sqrt(E*E_prime) : 0.0
+    abs(x_peak) > 1 - eps_peak && (x_peak = 0.99)
+    x_peak = round_sigfig(x_peak, 8, 0)
+
+    # --- Phase 1: total cross section via adaptive linearization ---
+    function sig_mu(mu)
+        kernel(E, E_prime, mu)
+    end
+
+    # Adaptive stack (Fortran lines 2703-2744)
+    xs = Vector{Float64}(undef, imax)
+    ys = Vector{Float64}(undef, imax)
+    xs[3] = -1.0; ys[3] = sig_mu(-1.0)
+    xs[2] = x_peak; ys[2] = sig_mu(x_peak)
+    xs[1] = 1.0; ys[1] = sig_mu(1.0)
+    ymax = max(ys[1], ys[2], ys[3], eps_peak)
+
+    function adaptive_integrate()
+        i = 3; total = 0.0; xl = xs[3]; yl = ys[3]
+        while true
+            if i == imax
+                @goto accept
+            end
+            xm = round_sigfig(0.5*(xs[i-1] + xs[i]), 8, 0)
+            ym_linear = 0.5*(ys[i-1] + ys[i])
+            yt = sig_mu(xm)
+            test = half_tol * abs(yt) + half_tol * ymax / 50
+            test2 = ym_linear + ymax / 100
+            if abs(yt - ym_linear) <= test && abs(ys[i-1] - ys[i]) <= test2 &&
+               (xs[i-1] - xs[i]) < 0.5
+                @goto accept
+            end
+            xs[i-1] - xs[i] < xtol && @goto accept
+            i += 1; i > imax && (i = imax; @goto accept)
+            xs[i] = xs[i-1]; ys[i] = ys[i-1]
+            xs[i-1] = xm; ys[i-1] = yt
+            continue
+            @label accept
+            total += 0.5 * (ys[i] + yl) * (xs[i] - xl)
+            xl = xs[i]; yl = ys[i]
+            i -= 1
+            i > 1 && continue
+            i == 1 && (total += 0.5*(ys[1] + yl)*(xs[1] - xl); break)
+            break
+        end
+        return total
+    end
+
+    sigma_total = adaptive_integrate()
+    sigma_total < sigmin && return (0.0, zeros(nbin))
+
+    # --- Phase 2: equi-probable bins via CDF inversion ---
+    fract = sigma_total / nbin
+    rfract = 1.0 / fract
+    cosines = zeros(nbin)
+
+    # Re-initialize stack for second adaptive pass
+    xs[3] = -1.0; ys[3] = sig_mu(-1.0)
+    xs[2] = x_peak; ys[2] = sig_mu(x_peak)
+    xs[1] = 1.0; ys[1] = sig_mu(1.0)
+
+    cum_sum = 0.0; gral = 0.0; j = 0
+    xl = xs[3]; yl = ys[3]
+    i = 3
+
+    while j < nbin
+        # Adaptive refinement (same convergence as phase 1)
+        if i > 1 && i < imax
+            xm = round_sigfig(0.5*(xs[i-1] + xs[i]), 8, 0)
+            ym_linear = 0.5*(ys[i-1] + ys[i])
+            yt = sig_mu(xm)
+            test = half_tol * abs(yt) + half_tol * ymax / 50
+            test2 = ym_linear + ymax / 100
+            if !(abs(yt - ym_linear) <= test && abs(ys[i-1] - ys[i]) <= test2 &&
+                 (xs[i-1] - xs[i]) < 0.5) && (xs[i-1] - xs[i]) >= xtol
+                i += 1; i > imax && (i = imax)
+                xs[i] = xs[i-1]; ys[i] = ys[i-1]
+                xs[i-1] = xm; ys[i-1] = yt
+                continue
+            end
+        end
+
+        # Panel accepted: compute contribution
+        panel_area = 0.5 * (ys[i] + yl) * (xs[i] - xl)
+        xs[i] == xl && (i -= 1; i >= 1 && continue; break)
+
+        # Check if this panel completes a bin
+        if j == nbin - 1 && i == 1
+            # Last bin: force to μ=+1
+            xn = xs[i]; j += 1
+        elseif cum_sum + panel_area >= fract * shade && j < nbin - 1
+            # Bin boundary within this panel: find xn via quadratic
+            j += 1
+            xil = 1.0 / (xs[i] - xl)
+            f_slope = (ys[i] - yl) * xil
+            if yl < sigmin || abs((fract - cum_sum) * f_slope / yl^2) <= ytol
+                xn = xl + (fract - cum_sum) / max(yl, sigmin)
+            else
+                rf = 1.0 / f_slope
+                disc = (yl * rf)^2 + 2 * (fract - cum_sum) * rf
+                disc < 0 && (disc = abs(disc))
+                xn = f_slope > 0 ? xl - yl*rf + sqrt(disc) : xl - yl*rf - sqrt(disc)
+            end
+            xn = clamp(xn, xl, xs[i])
+        else
+            # Accumulate and move to next panel
+            cum_sum += panel_area
+            third_val = 1.0/3.0
+            gral += 0.5*(yl*xs[i] - ys[i]*xl)*(xs[i]+xl) +
+                    third_val*(ys[i]-yl)*(xs[i]^2 + xs[i]*xl + xl^2)
+            xl = xs[i]; yl = ys[i]
+            i -= 1
+            i > 1 && continue
+            i == 1 && (continue)
+            break
+        end
+
+        # Compute weighted average cosine for this bin
+        yn = yl + (ys[i] - yl) * (xn - xl) / (xs[i] - xl)
+        third_val = 1.0/3.0
+        gral += (xn - xl) * (yl * 0.5*(xn+xl) +
+                (ys[i]-yl)/(xs[i]-xl) * (-xl*0.5*(xn+xl) +
+                third_val*(xn^2 + xn*xl + xl^2)))
+        cosines[j] = gral * rfract
+
+        # Reset for next bin
+        xl = xn; yl = yn; cum_sum = 0.0; gral = 0.0
+        j >= nbin && break
+        xl < xs[i] && continue
+        xl = xs[i]; yl = ys[i]; i -= 1
+        i > 1 && continue
+        i == 1 && continue
+        break
+    end
+
+    return (sigma_total, cosines)
+end
+
+# ---- MF6 record data structure ----
+
+"""MF6 LIST record for one incident energy: secondary energies with equi-probable cosines."""
+struct MF6ListRecord
+    E_incident::Float64
+    entries::Vector{NTuple{10, Float64}}  # (E', σ, μ₁...μ₈) per secondary energy
+end
+
+"""
+    compute_mf6_thermal(pendf_energies, pendf_elastic, A, T, nbin;
+                        model=:free_gas, sab_data=nothing, mtref=221)
+
+Compute MF6 angular distribution data for thermal inelastic scattering.
+Returns Vector{MF6ListRecord}, one per incident energy.
+"""
+function compute_mf6_thermal(pendf_energies::Vector{Float64},
+                             pendf_elastic::Vector{Float64},
+                             A::Float64, T::Float64, nbin::Int;
+                             model::Symbol=:free_gas,
+                             sab_data::Union{SABData, Nothing}=nothing,
+                             sigma_b::Union{Float64, Nothing}=nothing)
+    kT = PhysicsConstants.bk * T
+    tev = kT
+    emax = 10.0 * kT  # maximum secondary energy
+
+    # Bound scattering cross section
+    if sigma_b === nothing
+        idx = clamp(searchsortedfirst(pendf_energies, 10.0), 1, length(pendf_energies))
+        sigma_b = A * pendf_elastic[idx]
+    end
+
+    # Kernel function
+    kernel = if model == :free_gas
+        (E, Ep, mu) -> free_gas_kernel(E, Ep, mu, A, T; sigma_b=sigma_b)
+    elseif model == :sab && sab_data !== nothing
+        (E, Ep, mu) -> sab_kernel(E, Ep, mu, sab_data, T)
+    else
+        error("Invalid model=$model or missing sab_data")
+    end
+
+    # Use the standard thermr energy grid for incident energies
+    egrid = filter(e -> e <= 10.0 * kT, THERMR_EGRID)
+    isempty(egrid) && (egrid = [kT])
+
+    records = MF6ListRecord[]
+    for E in egrid
+        # Secondary energy grid (adaptive: denser near E)
+        ep_max = E + 20 * kT
+        n_ep = max(20, round(Int, ep_max / (0.5 * kT)))
+        ep_grid = range(0.0, ep_max; length=min(n_ep, 100))
+
+        entries = NTuple{10, Float64}[]
+        for Ep in ep_grid
+            Ep <= 0 && continue
+            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, tev; tol=0.001)
+            sigma < 1e-32 && continue
+            # Pack: (E', σ, μ₁...μ₈)
+            entry = ntuple(k -> k == 1 ? Ep : k == 2 ? sigma :
+                           k-2 <= nbin ? cosines[k-2] : 0.0, 10)
+            push!(entries, entry)
+        end
+        push!(records, MF6ListRecord(E, entries))
+    end
+    return records
+end

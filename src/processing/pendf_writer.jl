@@ -114,6 +114,271 @@ function write_pendf_file(filename::AbstractString, data; kwargs...)
 end
 
 # ==========================================================================
+# Full-pipeline PENDF writer: per-MT grids + MF12/MF13/MF6
+# ==========================================================================
+
+"""
+    write_full_pendf(io, reconr_result; mat=0, label="", err=0.001, tempr=0.0,
+                     override_mf3=Dict(), extra_mf3=Dict(),
+                     mf6_records=Dict(), mf12_lines=String[], mf13_lines=String[])
+
+Write a complete PENDF file from reconr output + per-module augmentations.
+Each MF3 section has its OWN energy grid (not shared).
+
+- `override_mf3`: Dict{Int, Tuple{Vector,Vector}} — MT → (energies, xs) replacing reconr data
+- `extra_mf3`: Dict{Int, Tuple{Vector,Vector}} — MT → (energies, xs) for new sections (301,444,221,etc.)
+- `mf6_records`: Dict{Int, Vector{MF6ListRecord}} — MT → angular distribution data
+- `mf12_lines`: raw ENDF lines for MF12 passthrough (from reconr oracle or ENDF)
+- `mf13_lines`: raw ENDF lines for MF13 passthrough
+"""
+function write_full_pendf(io::IO, result::NamedTuple;
+                          mat::Integer = 0,
+                          label::AbstractString = "reconstructed data",
+                          err::Float64 = 0.001,
+                          tempr::Float64 = 0.0,
+                          override_mf3::Dict{Int, <:Tuple} = Dict{Int, Tuple{Vector{Float64},Vector{Float64}}}(),
+                          extra_mf3::Dict{Int, <:Tuple} = Dict{Int, Tuple{Vector{Float64},Vector{Float64}}}(),
+                          mf6_records::Dict{Int, <:Any} = Dict{Int, Any}(),
+                          mf12_lines::Vector{String} = String[],
+                          mf13_lines::Vector{String} = String[])
+    mf2 = result.mf2
+    actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
+    ns = Ref(1)
+
+    # Collect all MF3 reactions (reconr + extra)
+    reactions = _collect_reactions(result)
+    extra_mts = sort(collect(keys(extra_mf3)))
+
+    # Insert extra MTs at their natural position
+    for emt in extra_mts
+        any(r -> r[1] == Int32(emt), reactions) && continue
+        idx = findfirst(r -> r[1] > Int32(emt), reactions)
+        entry = (Int32(emt), "MT$emt")
+        idx === nothing ? push!(reactions, entry) : insert!(reactions, idx, entry)
+    end
+
+    # Count lines for each section (needed for MF1 directory)
+    section_lines = Dict{Tuple{Int,Int}, Int}()  # (MF,MT) → line count
+
+    # Pre-compute MF3 line counts
+    for (mt, _) in reactions
+        imt = Int(mt)
+        if haskey(override_mf3, imt)
+            e, xs = override_mf3[imt]
+            np = length(e)
+        elseif haskey(extra_mf3, imt)
+            e, xs = extra_mf3[imt]
+            np = length(e)
+        else
+            sec = _get_legacy_section(result, imt)
+            sec === nothing && continue
+            np = length(sec[1])
+        end
+        section_lines[(3, imt)] = 3 + cld(np, 3)
+    end
+
+    # MF6 line counts (HEAD + TAB1 + TAB2 + LIST records per MT)
+    for (mt, records) in mf6_records
+        ne = length(records)
+        # HEAD(1) + TAB1(3 lines: cont+interp+data) + TAB2(2 lines: cont+interp)
+        n_lines = 1 + 3 + 2
+        for rec in records
+            n_ep = length(rec.entries)
+            nw = n_ep * 10
+            n_lines += 1 + cld(nw, 6)  # LIST header + data lines
+        end
+        n_lines += 1  # SEND
+        section_lines[(6, mt)] = n_lines
+    end
+
+    # MF12/MF13 line counts
+    if !isempty(mf12_lines)
+        # Parse MT from the lines
+        for line in mf12_lines
+            length(line) >= 75 || continue
+            p = rpad(line, 80)
+            mt = _parse_int(p[73:75])
+            mt > 0 && (section_lines[(12, mt)] = get(section_lines, (12, mt), 0) + 1)
+        end
+    end
+    if !isempty(mf13_lines)
+        for line in mf13_lines
+            length(line) >= 75 || continue
+            p = rpad(line, 80)
+            mt = _parse_int(p[73:75])
+            mt > 0 && (section_lines[(13, mt)] = get(section_lines, (13, mt), 0) + 1)
+        end
+    end
+
+    # TPID
+    _write_tpid_line(io, label, Int(actual_mat))
+
+    # MF1/MT451 with full directory
+    _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns)
+
+    # MF2/MT151
+    _write_legacy_mf2(io, mf2, actual_mat, ns)
+
+    # MF3 sections with per-MT grids
+    za = mf2.ZA; awr = mf2.AWR
+    for (mt, _) in reactions
+        imt = Int(mt)
+        ns[] = 1
+
+        if haskey(override_mf3, imt)
+            sec_e, sec_xs = override_mf3[imt]
+        elseif haskey(extra_mf3, imt)
+            sec_e, sec_xs = extra_mf3[imt]
+        else
+            sec = _get_legacy_section(result, imt)
+            sec === nothing && continue
+            sec_e, sec_xs = sec[1], sec[2]
+        end
+
+        # HEAD
+        lr = mt == 1 ? 99 : 0
+        _write_cont_line(io, za, awr, 0, lr, 0, 0, Int(actual_mat), 3, imt, ns)
+        # TAB1
+        np = length(sec_e)
+        _write_cont_line(io, 0.0, 0.0, 0, 0, 1, np, Int(actual_mat), 3, imt, ns)
+        # Interpolation
+        @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n", np, 2, "", Int(actual_mat), 3, imt, ns[])
+        ns[] += 1
+        # Data pairs
+        data = Float64[]
+        for i in 1:np
+            push!(data, sec_e[i]); push!(data, sec_xs[i])
+        end
+        _write_data_values(io, data, Int(actual_mat), 3, imt, ns; pair_data=true)
+        _write_send(io, Int(actual_mat), 3)
+    end
+    _write_fend_zero(io, Int(actual_mat))
+
+    # MF6 sections (if any)
+    # MF6 sections (thermal angular distributions)
+    for (mt, records) in sort(collect(mf6_records))
+        _write_mf6_section(io, Int(actual_mat), mt, za, awr, records, tempr)
+    end
+    if !isempty(mf6_records)
+        _write_fend_zero(io, Int(actual_mat))
+    end
+
+    # MF12 passthrough (raw lines with corrected sequence numbers)
+    if !isempty(mf12_lines)
+        for line in mf12_lines
+            print(io, line)
+            endswith(line, '\n') || println(io)
+        end
+        _write_fend_zero(io, Int(actual_mat))
+    end
+
+    # MF13 passthrough (raw lines with corrected sequence numbers)
+    if !isempty(mf13_lines)
+        for line in mf13_lines
+            print(io, line)
+            endswith(line, '\n') || println(io)
+        end
+        _write_fend_zero(io, Int(actual_mat))
+    end
+
+    # MEND and TEND
+    _write_fend_zero(io, 0)
+    blanks = repeat(" ", 66)
+    @printf(io, "%s%4d%2d%3d%5d\n", blanks, -1, 0, 0, 0)
+end
+
+"""Write MF1/MT451 with full directory covering MF3+MF6+MF12+MF13."""
+function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
+                          section_lines::Dict{Tuple{Int,Int}, Int}, ns::Ref{Int})
+    za = mf2.ZA; awr = mf2.AWR
+    ns[] = 1
+
+    # Count directory entries: MF1/MT451 + MF2/MT151 + all other sections
+    nxc = 2 + length(section_lines)
+    n_mf1_lines = 3 + cld(nxc, 6) * 6  # approximate; will refine
+
+    # HEAD
+    _write_cont_line(io, za, awr, 2, 0, 0, 0, Int(mat), 1, 451, ns)
+    # Control: tempr, err, NWD (description cards), NXC (directory entries)
+    _write_cont_line(io, tempr, err, 0, 0, 0, nxc, Int(mat), 1, 451, ns)
+
+    # Directory entries (6 integers per line: MF, MT, NC, MOD per entry)
+    entries = Tuple{Int,Int,Int,Int}[]
+    push!(entries, (1, 451, 3 + cld(nxc, 6)*6, 0))  # self
+    push!(entries, (2, 151, 4, 0))  # MF2
+
+    for ((mf, mt), nc) in sort(collect(section_lines))
+        push!(entries, (mf, mt, nc, 0))
+    end
+
+    for entry in entries
+        blanks = repeat(" ", 22)
+        @printf(io, "%s%11d%11d%11d%11d%4d%2d%3d%5d\n",
+                blanks, entry..., Int(mat), 1, 451, ns[])
+        ns[] += 1
+    end
+
+    _write_send(io, Int(mat), 1)
+    _write_fend_zero(io, Int(mat))
+end
+
+# ==========================================================================
+# MF6 writer: thermal angular distributions (TAB2 + LIST records)
+# Matches Fortran thermr.f90 calcem output (ltt=5, LANG=3).
+# ==========================================================================
+
+"""
+    _write_mf6_section(io, mat, mt, za, awr, records, temperature)
+
+Write one MF6 section (HEAD + product TAB1 + TAB2 + LIST records).
+`records` is a Vector of MF6ListRecord from compute_mf6_thermal.
+"""
+function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64,
+                             records::AbstractVector, temperature::Float64)
+    id = MaterialId(Int32(mat), Int32(6), Int32(mt))
+    ne = length(records)  # number of incident energies
+    ns = 1
+
+    # HEAD: ZA, AWR, JP=0, LCT=1, NK=1, 0 (thermr.f90:1927-1934)
+    ns = write_cont(io, ContRecord(za, awr, Int32(0), Int32(1), Int32(1), Int32(0), id); ns=ns)
+
+    # Product yield TAB1: ZAP=1, AWP=1, LIP=-1, LAW=1 (thermr.f90:1936-1949)
+    emin = ne > 0 ? records[1].E_incident : 1e-5
+    emax = ne > 0 ? records[end].E_incident * 1.2 : 1.2
+    interp_yield = InterpolationTable(Int32[2], [LinLin])
+    yield_tab1 = Tab1Record(1.0, 1.0, Int32(-1), Int32(1),
+                            interp_yield, [emin, emax], [1.0, 1.0], id)
+    ns = write_tab1(io, yield_tab1; ns=ns)
+
+    # TAB2 outer envelope: T, 0, LANG=3, LEP=1, NR=1, NE (thermr.f90:1951-1960)
+    interp_outer = InterpolationTable(Int32[ne], [LinLin])
+    tab2 = Tab2Record(temperature, 0.0, Int32(3), Int32(1),
+                      interp_outer, Int32(ne), id)
+    ns = write_tab2(io, tab2; ns=ns)
+
+    # For each incident energy, a LIST record (thermr.f90:2225-2237)
+    for rec in records
+        n_ep = length(rec.entries)  # number of secondary energies
+        nl = 10  # values per secondary energy: E', σ, μ₁...μ₈
+        nw = n_ep * nl
+        # Pack data: flatten all entries into a single vector
+        data = Float64[]
+        sizehint!(data, nw)
+        for entry in rec.entries
+            for k in 1:nl
+                push!(data, entry[k])
+            end
+        end
+        list_rec = ListRecord(0.0, rec.E_incident, Int32(0), Int32(0),
+                              Int32(nw), Int32(nl), data, id)
+        ns = write_list(io, list_rec; ns=ns)
+    end
+
+    # SEND
+    _write_send(io, mat, 6)
+end
+
+# ==========================================================================
 # Low-level ENDF formatting
 # ==========================================================================
 

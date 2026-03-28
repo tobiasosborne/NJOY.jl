@@ -119,10 +119,33 @@ function find_endf_file(tc::NJOYTestCase)
     nothing
 end
 
-"""Convert reconr NamedTuple to PointwiseMaterial for downstream modules."""
+"""Convert reconr NamedTuple to PointwiseMaterial with ALL MTs for downstream modules."""
 function reconr_to_pendf(r, mat::Int)
-    xs = hcat(r.total, r.elastic, r.fission, r.capture)
-    PointwiseMaterial(Int32(mat), copy(r.energies), xs, [1, 2, 18, 102])
+    reactions = NJOY._collect_reactions(r)
+    energies = r.energies
+    n = length(energies)
+    mt_list = Int[]
+    xs_cols = Vector{Vector{Float64}}()
+    for (mt, _) in reactions
+        sec = NJOY._get_legacy_section(r, Int(mt))
+        sec === nothing && continue
+        sec_e, sec_xs, _, _ = sec
+        # Build full-length XS vector (0 below threshold)
+        full_xs = zeros(n)
+        j = 1
+        for i in 1:n
+            if j <= length(sec_e) && energies[i] == sec_e[j]
+                full_xs[i] = sec_xs[j]; j += 1
+            elseif j > 1 && j <= length(sec_e) &&
+                   energies[i] > sec_e[j-1] && energies[i] < sec_e[j]
+                frac = (energies[i] - sec_e[j-1]) / (sec_e[j] - sec_e[j-1])
+                full_xs[i] = sec_xs[j-1] + frac * (sec_xs[j] - sec_xs[j-1])
+            end
+        end
+        push!(mt_list, Int(mt))
+        push!(xs_cols, full_xs)
+    end
+    PointwiseMaterial(Int32(mat), copy(energies), hcat(xs_cols...), mt_list)
 end
 
 """Convert PointwiseMaterial to a NamedTuple the comparator can consume."""
@@ -178,8 +201,25 @@ function execute_heatr(pendf::PointwiseMaterial, mc::ModuleCall; awr::Float64=1.
     p = parse_heatr(mc)
     try
         kr = compute_kerma(pendf; awr=awr, Z=0)
-        msg = @sprintf("KERMA %d pts, peak=%.2e", length(kr.energies), maximum(abs, kr.total_kerma))
-        return pendf, StepResult(:heatr, :ok, msg, time()-t0)
+        # Merge MT=301 (total_kerma) and MT=444 (damage_energy) into PointwiseMaterial
+        new_mts = Int[]
+        new_cols = Vector{Float64}[]
+        if !isempty(kr.total_kerma)
+            push!(new_mts, 301); push!(new_cols, kr.total_kerma)
+        end
+        if !isempty(kr.damage_energy)
+            push!(new_mts, 444); push!(new_cols, kr.damage_energy)
+        end
+        if !isempty(new_mts)
+            new_xs = hcat(pendf.cross_sections, hcat(new_cols...))
+            new_mt_list = vcat(pendf.mt_list, new_mts)
+            merged = PointwiseMaterial(pendf.mat, pendf.energies, new_xs, new_mt_list)
+        else
+            merged = pendf
+        end
+        msg = @sprintf("KERMA %d pts, peak=%.2e, added MT=%s",
+            length(kr.energies), maximum(abs, kr.total_kerma), join(new_mts, ","))
+        return merged, StepResult(:heatr, :ok, msg, time()-t0)
     catch ex
         msg = first(split(sprint(showerror, ex), '\n'))
         return pendf, StepResult(:heatr, :warn, "heatr: $msg (pendf unchanged)", time()-t0)
@@ -190,9 +230,26 @@ function execute_thermr(pendf::PointwiseMaterial, mc::ModuleCall)
     t0 = time()
     p = parse_thermr(mc)
     temp = isempty(p.temperatures) ? 296.0 : p.temperatures[1]
+    mtref = p.mtref  # 221 for free gas, 229 for S(α,β) inelastic
     try
-        result = compute_thermal(pendf, temp, 1.0; emax=p.emax)
-        return result, StepResult(:thermr, :ok, "T=$(temp)K", time()-t0)
+        # Compute thermal inelastic XS on thermal grid
+        el_col = findfirst(==(2), pendf.mt_list)
+        el_col === nothing && error("No elastic (MT2) column")
+        awr_eff = 1.0  # mass number for free-gas kernel
+        te, txs = NJOY.compute_thermal_xs(
+            pendf.energies, pendf.cross_sections[:, el_col],
+            awr_eff, temp; emax=Float64(p.emax))
+        # Add thermal XS as new MT column (don't replace MT=2)
+        # Interpolate thermal onto PENDF grid for column addition
+        therm_on_pendf = zeros(length(pendf.energies))
+        for i in 1:length(pendf.energies)
+            therm_on_pendf[i] = NJOY._linterp(te, txs, pendf.energies[i])
+        end
+        new_xs = hcat(pendf.cross_sections, therm_on_pendf)
+        new_mt_list = vcat(pendf.mt_list, mtref)
+        merged = PointwiseMaterial(pendf.mat, pendf.energies, new_xs, new_mt_list)
+        msg = "T=$(temp)K, added MT=$mtref ($(length(te)) thermal pts)"
+        return merged, StepResult(:thermr, :ok, msg, time()-t0)
     catch ex
         msg = first(split(sprint(showerror, ex), '\n'))
         return pendf, StepResult(:thermr, :warn, "thermr: $msg (pendf unchanged)", time()-t0)
