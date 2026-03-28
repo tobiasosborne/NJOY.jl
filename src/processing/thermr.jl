@@ -27,6 +27,46 @@ struct ThermalResult
     elastic_xs::Vector{Float64}; model::Symbol
 end
 
+# ---- Effective temperature lookup (Fortran gateff, thermr.f90:605-701) ----
+
+# Hardcoded (mat, T, T_eff) table matching Fortran gateff
+const _GATEFF_TABLE = [
+    (1002, 296.0, 1396.8), (1002, 350.0, 1411.6), (1002, 400.0, 1427.4),
+    (1002, 450.0, 1444.9), (1002, 500.0, 1464.1), (1002, 600.0, 1506.8),
+    (1002, 800.0, 1605.8), (1002, 1000.0, 1719.8),
+    (1004, 296.0, 940.91), (1004, 350.0, 961.62), (1004, 400.0, 982.93),
+    (1004, 450.0, 1006.1), (1004, 500.0, 1030.9), (1004, 600.0, 1085.1),
+    (1004, 800.0, 1209.0), (1004, 1000.0, 1350.0),
+    (1064, 296.0, 405.64), (1064, 400.0, 484.22), (1064, 500.0, 568.53),
+    (1064, 600.0, 657.66), (1064, 700.0, 749.69), (1064, 800.0, 843.63),
+    (1064, 1000.0, 1035.0), (1064, 1200.0, 1229.3),
+    (1065, 296.0, 713.39), (1065, 400.0, 754.68), (1065, 500.0, 806.67),
+    (1065, 600.0, 868.38), (1065, 700.0, 937.64), (1065, 800.0, 1012.7),
+    (1065, 1000.0, 1174.9), (1065, 1200.0, 1348.2), (1065, 1600.0, 1712.9),
+    (1065, 2000.0, 2091.0),
+    (1095, 296.0, 1165.9), (1095, 350.0, 1177.8), (1095, 400.0, 1191.4),
+    (1095, 450.0, 1207.7), (1095, 500.0, 1226.0), (1095, 600.0, 1268.7),
+    (1095, 800.0, 1373.4), (1095, 1000.0, 1497.7),
+    (1096, 296.0, 317.27), (1096, 400.0, 416.29), (1096, 500.0, 513.22),
+    (1096, 600.0, 611.12), (1096, 700.0, 709.60), (1096, 800.0, 808.43),
+    (1096, 1000.0, 1006.8), (1096, 1200.0, 1205.7),
+    (1097, 296.0, 806.79), (1097, 400.0, 829.98), (1097, 500.0, 868.44),
+    (1097, 600.0, 920.08), (1097, 700.0, 981.82), (1097, 800.0, 1051.1),
+    (1097, 1000.0, 1205.4), (1097, 1200.0, 1373.4),
+    (1099, 296.0, 596.4), (1099, 400.0, 643.9), (1099, 500.0, 704.6),
+    (1099, 600.0, 775.3), (1099, 800.0, 935.4), (1099, 1000.0, 1109.8),
+    (1099, 1200.0, 1292.3),
+    (1114, 296.0, 1222.0), (1114, 350.0, 1239.0),
+]
+
+"Look up T_eff from Fortran gateff hardcoded table. Returns T if not found."
+function _gateff_lookup(mat::Integer, T::Real)
+    for (m, t, te) in _GATEFF_TABLE
+        m == mat && abs(t - T) <= 5.0 && return te
+    end
+    return Float64(T)  # default: T_eff = T (Fortran line 697)
+end
+
 # ---- MF7/MT4 reader ----
 
 """
@@ -112,14 +152,9 @@ function read_mf7_mt4(filename::AbstractString, mat::Integer, T::Real)
             end
         end
 
-        # Effective temperature from blist
-        t_eff = blist.data[1]  # Fortran uses smz for free XS, T_eff from separate source
-
-        # Effective temperature for SCT fallback (Fortran thermr line 1779)
-        # Default: teff = az * 0.0253 eV when not stored in file
-        tevz_const = 0.0253  # room temperature in eV
-        teff_eV = az * tevz_const
-        teff_K = teff_eV / PhysicsConstants.bk  # convert to Kelvin
+        # Effective temperature for SCT fallback (Fortran thermr.f90 gateff, lines 615-697)
+        # ENDF6+ files may have a TAB1 after S(α,β) data; older files use a hardcoded table.
+        teff_K = _gateff_lookup(mat, T)
 
         SABData(alpha_grid, beta_grid, sab_matrix,
                 smz, az, teff_K,
