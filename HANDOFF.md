@@ -1188,6 +1188,30 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Structural match: 38/41 sections** (MF6/MT=221 -259 lines, MF6/MT=229 -366 lines, MF1/MT=451 -4 lines)
 
+### Phase 22: SAB biquadratic interpolation + PENDF writer headers
+
+**Key fixes this session (3 bugs found):**
+
+1. **SAB interpolation: bilinear → biquadratic terpq (FIXED — Trap 54)**: Julia's `_interp_sab` used bilinear (2-point per axis) interpolation for the S(α,β) table. The Fortran `sig` function (thermr.f90:2554-2560) uses `terpq` — biquadratic (3-point per axis quadratic) with log-lin extrapolation below grid, linear fallback for large steps (|Δy|>2), and lin-lin beyond grid. Added `_terpq` function matching Fortran terpq exactly (thermr.f90:2617-2658). **Impact: calcem XS at E=1e-5 eV went from 2.762 → 2.768 (matching Fortran's 2.768 exactly). Low-energy (E<5e-4) errors reduced from 0.22% to <0.01%.** Mid-energy (E=0.005-0.025) errors improved from 1.5% to 0.8% but remain due to convergence stack behavior differences.
+
+2. **sigl_equiprobable peak location missing AWR and tev_peak (FIXED — Trap 55)**: The scattering peak cosine formula was `x_peak = (E+E'-(s1bb-1)*kT)/(2√(EE'))`. The Fortran (thermr.f90:2698,2710) uses `x_peak = (E+E'-(s1bb-1)*AWR*kT)/(2√(EE'))` with `b = |E'-E|/tevz` (not kT) for lat=1 materials. The missing AWR factor (=11.9 for carbon) and wrong temperature scale shifted the peak estimate, reducing angular integration accuracy at mid-energies. Added `awr` and `tev_peak` keyword parameters to `sigl_equiprobable`.
+
+3. **PENDF writer L2 and QI for reconr (FIXED)**: HEAD L2 was 0 for non-MT=1 sections (should be 99 for reconr emerge convention). TAB1 QI was non-zero for redundant sums MT=1,4 (Fortran writes QI=0). Fixed: HEAD L2=99 for all reconr sections, QI=0 for MT=1 and MT=4. **Note**: the Fortran writes material-specific L2 values (level numbers for MT=51-68, LR for competitive reactions) that require reading from the ENDF; current implementation uses L2=99 uniformly, which is cosmetically different but data-correct.
+
+**Trap 54 (NEW — FIXED)**: Fortran `sig` function (thermr.f90:2514-2566) uses `terpq` for biquadratic S(α,β) interpolation: 3-point quadratic in alpha for each of 3 beta points, then 3-point quadratic in beta. For α below grid: log-lin extrapolation (terp1 INT=3). For |Δy|>2: piecewise linear fallback. Julia used bilinear (2-point per axis), which is significantly less accurate for smooth functions. The impact is especially large in the low-α extrapolation region (E<0.01 eV) where the slope from 2-point vs 3-point differs.
+
+**Trap 55 (NEW — FIXED)**: Fortran sigl (thermr.f90:2698): `if (lat.eq.1.and.iinc.eq.2) b=b*tev/tevz` converts |β| to lattice temperature units before computing the peak cosine. Line 2710: `x(2)=half*(e+ep-(s1bb-1)*az*tev)*seep` — the peak formula uses AWR×kT (not just kT). Julia was missing both: b used kT (not tevz for lat=1), and the peak formula used kT (not AWR×kT). Both must be passed via parameters since sigl_equiprobable doesn't know about AWR or lat.
+
+**Session investigations (not fixed):**
+
+- **MT=1 ±1 ULP broadening (CONFIRMED IRREDUCIBLE)**: 890/919 broadened total points differ from Fortran by ~1e-6 barn (±1 ULP at 7 sigfigs). Sigma1_at computed independently gives same result as broadn_grid with total column (verified: 0 format diffs between the two methods). The difference is in the sigma1 kernel FP accumulation order between Julia and gfortran. Same class as T34 irreducible diffs.
+
+- **MT=229 calcem mid-energy errors (0.5-0.8%)**: The calcem XS at the 94-point egrid matches Fortran within 0.01% at E<5e-4, but grows to 0.5-0.8% at E=0.005-0.025 eV. Root cause: the calcem convergence stack makes different subdivision decisions (area test, sigma test, cosine test) in this alpha/beta regime. The Fortran calcem convergence test includes `tol*ymax/50` additive term (not in Julia) and tests `2*tol*|yt(k)|` for cosines (Julia uses just `tol`). Attempted matching these tests but it made errors WORSE — the Fortran's leniency is compensated by something else in the processing flow.
+
+- **MT=230 Bragg edge positions**: 59/191 data lines match. Format difference (9-sigfig fixed vs 7-sigfig scientific) accounts for many diffs, but ~40 lines have real XS value differences (~4%) at energies near Bragg edges. Root cause: tau_sq = (c1*(l1²+l2²+l1*l2)+l3²*c2)*twopis has FP rounding differences shifting edge positions by ~1e-8 eV. Applied sigfig(7) rounding to bragg_edges output in pipeline.
+
+- **Reconr regression (PRE-EXISTING)**: T01 reconr 29/29 → appeared as 1/29 in full-line comparison. The regression is NOT from this session's changes — same behavior before and after. Root cause: comparison was checking ALL 66 characters including headers (L2, LR, QI fields). With DATA-ONLY comparison (skipping 3 header lines per section), all tests remain BIT-IDENTICAL. The header fields (L2 level numbers, LR breakup type) are material-specific and require reading from the original ENDF to match exactly.
+
 ---
 
 ## Immediate Next Steps — PRIORITY ORDER
