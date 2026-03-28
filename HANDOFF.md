@@ -1152,6 +1152,38 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 ---
 
+### Phase 21: T01 pipeline — heatr KERMA fix, MT=221 fix, header fix
+
+**Key discoveries and fixes this session:**
+
+1. **MT=221 = broadened elastic (FIXED)**: For free gas (iinc=1), Fortran thermr calcem line 2455: `ex(3)=ex(2)`. The MF3/MT=221 total XS is simply the BROADENED ELASTIC cross section copied directly. No analytical formula or calcem integration needed. Previous test script used `free_gas_xs(E, 1.0, T)` with A=1.0 (two bugs: wrong formula AND wrong A). Fix: `extra_mf3[221] = (b_e[below_emax], b_xs[below_emax, :elastic])`. **MT=221 data: 0% → 85.7%.**
+
+2. **KERMA from photon recoil (FIXED)**: `compute_kerma` was broken: (a) included MT=1 (redundant sum), (b) Q values defaulted to 0, (c) local gamma deposition gave 843,440 eV-barn instead of correct 151.2. Fix: read MF12/MT=102 gamma data (3 gammas for C-nat: 4.947 MeV×68%, 3.684 MeV×32%, 1.263 MeV×32%), compute photon recoil = E_γ²/(2·M_res·c²)×yield, sum contributions. Added `photon_recoil_heating()` and `photon_recoil_damage()` in heatr.jl. Skip MT=1,3,4,101 (sum MTs). **MT=301: first 2 points match oracle. MT=444: 19/307 match.** Remaining diffs from broadn grid.
+
+3. **MT=230 sigma_coh and natom (FIXED)**: sigma_coh=5.50 (was 5.55, from Fortran gr4), natom=1 (was 2, from input card), debye_waller=2.1997 at 296K (was 5.21). **MT=230: 14% → 31%.** Remaining diffs from Bragg edge position FP precision.
+
+4. **L2 in HEAD record (FIXED)**: `write_full_pendf` now writes L2=0 for thermr sections, L2=1 for broadened, L2=99 for reconr.
+
+5. **Trap 50 (NEW)**: For free gas (iinc=1), Fortran thermr does NOT use the calcem-computed total XS for MF3/MT=221. It copies the broadened elastic directly: `ex(3)=ex(2)` at thermr.f90:2455. The calcem integration result (xsi) is only used for MF6 normalization (tpend line 3307).
+
+6. **Trap 51 (NEW)**: Fortran heatr KERMA for capture uses nheat + gheat two-step approach: nheat deposits full (E+Q)×σ, then gheat reads MF12 gamma data and subtracts gamma energy, adding photon recoil. Net KERMA = Σ_γ [E_γ²/(2·(AWR+1)·emc2) × yield_γ × σ_cap] + E·A/(A+1)·σ_cap. The `compute_kerma` must receive gamma_data from MF12 to match.
+
+7. **Trap 52 (NEW)**: Fortran `compute_kerma` (heatr nheat) does NOT process MT=1 (total), MT=3 (nonelastic), MT=4 (inelastic total), or MT=101 (disappearance sum). These are redundant sums that would double-count.
+
+**T01 data match summary (data lines only, headers excluded):**
+- **PERFECT**: MT=4(135), MT=51(135), MT=91(88), MT=103(26)
+- **98%+**: MT=2(301/307), MT=102(302/307)
+- **86%**: MT=221(42/49)
+- **77%**: MT=1(236/307)
+- **31%**: MT=230(59/191) — Bragg edge FP precision
+- **6%**: MT=444(19/307) — correct values, broadn grid diffs
+- **0.7%**: MT=301(2/307) — correct values, broadn grid diffs
+- **0.5%**: MT=229(1/191) — calcem SAB integration precision
+
+**Dominant remaining blocker**: 12 broadn thermal energy diffs at 1.125e-5 to 2.5625e-5 eV. These cascade to MT=1,2,102,221,301,444 (total ~680 lines). The convergence test at these energies is borderline: |dy| ≈ errt×|sn|. Requires matching sigma1 accumulation to better than 1e-10.
+
+---
+
 ## Immediate Next Steps — PRIORITY ORDER
 
 ### 1. Close MF6 line count gaps (259 + 366 lines)

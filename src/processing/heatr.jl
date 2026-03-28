@@ -139,6 +139,54 @@ capture_heating(E::Real, Q::Real, A::Real; E_gamma::Real=0.0) =
     E * A / (A + 1.0) + Q - E_gamma
 
 """
+    photon_recoil_heating(E, A, gamma_data) -> Float64
+
+Compute capture heating from photon recoil (Fortran gheat approach).
+`gamma_data` = Vector{Tuple{Float64,Float64}} of (E_gamma [eV], yield) pairs.
+Recoil per gamma: E_γ²/(2·M_res·c²) where M_res = (A+1)·emc2.
+Also adds neutron kinetic energy transfer: E·A/(A+1).
+Matches Fortran disgam (heatr.f90:5683) + capdam energy balance.
+"""
+function photon_recoil_heating(E::Real, A::Real,
+                                gamma_data::Vector{Tuple{Float64,Float64}})
+    emc2 = PhysicsConstants.amassn * PhysicsConstants.amu *
+           PhysicsConstants.clight^2 / PhysicsConstants.ev
+    M_res_c2 = (A + 1.0) * emc2
+    h = E * A / (A + 1.0)  # neutron kinetic energy transfer
+    for (eg, yld) in gamma_data
+        h += eg^2 / (2.0 * M_res_c2) * yld
+    end
+    return h
+end
+
+"""
+    photon_recoil_damage(E, A, Z, gamma_data; E_d=25.0) -> Float64
+
+Compute damage energy from capture with gamma cascade.
+Each gamma's recoil is passed through Lindhard separately, matching
+the Fortran gheat disgam approach (sums individual gamma damage, not
+total recoil damage). This gives a DIFFERENT result from capdam's
+single-photon approximation.
+"""
+function photon_recoil_damage(E::Real, A::Real, Z::Real,
+                               gamma_data::Vector{Tuple{Float64,Float64}};
+                               E_d::Real=25.0)
+    emc2 = PhysicsConstants.amassn * PhysicsConstants.amu *
+           PhysicsConstants.clight^2 / PhysicsConstants.ev
+    M_res_c2 = (A + 1.0) * emc2
+    lp = lindhard_params(Z, A + 1.0, Z, A)
+    d = 0.0
+    for (eg, yld) in gamma_data
+        er = eg^2 / (2.0 * M_res_c2)
+        d += lindhard_damage(er, lp; E_d=E_d) * yld
+    end
+    # Add neutron recoil damage
+    er_n = E / (A + 1.0)
+    d += lindhard_damage(er_n, lp; E_d=E_d)
+    return d
+end
+
+"""
     capture_recoil(E, Q, A) -> Float64
 
 Compound nucleus recoil after capture: E/(A+1) + (A*E/(A+1)+Q)^2/(2*M*c^2).
@@ -222,7 +270,9 @@ function compute_kerma(pendf::PointwiseMaterial;
                        awr::Real=1.0, Z::Int=0,
                        Q_values::Dict{Int,Float64}=Dict{Int,Float64}(),
                        E_d::Union{Nothing,Float64}=nothing,
-                       local_gamma::Bool=false)
+                       local_gamma::Bool=false,
+                       gamma_data::Dict{Int,Vector{Tuple{Float64,Float64}}}=
+                           Dict{Int,Vector{Tuple{Float64,Float64}}}())
     ne = length(pendf.energies)
     ed = isnothing(E_d) ? displacement_energy(Z) : E_d
 
@@ -233,8 +283,13 @@ function compute_kerma(pendf::PointwiseMaterial;
     inelast = zeros(Float64, ne)
     damage  = zeros(Float64, ne)
 
+    # Skip redundant sum MTs (Fortran heatr skips MT=1,3,4,101)
+    skip_mts = Set([1, 3, 4, 101])
+
     for (icol, mt) in enumerate(pendf.mt_list)
+        mt in skip_mts && continue
         Q = get(Q_values, mt, 0.0)
+        gd = get(gamma_data, mt, Tuple{Float64,Float64}[])
         for ie in 1:ne
             E = pendf.energies[ie]
             sigma = pendf.cross_sections[ie, icol]
@@ -247,11 +302,25 @@ function compute_kerma(pendf::PointwiseMaterial;
                     damage[ie] += elastic_damage(E, awr, Float64(Z); E_d=ed) * sigma
                 end
             elseif mt == 102
-                h = capture_heating(E, Q, awr) * sigma
-                cap[ie] += h
-                if Z > 0
-                    damage[ie] += capture_damage(E, Q, awr, Float64(Z); E_d=ed) * sigma
+                if !isempty(gd)
+                    # Photon recoil approach (matches Fortran gheat)
+                    h = photon_recoil_heating(E, awr, gd) * sigma
+                    if Z > 0
+                        damage[ie] += photon_recoil_damage(E, awr, Float64(Z), gd; E_d=ed) * sigma
+                    end
+                elseif local_gamma
+                    h = capture_heating(E, Q, awr) * sigma
+                    if Z > 0
+                        damage[ie] += capture_damage(E, Q, awr, Float64(Z); E_d=ed) * sigma
+                    end
+                else
+                    # No gamma data, no local deposition: use single-photon recoil
+                    h = capture_recoil(E, Q, awr) * sigma
+                    if Z > 0
+                        damage[ie] += capture_damage(E, Q, awr, Float64(Z); E_d=ed) * sigma
+                    end
                 end
+                cap[ie] += h
             elseif mt == 18 || (19 <= mt <= 21) || mt == 38
                 h = fission_heating(E, Q) * sigma
                 fiss[ie] += h
@@ -262,8 +331,10 @@ function compute_kerma(pendf::PointwiseMaterial;
                 n_out = mt == 16 ? 2 : (mt == 17 ? 3 : 4)
                 h = nxn_heating(E, Q, awr, n_out) * sigma
                 inelast[ie] += h
-            else
-                h = (E + Q) * sigma
+            elseif mt > 100
+                # Other absorption: use capture_recoil or local deposit
+                h = (!isempty(gd) ? photon_recoil_heating(E, awr, gd) :
+                     (Q != 0 ? capture_recoil(E, Q, awr) : (E + Q))) * sigma
                 cap[ie] += h
             end
             total[ie] += h

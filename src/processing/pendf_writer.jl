@@ -247,8 +247,11 @@ function write_full_pendf(io::IO, result::NamedTuple;
             sec_e, sec_xs, qm, qi = sec
         end
 
-        # HEAD: LR=99 for all PENDF MTs (Fortran reconr emerge convention)
-        _write_cont_line(io, za, awr, 0, 99, 0, 0, Int(actual_mat), 3, imt, ns)
+        # HEAD: L2 depends on module that produced this section
+        # reconr: L2=99, broadr: L2=1, thermr: L2=0
+        l2_head = haskey(extra_mf3, imt) ? 0 :
+                  haskey(override_mf3, imt) ? 1 : 99
+        _write_cont_line(io, za, awr, 0, l2_head, 0, 0, Int(actual_mat), 3, imt, ns)
         # TAB1: QM, QI from MF3 section
         np = length(sec_e)
         _write_cont_line(io, qm, qi, 0, 0, 1, np, Int(actual_mat), 3, imt, ns)
