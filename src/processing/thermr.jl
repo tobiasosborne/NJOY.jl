@@ -1077,12 +1077,11 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             end
         end
 
-        # Detect elastic peak seed (E'≈E): the Fortran skips refinement here
+        # Detect elastic peak seed (E'≈E): skip refinement near elastic peak
         elastic_idx = findmin(abs.(seeds .- E))[2]
 
         for idx in 1:length(seeds)
             if idx > 1
-                # Skip refinement for the panel containing the elastic peak
                 is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
                                    abs(seeds[idx] - seeds[idx-1]) < 0.5 * kT
                 if is_elastic_panel

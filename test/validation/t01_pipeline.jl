@@ -113,7 +113,8 @@ function run_t01()
     # KEY INSIGHT: For iinc=1 (free gas), Fortran thermr calcem line 2455: ex(3)=ex(2)
     # MT=221 MF3 = the BROADENED ELASTIC XS on the elastic grid. No calcem integration.
     emax_thermr = 1.2
-    sb = A * r.elastic[searchsortedfirst(r.energies, 10.0)]
+    # Fortran thermr line 1913-1914: for free gas, smz=1, sb=((az+1)/az)^2
+    sb = ((A + 1) / A)^2
 
     mt221_e = Float64[]; mt221_xs = Float64[]
     for i in eachindex(b_e)
