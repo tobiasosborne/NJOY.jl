@@ -898,6 +898,117 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
     return (esi, xsi, records)
 end
 
+# Fortran free-gas beta grid (thermr.f90:1858-1911, 45 values)
+const FREE_GAS_BETA = Float64[
+    0, 0.1, 2, 4, 6, 8, 10, 15, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80,
+    100, 120, 140, 160, 180, 200, 250, 300, 350, 400, 500, 600, 700, 800, 900, 1000,
+    1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3500
+]
+
+"""
+    calcem_free_gas(A, T, emax, nbin; sigma_b, tol=0.05)
+
+Compute free-gas MF6 angular distributions using the Fortran's hardcoded
+45-point beta grid with adaptive refinement. Matches calcem for iinc=1.
+"""
+function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
+                         sigma_b::Float64=1.0, tol::Float64=0.05)
+    kT = PhysicsConstants.bk * T
+    tolmin_area = 5e-7
+    imax_stack = 20
+
+    nne = something(findfirst(e -> e > emax, THERMR_EGRID), length(THERMR_EGRID))
+    egrid = THERMR_EGRID[1:nne]
+
+    kernel = (E, Ep, mu) -> free_gas_kernel(E, Ep, mu, A, T; sigma_b=sigma_b)
+
+    records = Vector{MF6ListRecord}()
+
+    for ie in 1:nne
+        E = egrid[ie]
+
+        # Build E' from free-gas beta grid (lat=0 → kT units)
+        seeds = Float64[]
+        for beta in FREE_GAS_BETA
+            ep_down = E - beta * kT
+            ep_down > 0 && push!(seeds, round_sigfig(ep_down, 8, 0))
+            ep_up = E + beta * kT
+            push!(seeds, round_sigfig(ep_up, 8, 0))
+        end
+        sort!(unique!(seeds))
+        filter!(ep -> ep > 0, seeds)
+
+        # Evaluate kernel at seed points
+        seed_sigs = Float64[]
+        seed_coss = Vector{Vector{Float64}}()
+        for Ep in seeds
+            sig, cos = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
+            push!(seed_sigs, sig)
+            push!(seed_coss, cos)
+        end
+
+        # Adaptive refinement between consecutive seed points
+        # For free gas: test sigma convergence only (cosines handled by sigl)
+        entries = NTuple{10, Float64}[]
+
+        for idx in 1:length(seeds)
+            if idx > 1
+                stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
+                stk_c = [zeros(nbin) for _ in 1:imax_stack]
+                stk_e[1] = seeds[idx]; stk_s[1] = seed_sigs[idx]; stk_c[1] .= seed_coss[idx]
+                stk_e[2] = seeds[idx-1]; stk_s[2] = seed_sigs[idx-1]; stk_c[2] .= seed_coss[idx-1]
+                depth = 2
+                while depth >= 2
+                    area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * abs(stk_e[depth-1] - stk_e[depth])
+                    if depth >= imax_stack || area < tolmin_area
+                        if stk_s[depth] > 1e-32
+                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
+                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
+                            push!(entries, entry)
+                        end
+                        depth -= 1; continue
+                    end
+                    xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
+                    if xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                        if stk_s[depth] > 1e-32
+                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
+                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
+                            push!(entries, entry)
+                        end
+                        depth -= 1; continue
+                    end
+                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+                    # Sigma-only convergence test (Fortran line 2057)
+                    ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                    pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
+                    if pass
+                        if stk_s[depth] > 1e-32
+                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
+                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
+                            push!(entries, entry)
+                        end
+                        depth -= 1
+                    else
+                        depth += 1
+                        depth > imax_stack && (depth = imax_stack)
+                        stk_e[depth] = stk_e[depth-1]; stk_s[depth] = stk_s[depth-1]
+                        stk_c[depth] .= stk_c[depth-1]
+                        stk_e[depth-1] = xm; stk_s[depth-1] = sig_m; stk_c[depth-1] .= cos_m
+                    end
+                end
+            end
+            if idx == length(seeds) && seed_sigs[idx] > 1e-32
+                entry = ntuple(k -> k == 1 ? seeds[idx] : k == 2 ? seed_sigs[idx] :
+                               k - 2 <= nbin ? seed_coss[idx][k-2] : 0.0, 10)
+                push!(entries, entry)
+            end
+        end
+
+        push!(records, MF6ListRecord(E, entries))
+    end
+    return records
+end
+
 """
     compute_mf6_thermal(pendf_energies, pendf_elastic, A, T, nbin;
                         model=:free_gas, sab_data=nothing, mtref=221)
