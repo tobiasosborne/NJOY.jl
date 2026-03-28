@@ -965,35 +965,113 @@ Implemented `_read_urr_lrf2`, `_csunr2`, `URR2Sequence`, `URR2Data`. Fixed `elim
 - `execute_heatr`: merges KERMAResult (MT=301/444) into PointwiseMaterial (was discarding results).
 - `execute_thermr`: adds thermal MTs (221/229) as new columns (was replacing MT=2).
 
-**T01 section match summary (Phase 19)**:
+**T01 end-to-end test status (Phase 19, updated)**:
+
+The test script is at `/tmp/t01_official.jl`. Run with:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY* && julia --project=. /tmp/t01_official.jl
+```
+
+**Structural: 34/41 section line counts match reference** (83%):
 
 | Section | Julia | Reference | Status |
 |---------|-------|-----------|--------|
 | MF1/MT451 | 41 | 47 | Missing MF6/229,230 directory entries |
 | MF2/MT151 | 4 | 4 | **MATCH** |
 | MF3 (24 non-broadened MTs) | correct | correct | **24/24 MATCH** |
-| MF3/MT=1,2,102 | 348 | 310 | Need broadened grid (919 pts, have it in broadn_grid) |
-| MF3/MT=301,444 | 348 | 310 | Need heatr on broadened grid |
-| MF3/MT=221 | 20 | 52 | Need real thermal grid |
-| MF3/MT=229,230 | 20 | 194 | Need S(α,β) from tape26 |
-| MF6/MT=221 | 5437 | 9641 | Need denser secondary E grid |
+| MF3/MT=1,2,102 | 310 | 310 | **MATCH** (broadn_grid 919 pts wired) |
+| MF3/MT=301,444 | 310 | 310 | **MATCH** (heatr on broadened grid) |
+| MF3/MT=221 | 326 | 52 | Need real thermr grid (free gas) |
+| MF3/MT=229,230 | 326 | 194 | Need S(α,β) from tape26 (t322) |
+| MF6/MT=221 | 5437 | 9641 | Need denser secondary E grid (calcem) |
 | MF6/MT=229 | 0 | 19506 | Need S(α,β) MF6 computation |
 | MF6/MT=230 | 0 | 4 | Need coherent elastic stub |
-| MF12/MT=102 | 348 | 348 | **MATCH** |
-| MF13/MT=51 | 139 | 139 | **MATCH** |
+| MF12/MT=102 | 348 | 348 | **MATCH** (passthrough) |
+| MF13/MT=51 | 139 | 139 | **MATCH** (passthrough) |
 
-**Remaining work for T01**:
-1. Wire broadn_grid output as override_mf3 for MT=1,2,102 (919 pts) + compute thnmax from thresholds
-2. Wire heatr on broadened grid for MT=301,444
-3. Compute real thermr MF3/MF6 data for MT=221 (free gas with Fortran's calcem energy grid)
-4. Read tape26 (t322) S(α,β) data and compute MT=229,230 + MF6/MT=229
-5. Write MF6/MT=230 coherent elastic stub (4 lines, LIP=-294)
-6. Grind 12 thermal-range broadr energy diffs
-7. Fix format_endf_float for XS values (7-sigfig scientific vs 9-sigfig fixed)
-8. Full chain grinding to bit-identical
+**MF3 data quality (2047/2783 lines exact = 73.6%)**:
+- Non-broadened MTs (4,51-68,91,103-107,203-207): **85-99% exact**. Remaining diffs are QI header values for threshold/redundant MTs.
+- Broadened MTs (1,2,102): **77-98% exact**. 12 thermal-range energy diffs (see below) + some XS diffs at those energies.
+- Heatr MTs (301,444): **0.6% exact**. Values are wrong because computed from Julia broadened XS which has the 12 thermal diffs. Fix: grind the 12 broadn thermal diffs.
+- `format_endf_float` is NOT the issue — agent comparison confirmed non-broadened data lines are byte-identical.
+
+**Root cause of 12 broadn thermal energy diffs (DEEPLY INVESTIGATED)**:
+
+Both Julia and Fortran broadn_grid select the SAME nodes via slope-direction tracking. The first two nodes for T01 are k=1 (1e-5 eV) and k=2 (1.0625e-5 eV). k=2 is selected because the total XS slope at [k=2, k=3] gets zeroed (|dn|=0.00468 < |s|/1000=0.00491), flipping direction from -1 to +1, triggering slope-change detection.
+
+The divergence occurs in the convergence stack between nodes k=2 (1.0625e-5) and k=5 (1.25e-5). The midpoint 1.15625e-5 FAILS primary convergence in both codes. After subdivision, Julia's midpoint at 1.109375e-5 PASSES while Fortran's FAILS (or vice versa). This is a borderline decision where dy ≈ errt*|sn| at the thermal tightening threshold (errt=0.001). The sigma1 kernel values match to ~1e-8, but this is insufficient to determine which side of the errt*|sn| boundary the midpoint falls on.
+
+**This is the same class of irreducible FP precision issue as reconr T34's ±1 diffs.** The convergence test at these 12 energies is right at the decision boundary. Fixing requires matching sigma1 to better than 1e-10, which means matching the exact FP accumulation order in the Doppler broadening integral.
+
+**How to reproduce**: Run `/tmp/t01_broadn_debug.jl` which parses both Julia and Fortran broadr outputs and shows all 12 energy diffs. The diffs are at indices 3-14, all between 1.125e-5 and 2.5625e-5 eV.
+
+---
+
+**Remaining work for T01 — PRIORITIZED**:
+
+**Priority 1 — Fix the 12 broadn thermal diffs (highest impact, ~700/736 remaining MF3 diffs)**:
+The 12 energy diffs cascade to MT=1,2,102 (broadened values at wrong energies) and then to MT=301,444 (heatr computed from wrong broadened input). Root cause: borderline convergence decision in broadn stack at errt=0.001 threshold. Approaches:
+- (a) Match sigma1 accumulation order to Fortran bsigma — the h-function and f-function computations may differ in FP rounding order. Compare intermediate values at the specific borderline energies.
+- (b) Check if Julia's `interval_contributions` computes s1/s2 identically to Fortran's hunky at the borderline energies. The s2 formula has 6 terms with multiplications — FP order matters.
+- (c) If the difference is truly irreducible (like T34), accept the 12 diffs and verify the VALUES at Julia's grid points match Fortran at those same points (they should, since sigma1 matches to 1e-8).
+
+**Priority 2 — Threshold MT QI header diffs (~36 diffs, simple fix)**:
+Each threshold MT (51-68, 91, etc.) has 1 diff in the TAB1 header line: QI value. The Fortran reconr emerge writes QI=0 for redundant MTs (MT=4). Julia's `_get_legacy_section` computes QI from the minimum threshold. Fix: check what the Fortran writes for each MT's QI and match. This is in `pendf_writer.jl` write_full_pendf.
+
+**Priority 3 — MF3 thermr sections (MT=221,229,230)**:
+- MT=221 (free gas inelastic): Julia produces 326 lines (969 pts from `compute_thermal_xs`), Fortran has 52 lines. The Fortran uses a specific fixed energy grid (calcem's `egrid`, 118 points in thermr.f90). Julia uses `THERMR_EGRID` which is different. Fix: match the Fortran calcem energy grid.
+- MT=229,230 (S(α,β)): Requires reading tape26 (t322, graphite thermal scattering data). The file is at `njoy-reference/tests/resources/t322`. It contains S(α,β) in ENDF MF7/MT4 format. Julia already has `sab_table_to_thermr()` and `sab_kernel()`. Need: (a) parse MF7/MT4 from t322 for MAT=1065 (graphite), (b) call `compute_thermal_xs` with `:sab` model, (c) compute MF6 angular data for MT=229.
+- MT=230 (coherent elastic): The Fortran writes a 4-line stub with LIP=-294, LAW=0 (see after_thermr_2.pendf lines 32464-32467). This is just a structural marker for coherent elastic — no actual data. Write directly.
+
+**Priority 4 — MF6 angular distribution density**:
+MF6/MT=221 has 5437 lines (76 incident energies × ~42 secondary energies). Fortran has 9641 lines (94 incident energies × ~69 secondary energies). Fix: match Fortran's calcem incident energy grid (thermr.f90 `egrid[]` array, 118 points) and secondary energy grid (adaptive based on the kernel).
+
+**Priority 5 — MF6/MT=229 (S(α,β) angular, 19506 lines)**:
+Requires reading tape26 S(α,β) and running `sigl_equiprobable` with `sab_kernel`. Same as MT=221 but using S(α,β) data instead of free-gas.
+
+**Priority 6 — MF6/MT=230 coherent elastic stub (4 lines)**:
+Write directly: HEAD + TAB1(LIP=-294, LAW=0, yield=1.0) + SEND.
+
+**Priority 7 — MF1/MT451 directory**:
+Add MF6/MT=229 and MF6/MT=230 line counts to the section_lines dict in `write_full_pendf`. Currently only MF6/MT=221 is computed.
+
+---
+
+**Key files and their roles (for the next agent)**:
+
+| File | What it does | What to change |
+|------|-------------|----------------|
+| `src/processing/broadr.jl` | broadn_grid (convergence stack), thin_xs, doppler_broaden | Fix 12 thermal diffs (priority 1) |
+| `src/processing/sigma1.jl` | Doppler broadening kernel (sigma1_at) | May need FP accumulation order fix |
+| `src/processing/thermr.jl` | sigl_equiprobable, compute_mf6_thermal, free_gas/sab kernels | Fix MF3/MF6 grids (priorities 3-5) |
+| `src/processing/pendf_writer.jl` | write_full_pendf, _write_mf6_section, MF12/MF13 passthrough | Fix QI headers, MF6/MT=230 stub (priorities 2,6,7) |
+| `src/processing/heatr.jl` | compute_kerma → KERMAResult (total_kerma, damage_energy) | Values depend on broadened input |
+| `src/endf/io.jl` | format_endf_float, write_cont/tab1/tab2/list | a11 format is CORRECT — NOT the issue |
+| `test/validation/test_executor.jl` | reconr_to_pendf, execute_heatr, execute_thermr pipeline | Already fixed for full chain |
+
+**How to run the T01 end-to-end test**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. /tmp/t01_official.jl
+```
+This runs reconr→broadr→heatr→thermr(free)→thermr(placeholder) and writes `/tmp/t01_tape25.pendf`, then compares section line counts and MF3 data lines against `njoy-reference/tests/01/referenceTape25`.
+
+**How to compare with the Fortran oracle at each stage**:
+Oracle caches are in `test/validation/oracle_cache/test01/`:
+- `after_reconr.pendf` — 29/29 MTs BIT-IDENTICAL with Julia reconr
+- `after_broadr.pendf` — Julia broadn_grid produces 919/919 pts, 907/919 energies match
+- `after_heatr.pendf` — Adds MT=301,444 on broadened grid (310 lines each)
+- `after_thermr.pendf` — Adds MT=221 (52 lines MF3) + MF6/MT=221 (9641 lines)
+- `after_thermr_2.pendf` — Adds MT=229,230 + MF6/MT=229,230. This IS referenceTape25.
+
+Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Trap 39 (NEW)**: Fortran broadr's `thnmax` is NOT the full energy range — it's dynamically computed from reaction thresholds. For C-nat T01, thnmax=4.81207e6 (the MT=51 threshold × some factor). Above thnmax, original reconr data is copied without broadening/thinning. The Fortran output log says: "final maximum energy for broadening/thinning = 4.81207E+06 eV".
 
 **Trap 40 (NEW)**: Fortran broadr does NOT call thinb after broadn when tempef > 0. The broadn convergence stack already produces an optimal grid. Julia was applying thin_xs after broadn_grid, reducing 919→434 pts. Remove the thinning step.
 
 **Trap 41 (NEW)**: MF6 thermal angular distributions use LANG=3 (equi-probable cosines), NL=nbin+2=10 values per secondary energy: (E', σ, μ₁...μ₈). The MF6 structure is: HEAD + product TAB1 (yield=1.0) + TAB2 (NE incident energies) + NE LIST records. Each LIST has NW=n_secondary*10 data words.
+
+**Trap 42 (NEW)**: The broadn node selection at very low energies is affected by the `abs(dn) < abs(s)/1000` slope zeroing condition. For C-nat at k=2, the reconr total XS slope is -0.00468, threshold is 0.00491. Since 0.00468 < 0.00491, the slope gets zeroed to 0, direction becomes +1, triggering a slope-change detection (previous direction was -1). This makes k=2 (E=1.0625e-5) a node. Both Julia and Fortran do this — it's not a bug, just a subtle behavior.
+
+**Trap 43 (NEW)**: The `format_endf_float` function is NOT position-dependent. The Fortran `a11` uses the SAME algorithm for energy and XS values — there is no "odd position = 9-sigfig, even position = 7-sigfig" distinction. The 9-sigfig vs 7-sigfig decision is based solely on the value magnitude (0.1 to 1e7 range) and trailing-zeros detection. The "format_endf_float XS mode" item from earlier sessions was a WRONG hypothesis.
