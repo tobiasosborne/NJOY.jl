@@ -183,32 +183,68 @@ function read_thermal_data(alpha::AbstractVector, beta::AbstractVector,
             Float64(sigma_b), Float64(awr), Float64(T_eff), lasym, lat)
 end
 
-function _interp_sab(a::Real, b::Real, data::SABData)
-    sabflg = -225.0
-    al, be, sab = data.alpha, data.beta, data.sab
-    (a <= 0 || a > al[end]) && return sabflg
-    # For a < al[1]: log-log extrapolation matching Fortran terpa INT=4
-    if a < al[1]
-        bv = data.lasym == 0 ? abs(b) : b
-        (bv > be[end] || bv < be[1]) && return sabflg
-        ib = clamp(searchsortedlast(be, bv), 1, length(be)-1)
-        fb = clamp((bv - be[ib])/(be[ib+1] - be[ib]), 0.0, 1.0)
-        la = log(a); la1 = log(al[1]); la2 = log(al[2])
-        s1_b = (1-fb)*sab[1,ib] + fb*sab[1,ib+1]
-        s2_b = (1-fb)*sab[2,ib] + fb*sab[2,ib+1]
-        any(v -> v <= sabflg, (s1_b, s2_b)) && return sabflg
-        slope = (s2_b - s1_b) / (la2 - la1)
-        return s1_b + slope * (la - la1)
+"Quadratic interpolation matching Fortran terpq (thermr.f90:2617-2658)."
+function _terpq(x1::Real, y1::Real, x2::Real, y2::Real, x3::Real, y3::Real, x::Real)
+    sabflg = -225.0; step = 2.0
+    if x < x1
+        # Below range: log-lin (INT=3) if increasing, else clamp
+        y1 > y2 && return y1
+        x1 > 0 && x > 0 || return y1
+        return y1 + (y2 - y1) * (log(x) - log(x1)) / (log(x2) - log(x1))
+    elseif x > x3
+        # Above range: lin-lin if decreasing, else clamp
+        y3 > y2 && return y3
+        return y2 + (y3 - y2) * (x - x2) / (x3 - x2)
+    elseif abs(y1 - y2) > step || abs(y2 - y3) > step
+        # Large steps: piecewise linear
+        if x < x2
+            return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+        else
+            return y2 + (y3 - y2) * (x - x2) / (x3 - x2)
+        end
+    else
+        # Quadratic (Newton forward difference)
+        bq = (y2 - y1) * (x3 - x1) / ((x2 - x1) * (x3 - x2)) -
+             (y3 - y1) * (x2 - x1) / ((x3 - x1) * (x3 - x2))
+        cq = (y3 - y1) / ((x3 - x1) * (x3 - x2)) -
+             (y2 - y1) / ((x2 - x1) * (x3 - x2))
+        return y1 + bq * (x - x1) + cq * (x - x1)^2
     end
+end
+
+"""Biquadratic S(α,β) interpolation matching Fortran sigl (thermr.f90:2514-2566).
+Uses terpq (3-point quadratic) in alpha then beta, with log-lin extrapolation
+for α below grid and large-step linear fallback."""
+function _interp_sab(a::Real, b::Real, data::SABData)
+    sabflg = -225.0; test2 = 30.0
+    al, be, sab = data.alpha, data.beta, data.sab
+    na, nb = length(al), length(be)
+    (a <= 0 || a > al[end]) && return sabflg
     bv = data.lasym == 0 ? abs(b) : b
     (bv > be[end] || bv < be[1]) && return sabflg
-    ia = clamp(searchsortedlast(al, a), 1, length(al)-1)
-    ib = clamp(searchsortedlast(be, bv), 1, length(be)-1)
-    fa = clamp((a - al[ia])/(al[ia+1] - al[ia]), 0.0, 1.0)
-    fb = clamp((bv - be[ib])/(be[ib+1] - be[ib]), 0.0, 1.0)
-    s00, s10, s01, s11 = sab[ia,ib], sab[ia+1,ib], sab[ia,ib+1], sab[ia+1,ib+1]
-    any(v -> v <= sabflg, (s00,s10,s01,s11)) && return sabflg
-    (1-fa)*(1-fb)*s00 + fa*(1-fb)*s10 + (1-fa)*fb*s01 + fa*fb*s11
+
+    # Find grid indices (Fortran loop: ia such that a < alpha(ia+1))
+    ia = clamp(searchsortedlast(al, a), 1, na - 1)
+    ib = clamp(searchsortedlast(be, bv), 1, nb - 1)
+    bbb = data.lasym == 1 && b < 0 ? -bv : bv
+
+    # Sabflg corner check (Fortran lines 2546-2550) — skip if small α·A and small β
+    if !(a * data.awr < test2 && bv < test2)
+        (sab[ia, ib] <= sabflg || sab[min(ia+1,na), ib] <= sabflg ||
+         sab[ia, min(ib+1,nb)] <= sabflg || sab[min(ia+1,na), min(ib+1,nb)] <= sabflg) &&
+            return sabflg
+    end
+
+    # Ensure 3 points available (Fortran lines 2552-2553)
+    ia + 2 > na && (ia = max(1, na - 2))
+    ib + 2 > nb && (ib = max(1, nb - 2))
+
+    # Biquadratic: terpq in alpha for 3 beta values, then terpq in beta
+    s1 = _terpq(al[ia], sab[ia, ib],   al[ia+1], sab[ia+1, ib],   al[ia+2], sab[ia+2, ib],   a)
+    s2 = _terpq(al[ia], sab[ia, ib+1], al[ia+1], sab[ia+1, ib+1], al[ia+2], sab[ia+2, ib+1], a)
+    s3 = _terpq(al[ia], sab[ia, ib+2], al[ia+1], sab[ia+1, ib+2], al[ia+2], sab[ia+2, ib+2], a)
+    s = _terpq(be[ib], s1, be[ib+1], s2, be[ib+2], s3, bbb)
+    max(s, sabflg)
 end
 
 """
@@ -552,16 +588,19 @@ and `nbin` equi-probable cosine values (average μ within each bin).
 Matches Fortran thermr.f90 sigl (lines 2660-2872) with nlin < 0 path.
 """
 function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
-                           kernel, tev::Float64; tol::Float64=0.001)
+                           kernel, tev::Float64; tol::Float64=0.001,
+                           awr::Float64=1.0, tev_peak::Float64=tev)
     # Constants matching Fortran (thermr.f90:2686-2698)
     imax = 20; xtol = 1e-5; ytol = 1e-3; sigmin = 1e-32
     eps_peak = 1e-3; shade = 0.99999999
     half_tol = 0.5 * tol
 
-    # Scattering peak location (Fortran lines 2710-2714)
-    b = abs(E_prime - E) / tev
+    # Scattering peak location (Fortran sigl lines 2693-2714)
+    # b uses tev_peak (=tevz for lat=1, matching line 2698: b=b*tev/tevz)
+    # x_peak uses awr*tev (matching line 2710: (s1bb-1)*az*tev)
+    b = abs(E_prime - E) / tev_peak
     s1bb = sqrt(1 + b*b)
-    x_peak = E_prime > 0 ? 0.5*(E + E_prime - (s1bb - 1)*tev) / sqrt(E*E_prime) : 0.0
+    x_peak = E_prime > 0 ? 0.5*(E + E_prime - (s1bb - 1)*awr*tev) / sqrt(E*E_prime) : 0.0
     abs(x_peak) > 1 - eps_peak && (x_peak = 0.99)
     x_peak = round_sigfig(x_peak, 8, 0)
 
@@ -799,7 +838,8 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         # Evaluate sigl at each seed point
         seed_data = Vector{Tuple{Float64, Float64, Vector{Float64}}}()
         for Ep in seeds
-            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
+            sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol,
+                                                awr=Float64(sab.awr), tev_peak=kT_eff)
             push!(seed_data, (Ep, sigma, cosines))
         end
 
@@ -835,7 +875,7 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                 depth = 2
 
                 while depth >= 2
-                    # Check area threshold (Fortran line 2053)
+                    # Check area threshold (Fortran line 2050)
                     area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
                     if depth >= imax_stack || area < tolmin_area
                         emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
@@ -851,7 +891,8 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                     end
 
                     # Evaluate at midpoint
-                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol,
+                                                     awr=Float64(sab.awr), tev_peak=kT_eff)
 
                     # Convergence test (Fortran lines 2057-2065)
                     ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])  # linear interp of sigma
