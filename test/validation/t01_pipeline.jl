@@ -5,12 +5,35 @@ function run_t01()
     A = Float64(r.mf2.AWR)
     alpha = A / (NJOY.PhysicsConstants.bk * 296.0)
     thnmax = 4.81207e6
-    xs3 = hcat(r.total, r.elastic, r.capture)
-    b_e, b_xs = NJOY.broadn_grid(r.energies, xs3, alpha, 0.005, 0.05, 0.005/20000, thnmax)
+    # CRITICAL: broadn_grid must use PARTIALS only (elastic, capture), NOT total.
+    # Fortran broadr's broadn uses nreac=2 for C-nat (elastic + capture).
+    # Including the total makes convergence stricter → different grid.
+    xs_partials = hcat(r.elastic, r.capture)
+    b_e, b_xs = NJOY.broadn_grid(r.energies, xs_partials, alpha, 0.005, 0.05, 0.005/20000, thnmax)
     println("broadr: $(length(b_e)) pts")
 
+    # Broaden total separately on the same grid (Fortran broadens all MTs independently)
+    # Below thnmax: sigma1_at. Above thnmax: copy reconr values.
+    b_total = Vector{Float64}(undef, length(b_e))
+    for i in eachindex(b_e)
+        if b_e[i] <= thnmax
+            b_total[i] = NJOY.sigma1_at(b_e[i], r.energies, r.total, alpha)
+        else
+            # Above thnmax: interpolate from reconr grid (no broadening)
+            idx = searchsortedfirst(r.energies, b_e[i])
+            if idx <= 1
+                b_total[i] = r.total[1]
+            elseif idx > length(r.energies)
+                b_total[i] = r.total[end]
+            else
+                f = (b_e[i] - r.energies[idx-1]) / (r.energies[idx] - r.energies[idx-1])
+                b_total[i] = r.total[idx-1] + f * (r.total[idx] - r.total[idx-1])
+            end
+        end
+    end
+
     override_mf3 = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(
-        1 => (b_e, b_xs[:,1]), 2 => (b_e, b_xs[:,2]), 102 => (b_e, b_xs[:,3]))
+        1 => (b_e, b_total), 2 => (b_e, b_xs[:,1]), 102 => (b_e, b_xs[:,2]))
 
     # Read MF12/MT=102 gamma data from ENDF file (C-nat: 3 gammas)
     # Fortran heatr reads these for gheat photon recoil computation
@@ -78,9 +101,9 @@ function run_t01()
         println("  E_gamma=$(eg) eV, yield=$yld")
     end
 
-    # Build PointwiseMaterial without MT=1 (only individual reactions)
+    # Build PointwiseMaterial from partials (elastic=col1, capture=col2)
     pm_broad = PointwiseMaterial(Int32(1306), b_e,
-        hcat(b_xs[:,2], zeros(length(b_e)), b_xs[:,3]), [2, 18, 102])
+        hcat(b_xs[:,1], zeros(length(b_e)), b_xs[:,2]), [2, 18, 102])
     gd = Dict{Int, Vector{Tuple{Float64,Float64}}}(102 => gamma_102)
     kr = compute_kerma(pm_broad; awr=A, Z=6, gamma_data=gd)
     extra_mf3 = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(
@@ -96,7 +119,7 @@ function run_t01()
     for i in eachindex(b_e)
         b_e[i] > emax_thermr && continue
         push!(mt221_e, b_e[i])
-        push!(mt221_xs, b_xs[i, 2])  # elastic column
+        push!(mt221_xs, b_xs[i, 1])  # elastic column (col 1 = elastic)
     end
     # If emax not in grid, add it with interpolated elastic
     if isempty(mt221_e) || mt221_e[end] < emax_thermr
