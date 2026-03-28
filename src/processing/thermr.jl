@@ -891,6 +891,15 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
             end
         end
 
+        # Trim trailing zero-sigma entries (Fortran lines 2133, 2206-2207)
+        jnz = 0
+        for k in 1:length(entries)
+            entries[k][2] != 0.0 && (jnz = k)
+        end
+        if jnz > 0 && jnz + 1 < length(entries)
+            resize!(entries, jnz + 1)
+        end
+
         xsi[ie] = round_sigfig(total_xs, 9, 0)
         push!(records, MF6ListRecord(E, entries))
     end
@@ -947,61 +956,71 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             push!(seed_coss, cos)
         end
 
-        # Adaptive refinement between consecutive seed points
-        # For free gas: test sigma convergence only (cosines handled by sigl)
+        # Adaptive refinement with iskip for elastic peak (Fortran lines 2022-2024, 2050-2052)
         entries = NTuple{10, Float64}[]
+
+        function push_entry!(ep, sig, cos)
+            entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                           k - 2 <= nbin ? cos[k-2] : 0.0, 10)
+            push!(entries, entry)
+        end
+
+        # Detect elastic peak seed (E'≈E): the Fortran skips refinement here
+        elastic_idx = findmin(abs.(seeds .- E))[2]
 
         for idx in 1:length(seeds)
             if idx > 1
-                stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
-                stk_c = [zeros(nbin) for _ in 1:imax_stack]
-                stk_e[1] = seeds[idx]; stk_s[1] = seed_sigs[idx]; stk_c[1] .= seed_coss[idx]
-                stk_e[2] = seeds[idx-1]; stk_s[2] = seed_sigs[idx-1]; stk_c[2] .= seed_coss[idx-1]
-                depth = 2
-                while depth >= 2
-                    area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * abs(stk_e[depth-1] - stk_e[depth])
-                    if depth >= imax_stack || area < tolmin_area
-                        if stk_s[depth] > 1e-32
-                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
-                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
-                            push!(entries, entry)
+                # Skip refinement for the panel containing the elastic peak
+                is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
+                                   abs(seeds[idx] - seeds[idx-1]) < 0.5 * kT
+                if is_elastic_panel
+                    push_entry!(seeds[idx-1], seed_sigs[idx-1], seed_coss[idx-1])
+                else
+                    # Convergence stack
+                    stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
+                    stk_c = [zeros(nbin) for _ in 1:imax_stack]
+                    stk_e[1] = seeds[idx]; stk_s[1] = seed_sigs[idx]; stk_c[1] .= seed_coss[idx]
+                    stk_e[2] = seeds[idx-1]; stk_s[2] = seed_sigs[idx-1]; stk_c[2] .= seed_coss[idx-1]
+                    depth = 2
+                    while depth >= 2
+                        area = 0.5 * abs(stk_s[depth] + stk_s[depth-1]) * abs(stk_e[depth-1] - stk_e[depth])
+                        if depth >= imax_stack || area < tolmin_area
+                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1; continue
                         end
-                        depth -= 1; continue
-                    end
-                    xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
-                    if xm <= stk_e[depth] || xm >= stk_e[depth-1]
-                        if stk_s[depth] > 1e-32
-                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
-                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
-                            push!(entries, entry)
+                        xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
+                        if xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1; continue
                         end
-                        depth -= 1; continue
-                    end
-                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
-                    # Sigma-only convergence test (Fortran line 2057)
-                    ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
-                    pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
-                    if pass
-                        if stk_s[depth] > 1e-32
-                            entry = ntuple(k -> k == 1 ? stk_e[depth] : k == 2 ? stk_s[depth] :
-                                           k - 2 <= nbin ? stk_c[depth][k-2] : 0.0, 10)
-                            push!(entries, entry)
+                        sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+                        ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                        pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
+                        if pass
+                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1
+                        else
+                            depth += 1
+                            depth > imax_stack && (depth = imax_stack)
+                            stk_e[depth] = stk_e[depth-1]; stk_s[depth] = stk_s[depth-1]
+                            stk_c[depth] .= stk_c[depth-1]
+                            stk_e[depth-1] = xm; stk_s[depth-1] = sig_m; stk_c[depth-1] .= cos_m
                         end
-                        depth -= 1
-                    else
-                        depth += 1
-                        depth > imax_stack && (depth = imax_stack)
-                        stk_e[depth] = stk_e[depth-1]; stk_s[depth] = stk_s[depth-1]
-                        stk_c[depth] .= stk_c[depth-1]
-                        stk_e[depth-1] = xm; stk_s[depth-1] = sig_m; stk_c[depth-1] .= cos_m
                     end
                 end
             end
-            if idx == length(seeds) && seed_sigs[idx] > 1e-32
-                entry = ntuple(k -> k == 1 ? seeds[idx] : k == 2 ? seed_sigs[idx] :
-                               k - 2 <= nbin ? seed_coss[idx][k-2] : 0.0, 10)
-                push!(entries, entry)
-            end
+            # Emit last seed
+            idx == length(seeds) && push_entry!(seeds[idx], seed_sigs[idx], seed_coss[idx])
+        end
+
+        # Trim trailing zero-sigma entries (Fortran lines 2133, 2206-2207)
+        # Keep up to jnz+1 (one zero entry after last nonzero sigma)
+        jnz = 0
+        for k in 1:length(entries)
+            entries[k][2] != 0.0 && (jnz = k)
+        end
+        if jnz > 0 && jnz + 1 < length(entries)
+            resize!(entries, jnz + 1)
         end
 
         push!(records, MF6ListRecord(E, entries))
@@ -1048,17 +1067,23 @@ function compute_mf6_thermal(pendf_energies::Vector{Float64},
 
     records = MF6ListRecord[]
     for E in egrid
-        # Secondary energy grid (adaptive: denser near E)
-        ep_max = E + 20 * kT
-        n_ep = max(20, round(Int, ep_max / (0.5 * kT)))
-        ep_grid = range(0.0, ep_max; length=min(n_ep, 100))
+        # Secondary energy grid from beta values (Fortran calcem approach)
+        ep_grid = Float64[]
+        beta_grid = model == :free_gas ? FREE_GAS_BETA :
+                    (sab_data !== nothing ? sab_data.beta : FREE_GAS_BETA)
+        kT_eff = (model == :sab && sab_data !== nothing && sab_data.lat == 1) ? 0.0253 : kT
+        for beta in beta_grid
+            ep_down = E - beta * kT_eff
+            ep_down > 0 && push!(ep_grid, round_sigfig(ep_down, 8, 0))
+            ep_up = E + beta * kT_eff
+            push!(ep_grid, round_sigfig(ep_up, 8, 0))
+        end
+        sort!(unique!(ep_grid))
+        filter!(ep -> ep > 0, ep_grid)
 
         entries = NTuple{10, Float64}[]
         for Ep in ep_grid
-            Ep <= 0 && continue
             sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, tev; tol=0.001)
-            sigma < 1e-32 && continue
-            # Pack: (E', σ, μ₁...μ₈)
             entry = ntuple(k -> k == 1 ? Ep : k == 2 ? sigma :
                            k-2 <= nbin ? cosines[k-2] : 0.0, 10)
             push!(entries, entry)
