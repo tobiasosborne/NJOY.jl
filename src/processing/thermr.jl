@@ -140,7 +140,7 @@ function free_gas_kernel(E::Real, E_prime::Real, mu::Real, A::Real, T::Real;
     kT = PhysicsConstants.bk * T
     Ef, Epf = Float64(E), Float64(E_prime)
     (Ef <= 0 || Epf <= 0 || kT <= 0) && return 0.0
-    alpha = max((Ef + Epf - 2.0*Float64(mu)*sqrt(Ef*Epf)) / (A*kT), 1e-10)
+    alpha = max((Ef + Epf - 2.0*Float64(mu)*sqrt(Ef*Epf)) / (A*kT), 1e-6)  # Fortran amin=1e-6 (line 2500)
     beta = (Epf - Ef) / kT
     arg = (alpha + beta)^2 / (4.0*alpha)
     arg > 225.0 && return 0.0
@@ -1022,28 +1022,9 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
 
     for ie in 1:nne
         E = egrid[ie]
+        nbeta = length(FREE_GAS_BETA)
 
-        # Build E' from free-gas beta grid (lat=0 → kT units)
-        seeds = Float64[]
-        for beta in FREE_GAS_BETA
-            ep_down = E - beta * kT
-            ep_down > 0 && push!(seeds, round_sigfig(ep_down, 8, 0))
-            ep_up = E + beta * kT
-            push!(seeds, round_sigfig(ep_up, 8, 0))
-        end
-        sort!(unique!(seeds))
-        filter!(ep -> ep > 0, seeds)
-
-        # Evaluate kernel at seed points
-        seed_sigs = Float64[]
-        seed_coss = Vector{Vector{Float64}}()
-        for Ep in seeds
-            sig, cos = sigl_equiprobable(E, Ep, nbin, kernel, kT; tol=tol)
-            push!(seed_sigs, sig)
-            push!(seed_coss, cos)
-        end
-
-        # Adaptive refinement (Fortran calcem lines 2041-2162)
+        # Match Fortran calcem sequential beta processing (lines 1985-2152)
         entries = NTuple{10, Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
@@ -1071,70 +1052,113 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             end
         end
 
-        # Detect elastic peak seed (E'≈E): skip refinement near elastic peak
-        elastic_idx = findmin(abs.(seeds .- E))[2]
-
-        for idx in 1:length(seeds)
-            if idx > 1
-                is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
-                                   abs(seeds[idx] - seeds[idx-1]) < 0.5 * kT
-                if is_elastic_panel
-                    emit_point!(seeds[idx-1], seed_sigs[idx-1], seed_coss[idx-1])
-                else
-                    # Convergence stack between seeds[idx-1] and seeds[idx]
-                    stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
-                    stk_c = [zeros(nbin) for _ in 1:imax_stack]
-                    stk_e[1] = seeds[idx]; stk_s[1] = seed_sigs[idx]; stk_c[1] .= seed_coss[idx]
-                    stk_e[2] = seeds[idx-1]; stk_s[2] = seed_sigs[idx-1]; stk_c[2] .= seed_coss[idx-1]
-                    depth = 2
-                    while depth >= 2
-                        area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
-                        if depth >= imax_stack || area < tolmin_area
-                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                            depth -= 1; continue
-                        end
-                        xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
-                        if xm <= stk_e[depth] || xm >= stk_e[depth-1]
-                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                            depth -= 1; continue
-                        end
-                        sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
-
-                        ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
-                        pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
-
-                        uu = 0.0; uum = 0.0
-                        if pass
-                            for k in 1:nbin
-                                ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
-                                uu += cos_m[k]; uum += ym_c
-                                if abs(cos_m[k] - ym_c) > tol
-                                    pass = false; break
-                                end
-                            end
-                        end
-                        if pass
-                            test_uu = 2.0 * tol * abs(uu) + 1e-5
-                            abs(uu - uum) > test_uu && (pass = false)
-                        end
-
-                        if pass
-                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                            depth -= 1
-                        else
-                            depth += 1
-                            depth > imax_stack && (depth = imax_stack)
-                            stk_e[depth] = stk_e[depth-1]; stk_s[depth] = stk_s[depth-1]
-                            stk_c[depth] .= stk_c[depth-1]
-                            stk_e[depth-1] = xm; stk_s[depth-1] = sig_m; stk_c[depth-1] .= cos_m
+        # Convergence stack subroutine (Fortran labels 330-410)
+        function run_stack!(x1_e, x1_s, x1_c, x2_e, x2_s, x2_c, do_iskip)
+            if do_iskip
+                emit_point!(x2_e, x2_s, x2_c)
+                return
+            end
+            stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
+            stk_c = [zeros(nbin) for _ in 1:imax_stack]
+            stk_e[1] = x1_e; stk_s[1] = x1_s; stk_c[1] .= x1_c
+            stk_e[2] = x2_e; stk_s[2] = x2_s; stk_c[2] .= x2_c
+            depth = 2
+            while depth >= 2
+                area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
+                if depth >= imax_stack || area < tolmin_area
+                    emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                    depth -= 1; continue
+                end
+                xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
+                if xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                    emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                    depth -= 1; continue
+                end
+                sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+                ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
+                uu = 0.0; uum = 0.0
+                if pass
+                    for k in 1:nbin
+                        ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                        uu += cos_m[k]; uum += ym_c
+                        if abs(cos_m[k] - ym_c) > tol
+                            pass = false; break
                         end
                     end
                 end
+                if pass
+                    test_uu = 2.0 * tol * abs(uu) + 1e-5
+                    abs(uu - uum) > test_uu && (pass = false)
+                end
+                if pass
+                    emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                    depth -= 1
+                else
+                    depth += 1
+                    depth > imax_stack && (depth = imax_stack)
+                    stk_e[depth] = stk_e[depth-1]; stk_s[depth] = stk_s[depth-1]
+                    stk_c[depth] .= stk_c[depth-1]
+                    stk_e[depth-1] = xm; stk_s[depth-1] = sig_m; stk_c[depth-1] .= cos_m
+                end
             end
-            idx == length(seeds) && emit_point!(seeds[idx], seed_sigs[idx], seed_coss[idx])
         end
 
-        # Trim trailing zero-sigma entries (Fortran lines 2133, 2206-2207)
+        # Initialize with E'=0 (Fortran line 1985-1988)
+        x1_e = 0.0
+        x1_s, x1_c = sigl_equiprobable(E, 0.0, nbin, kernel, kT; tol=tol)
+        iskip = false
+
+        # Sequential beta loop matching Fortran (lines 1992-2148)
+        jbeta = -nbeta
+        while true
+            jbeta == 0 && (jbeta = 1)
+
+            # Compute next E' from beta (Fortran lines 2005-2027)
+            bi = abs(jbeta)
+            beta_val = FREE_GAS_BETA[bi]
+            if jbeta < 0
+                ep = E - beta_val * kT
+                ep = round_sigfig(ep, 8, 0) == round_sigfig(E, 8, 0) ?
+                     round_sigfig(E, 8, -1) : round_sigfig(ep, 8, 0)
+            else
+                ep = E + beta_val * kT
+                if round_sigfig(ep, 8, 0) == round_sigfig(E, 8, 0)
+                    ep = round_sigfig(E, 8, +1)
+                    iskip = true
+                else
+                    ep = round_sigfig(ep, 8, 0)
+                end
+            end
+
+            # Skip if ep <= previous right endpoint (Fortran line 2029)
+            if ep <= x1_e
+                jbeta += 1
+                jbeta == 0 && (jbeta = 1)
+                jbeta > nbeta && break
+                continue
+            end
+            ep = round_sigfig(ep, 8, 0)  # Fortran line 2033
+
+            # Set up panel: x2=previous, x1=new seed (Fortran lines 1999-2038)
+            x2_e = x1_e; x2_s = x1_s; x2_c = copy(x1_c)
+            x1_e = ep
+            x1_s, x1_c = sigl_equiprobable(E, ep, nbin, kernel, kT; tol=tol)
+
+            # Run convergence stack (Fortran labels 330-410)
+            run_stack!(x1_e, x1_s, x1_c, x2_e, x2_s, x2_c, iskip)
+            iskip = false
+
+            # Advance beta (Fortran line 2147)
+            jbeta += 1
+            jbeta == 0 && (jbeta = 1)
+            jbeta > nbeta && break
+        end
+
+        # Emit final zero point (Fortran lines 2149-2152 → label 430)
+        emit_point!(x1_e, 0.0, zeros(nbin))
+
+        # Trim trailing zeros (Fortran lines 2204-2205)
         jnz = 0
         for k in 1:length(entries)
             entries[k][2] != 0.0 && (jnz = k)
