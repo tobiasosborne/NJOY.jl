@@ -352,6 +352,7 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
     wint = 0.658173e-15 * A_mass * debye_waller
     c1, c2, ulim = 4.0/(3*a^2), 1.0/c^2, econ*emax
     tsl, ffl = Float64[], Float64[]
+    tsqx = econ / 20  # Fortran line 1014: merge threshold
     phi = ulim/twopis; i1m = floor(Int, a*sqrt(phi))+1
     for i1 in 1:i1m; l1=i1-1
         disc = 3*(a^2*phi - l1^2); disc < 0 && continue
@@ -368,10 +369,14 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
                     (tsq<=0||tsq>ulim) && continue
                     f_sf = structure_factor(lat, l1, l2s, l3)
                     wt = exp(-tsq*t2*wint)*w1*w2*w3*f_sf/sqrt(tsq)
+                    # Fortran lines 1079,1101: only merge when tsq > tsqx
+                    # Fortran merge is ONE-SIDED: tsl[k] <= tsq < 1.05*tsl[k]
                     found = false
-                    for k in eachindex(tsl)
-                        if abs(tsq-tsl[k]) < 0.05*tsl[k]
-                            ffl[k]+=wt; found=true; break
+                    if tsq > tsqx
+                        for k in eachindex(tsl)
+                            if tsq >= tsl[k] && tsq < 1.05*tsl[k]
+                                ffl[k]+=wt; found=true; break
+                            end
                         end
                     end
                     found || (push!(tsl,tsq); push!(ffl,wt))
@@ -825,7 +830,6 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         esi[ie] = E
 
         # Build beta-derived E' seed points (Fortran lines 1985-2031)
-        # Fortran starts at ep=0 (line 1985), then adds beta-derived points
         seeds = Float64[0.0]  # E'=0 is always the first point
         for beta in sab.beta
             ep_down = E - beta * kT_eff
@@ -847,11 +851,31 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         entries = NTuple{10, Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
+        j_count = 0  # total emitted points (like Fortran j)
 
         function emit_point!(ep, sigma, cosines)
-            if xlast > 0
+            j_count += 1
+            if j_count > 1  # Fortran: if (j.gt.1) — accumulate from 2nd point
                 total_xs += (ep - xlast) * (sigma + ylast) * 0.5
             end
+
+            # Fortran j==3 / xsi<tolmin (lines 2095-2096): skip early low-XS region
+            if j_count == 3 && total_xs < tolmin_area
+                j_count = 2
+                xlast = ep; ylast = sigma
+                # Overwrite previous entry (Fortran overwrites scr[j=2] position)
+                if sigma > 1e-32
+                    entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
+                                   k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
+                    if !isempty(entries)
+                        entries[end] = entry
+                    else
+                        push!(entries, entry)
+                    end
+                end
+                return
+            end
+
             xlast = ep; ylast = sigma
             if sigma > 1e-32
                 entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
@@ -860,68 +884,90 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
             end
         end
 
+        # Detect elastic peak seed for iskip (Fortran lines 2022-2024)
+        elastic_idx = findmin(abs.([sd[1] for sd in seed_data] .- E))[2]
+
         # Process seed points with adaptive refinement between them
         for idx in 1:length(seed_data)
             ep_hi, sig_hi, cos_hi = seed_data[idx]
 
             if idx > 1
                 ep_lo, sig_lo, cos_lo = seed_data[idx-1]
-                # Convergence stack between ep_lo and ep_hi
-                stk_e = zeros(imax_stack)
-                stk_s = zeros(imax_stack)
-                stk_c = [zeros(nbin) for _ in 1:imax_stack]
-                stk_e[1] = ep_hi; stk_s[1] = sig_hi; stk_c[1] .= cos_hi
-                stk_e[2] = ep_lo; stk_s[2] = sig_lo; stk_c[2] .= cos_lo
-                depth = 2
 
-                while depth >= 2
-                    # Check area threshold (Fortran line 2050)
-                    area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
-                    if depth >= imax_stack || area < tolmin_area
-                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                        depth -= 1
-                        continue
-                    end
+                # Skip refinement for elastic peak panel (Fortran iskip)
+                is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
+                                   abs(ep_hi - ep_lo) < 0.5 * kT_eff
+                if is_elastic_panel
+                    emit_point!(ep_lo, sig_lo, cos_lo)
+                else
+                    # Convergence stack between ep_lo and ep_hi
+                    stk_e = zeros(imax_stack)
+                    stk_s = zeros(imax_stack)
+                    stk_c = [zeros(nbin) for _ in 1:imax_stack]
+                    stk_e[1] = ep_hi; stk_s[1] = sig_hi; stk_c[1] .= cos_hi
+                    stk_e[2] = ep_lo; stk_s[2] = sig_lo; stk_c[2] .= cos_lo
+                    depth = 2
 
-                    xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
-                    if xm <= stk_e[depth] || xm >= stk_e[depth-1]
-                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                        depth -= 1
-                        continue
-                    end
+                    while depth >= 2
+                        # Check area threshold (Fortran line 2050)
+                        area = 0.5 * (stk_s[depth] + stk_s[depth-1]) * (stk_e[depth-1] - stk_e[depth])
+                        if depth >= imax_stack || area < tolmin_area
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1
+                            continue
+                        end
 
-                    # Evaluate at midpoint
-                    sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol,
-                                                     awr=Float64(sab.awr), tev_peak=kT_eff)
+                        xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
+                        if xm <= stk_e[depth] || xm >= stk_e[depth-1]
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1
+                            continue
+                        end
 
-                    # Convergence test (Fortran lines 2057-2065)
-                    ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])  # linear interp of sigma
-                    test_s = max(tol * abs(sig_m), tolmin_area)
-                    pass = abs(sig_m - ym_s) <= test_s
+                        # Evaluate at midpoint
+                        sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol,
+                                                         awr=Float64(sab.awr), tev_peak=kT_eff)
 
-                    # Also test cosines (Fortran lines 2059-2060)
-                    if pass
-                        for k in 1:nbin
-                            ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
-                            if abs(cos_m[k] - ym_c) > tol
-                                pass = false; break
+                        # Convergence tests (Fortran lines 2057-2068)
+                        # k=1 sigma test: test2 = tol*abs(yt(1)), no floor
+                        ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                        pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
+
+                        # k>1 per-component cosine tests + accumulate for integral test
+                        uu = 0.0; uum = 0.0
+                        if pass
+                            for k in 1:nbin
+                                ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                                uu += cos_m[k]
+                                uum += ym_c
+                                if abs(cos_m[k] - ym_c) > tol
+                                    pass = false; break
+                                end
                             end
                         end
-                    end
 
-                    if pass
-                        emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
-                        depth -= 1
-                    else
-                        # Subdivide: push midpoint
-                        depth += 1
-                        if depth > imax_stack; depth = imax_stack; end
-                        stk_e[depth] = stk_e[depth-1]
-                        stk_s[depth] = stk_s[depth-1]
-                        stk_c[depth] .= stk_c[depth-1]
-                        stk_e[depth-1] = xm
-                        stk_s[depth-1] = sig_m
-                        stk_c[depth-1] .= cos_m
+                        # Integral cosine test (Fortran lines 2067-2068)
+                        if pass
+                            test_uu = 2.0 * tol * abs(uu) + 1e-5  # uumin = 0.00001
+                            if abs(uu - uum) > test_uu
+                                pass = false
+                            end
+                        end
+
+                        if pass
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            depth -= 1
+                        else
+                            # Subdivide: push midpoint
+                            depth += 1
+                            if depth > imax_stack; depth = imax_stack; end
+                            stk_e[depth] = stk_e[depth-1]
+                            stk_s[depth] = stk_s[depth-1]
+                            stk_c[depth] .= stk_c[depth-1]
+                            stk_e[depth-1] = xm
+                            stk_s[depth-1] = sig_m
+                            stk_c[depth-1] .= cos_m
+                        end
                     end
                 end
             end
@@ -999,11 +1045,36 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
 
         # Adaptive refinement with iskip for elastic peak (Fortran lines 2022-2024, 2050-2052)
         entries = NTuple{10, Float64}[]
+        total_xs = 0.0
+        xlast = 0.0; ylast = 0.0
+        j_count = 0
 
-        function push_entry!(ep, sig, cos)
-            entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                           k - 2 <= nbin ? cos[k-2] : 0.0, 10)
-            push!(entries, entry)
+        function emit_point!(ep, sig, cosv)
+            j_count += 1
+            if j_count > 1
+                total_xs += (ep - xlast) * (sig + ylast) * 0.5
+            end
+            # Fortran j==3 / xsi<tolmin (lines 2095-2096)
+            if j_count == 3 && total_xs < tolmin_area
+                j_count = 2
+                xlast = ep; ylast = sig
+                if sig > 1e-32
+                    entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                                   k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
+                    if !isempty(entries)
+                        entries[end] = entry
+                    else
+                        push!(entries, entry)
+                    end
+                end
+                return
+            end
+            xlast = ep; ylast = sig
+            if sig > 1e-32
+                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
+                push!(entries, entry)
+            end
         end
 
         # Detect elastic peak seed (E'≈E): the Fortran skips refinement here
@@ -1015,7 +1086,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                 is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
                                    abs(seeds[idx] - seeds[idx-1]) < 0.5 * kT
                 if is_elastic_panel
-                    push_entry!(seeds[idx-1], seed_sigs[idx-1], seed_coss[idx-1])
+                    emit_point!(seeds[idx-1], seed_sigs[idx-1], seed_coss[idx-1])
                 else
                     # Convergence stack
                     stk_e = zeros(imax_stack); stk_s = zeros(imax_stack)
@@ -1026,19 +1097,41 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                     while depth >= 2
                         area = 0.5 * abs(stk_s[depth] + stk_s[depth-1]) * abs(stk_e[depth-1] - stk_e[depth])
                         if depth >= imax_stack || area < tolmin_area
-                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
                             depth -= 1; continue
                         end
                         xm = round_sigfig(0.5 * (stk_e[depth-1] + stk_e[depth]), 8, 0)
                         if xm <= stk_e[depth] || xm >= stk_e[depth-1]
-                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
                             depth -= 1; continue
                         end
                         sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+
+                        # Convergence tests (Fortran lines 2057-2068)
                         ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
                         pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
+
+                        uu = 0.0; uum = 0.0
                         if pass
-                            push_entry!(stk_e[depth], stk_s[depth], stk_c[depth])
+                            for k in 1:nbin
+                                ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                                uu += cos_m[k]
+                                uum += ym_c
+                                if abs(cos_m[k] - ym_c) > tol
+                                    pass = false; break
+                                end
+                            end
+                        end
+
+                        if pass
+                            test_uu = 2.0 * tol * abs(uu) + 1e-5
+                            if abs(uu - uum) > test_uu
+                                pass = false
+                            end
+                        end
+
+                        if pass
+                            emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
                             depth -= 1
                         else
                             depth += 1
@@ -1050,12 +1143,10 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                     end
                 end
             end
-            # Emit last seed
-            idx == length(seeds) && push_entry!(seeds[idx], seed_sigs[idx], seed_coss[idx])
+            idx == length(seeds) && emit_point!(seeds[idx], seed_sigs[idx], seed_coss[idx])
         end
 
         # Trim trailing zero-sigma entries (Fortran lines 2133, 2206-2207)
-        # Keep up to jnz+1 (one zero entry after last nonzero sigma)
         jnz = 0
         for k in 1:length(entries)
             entries[k][2] != 0.0 && (jnz = k)
