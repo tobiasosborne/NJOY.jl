@@ -187,7 +187,8 @@ function run_t01()
     bragg = NJOY.build_bragg_data(
         a=2.4573e-8, c=6.7e-8, sigma_coh=5.50, A_mass=12.011,
         natom=1, debye_waller=2.1997, emax=emax_thermr, lat=1)
-    mt230_xs = [e > emax_thermr ? 0.0 : NJOY.bragg_edges(e, bragg) for e in oracle_e]
+    # Round to 7 sigfigs: Fortran sigcoh outputs 7-sigfig precision (a11 format)
+    mt230_xs = [e > emax_thermr ? 0.0 : NJOY.round_sigfig(NJOY.bragg_edges(e, bragg), 7, 0) for e in oracle_e]
     extra_mf3[230] = (oracle_e, mt230_xs)
 
     # === MF6 ===
