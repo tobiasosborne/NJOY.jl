@@ -1246,6 +1246,36 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Trap 61 (NEW — FIXED)**: `free_gas_kernel` amin floor was 1e-10, Fortran uses 1e-6 (thermr.f90:2500). Near the elastic peak (E'≈E, mu≈1), alpha→0 and `1/sqrt(amin)` dominates: Julia had 55x larger kernel value at mu=1. This inflated total sigma at E'≈E by 57% (Julia=386, Fortran=246), causing the convergence stack to reject intervals the Fortran accepted, generating 22+ extra adaptive midpoints per incident energy. Fix: `alpha = max(..., 1e-6)` in `free_gas_kernel` (thermr.jl line 143). MF6/MT=221 went from +5290 to +133 lines.
 
+### Phase 24: SAB T_eff fix — MF6/MT=229 reduced from +1227 to +457 lines
+
+**ROOT CAUSE FOUND AND FIXED via gdb**: The SCT (Short Collision Time) fallback in `sab_kernel` used `T_eff = AWR * 0.0253 / bk = 3494 K` for graphite. The Fortran uses a hardcoded lookup table (`gateff`, thermr.f90:615-697) that gives **T_eff = 713.39 K** at 296 K — nearly 5× smaller.
+
+**How it was found**:
+1. Compared per-IE entry counts: Julia had +45 to +97 excess at IEs 85-94 (E > 0.5 eV)
+2. Traced E' acceptance at IE=90: Fortran sigma=7.36e-8 at E'=0.064, Julia sigma=2.28e-2 (300,000× larger!)
+3. Added SIGL90 diagnostic in Fortran `sigl` → confirmed Fortran returns sum=0, y(1)=0
+4. Added SIGSCT diagnostic in Fortran `sig` SCT path → found `tfff=6.1475e-2 eV` (713 K)
+5. Julia was using `Te=0.301 eV` (3494 K) → arg=3.28 vs Fortran arg=15.98 → exp(-3.28)=0.038 vs exp(-15.98)=1.1e-7
+
+**The fix**: Added `_GATEFF_TABLE` constant (67 entries from Fortran thermr.f90:615-682) and `_gateff_lookup(mat, T)` function. The `read_mf7_mt4` now calls `_gateff_lookup` instead of the wrong `AWR*0.0253/bk` formula. The t322 ENDF file has NO T_eff TAB1 record after the S(α,β) data — the SEND record follows directly.
+
+**Impact**: MF6/MT=229 went from 20733 lines (excess +1227) to 19963 lines (excess +457). Per-IE: IEs 85-86 now EXACT (0 diff), IE=90 from +55 to +4.
+
+**What was tried but reverted**:
+1. **sigmin=1e-10 in sab_kernel**: The Fortran `sig` function zeros kernel values < 1e-10 (line 2570). Adding this to Julia's `sab_kernel` caused total excess to go from +275 to -539 (too aggressive — zeroed values that should be nonzero via SAB interpolation). The issue is that Julia's `_interp_sab` returns sabflg (triggering SCT) in some cases where Fortran's SAB interpolation succeeds, and the SCT values are below 1e-10.
+2. **cliq analytical extrapolation**: Fortran sig (lines 2541-2546) uses `s = sab(1,1) + log(alpha(1)/a)/2 - cliq*b^2/a` for alpha below the grid with small beta. Adding this made things MUCH worse (+1914 total excess) because it gives much larger kernel values at the elastic peak (near-forward scattering), causing excessive convergence stack refinement.
+
+**Remaining +457 excess breakdown** (275 total entry excess across 94 IEs):
+- IEs 1-26: -3 per IE (Julia has FEWER entries). Root cause: Julia doesn't emit E'=0 point (sigma=0 is filtered), and missing cliq extrapolation makes the kernel different at small alpha values.
+- IEs 27-83: +4-5 per IE (Julia has MORE entries). Root cause: different convergence decisions — likely from SAB interpolation differences at the elastic peak where alpha is very small (a < alpha[1] = 0.252).
+- IEs 84-94: variable (-13 to +32). Root cause: borderline convergence decisions at high energies where some alpha values exceed the SAB table boundary.
+
+**Trap 62 (NEW — FIXED)**: SAB T_eff for SCT fallback uses Fortran `gateff` hardcoded lookup table (thermr.f90:615-697), NOT `AWR*0.0253/bk`. For graphite MAT=1065 at 296K: T_eff=713.39K. The ENDF file t322 has NO T_eff TAB1 record after the S(α,β) data. Implemented as `_GATEFF_TABLE` constant + `_gateff_lookup(mat, T)` in thermr.jl.
+
+**Trap 63 (NEW — NOT YET FIXED)**: Fortran `sig` (line 2570) zeros individual kernel values < `sigmin=1e-10`. Julia's `sab_kernel` has no such threshold. Cannot simply add it because Julia's `_interp_sab` returns sabflg (triggering SCT → small values → zeroed) where Fortran's SAB interpolation succeeds (→ larger values → not zeroed). Must first fix the SAB interpolation differences (cliq extrapolation, corner check logic).
+
+**Trap 64 (NEW — NOT YET FIXED)**: Fortran `sig` (lines 2541-2546) uses `cliq` analytical extrapolation for alpha below the SAB grid: `s = sab(1,1) + log(alpha(1)/a)/2 - cliq*b^2/a` when cliq≠0, a < alpha(1), lasym≠1, and |beta| ≤ 0.2. `cliq = (sab(1,1)-sab(1,2))*alpha(1)/beta(2)^2`. Julia's `_interp_sab` falls through to `_terpq` log-linear extrapolation which gives DIFFERENT values. At near-forward scattering (mu close to +1), alpha can be very small even at moderate energies (e.g., E=0.35, E'=0.34, mu=0.999 → alpha=0.003 << alpha[1]=0.252). The cliq formula gives larger kernel values at these points, affecting ~85% of IEs.
+
 ---
 
 ## Immediate Next Steps — PRIORITY ORDER
@@ -1281,7 +1311,7 @@ Total data: 1528 / 2386 (64.0%)
 ### What blocks T01 from passing (in priority order)
 
 **STRUCTURAL BLOCKERS** (the official test compares line counts — any mismatch fails):
-1. **MF6/MT=229 (SAB angular)**: Julia=20733, oracle=19506 (+1227 lines, +6.3%).
+1. **MF6/MT=229 (SAB angular)**: Julia=19963, oracle=19506 (+457 lines, +2.3%). Was +1227, reduced by T_eff fix (Phase 24).
 2. **MF6/MT=221 (free gas angular)**: Julia=9774, oracle=9641 (+133 lines, +1.4%).
 3. **MF1/MT=451 (directory)**: Julia=43, oracle=47 (-4 lines). Auto-fixes when MF6 counts match.
 
@@ -1303,10 +1333,10 @@ Total data: 1528 / 2386 (64.0%)
 
 **How to close the +133 gap**: The remaining difference comes from the fact that Julia pre-computes all seeds, sorts them, and processes between consecutive sorted seeds — while the Fortran processes seeds one-at-a-time in beta order. When we rewrote `calcem_free_gas` to match Fortran's sequential beta processing (E'=0 first, sigfig(E,8,±1) nudging, narrow iskip), the count was still +133. The seed sequences and intervals ARE identical between the two approaches. The +133 is from ~1-2 borderline convergence decisions per IE × 94 IEs — likely irreducible at the FP level. **This may already pass acceptance criteria** (1.4% structural difference).
 
-### 2. STRUCTURAL: Fix MF6/MT=229 (SAB, +1227 lines)
+### 2. STRUCTURAL: Fix MF6/MT=229 (SAB, +457 lines — was +1227 before Phase 24)
 
-**Status**: 94 incident energies in both. Per-IE comparison:
-- IEs 1-26: Julia has 3-4 FEWER entries per IE
+**Status after Phase 24**: 94 incident energies in both. Per-IE comparison:
+- IEs 1-26: Julia has ~3 FEWER entries per IE (missing cliq extrapolation + E'=0)
 - IEs 27-94: Julia has 7-97 MORE entries per IE, growing at high energies
 - IEs 85-94 have the worst excess: +31 to +97 per IE
 
