@@ -824,8 +824,9 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         E = egrid[ie]
         esi[ie] = E
 
-        # Build beta-derived E' seed points (Fortran lines 2003-2031)
-        seeds = Float64[]
+        # Build beta-derived E' seed points (Fortran lines 1985-2031)
+        # Fortran starts at ep=0 (line 1985), then adds beta-derived points
+        seeds = Float64[0.0]  # E'=0 is always the first point
         for beta in sab.beta
             ep_down = E - beta * kT_eff
             ep_down > 0 && push!(seeds, round_sigfig(ep_down, 8, 0))
@@ -833,7 +834,6 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
             push!(seeds, round_sigfig(ep_up, 8, 0))
         end
         sort!(unique!(seeds))
-        filter!(ep -> ep > 0, seeds)
 
         # Evaluate sigl at each seed point
         seed_data = Vector{Tuple{Float64, Float64, Vector{Float64}}}()

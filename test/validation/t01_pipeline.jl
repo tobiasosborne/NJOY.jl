@@ -164,20 +164,52 @@ function run_t01()
     end
 
     # MT=229: Use calcem's total XS (sigl integration), interpolated to oracle grid
-    # For iinc=2 (bound atoms), Fortran calcem line 2459: xs=terp(esi,xsi,nne,enow,nlt)
+    # Fortran uses terp(esi,xsi,nne,enow,nlt=2) = ORDER-2 Lagrangian (QUADRATIC)
     println("Computing calcem for SAB...")
     esi_sab, xsi_sab, mf6_229 = NJOY.calcem(sab, 296.0, emax_thermr, 8; tol=0.05)
+    # Order-5 Lagrangian interpolation matching Fortran terp(esi,xsi,nne,enow,nlt=5)
+    function terp_lagrange(xs, ys, arg, il=5)
+        n = length(xs)
+        n == 0 && return 0.0
+        il = min(il, n)
+        il2 = il ÷ 2
+        iadd = il % 2
+        ilow = il2 + 1; ihi = n - il2 - iadd
+        # Check boundaries
+        abs(arg - xs[ilow]) < 1e-10 * abs(arg) && return ys[ilow]
+        if arg <= xs[ilow]; l = 1
+        elseif abs(xs[ihi] - arg) < 1e-10 * abs(arg); return ys[ihi]
+        elseif arg >= xs[ihi]; l = n - il + 1
+        else
+            # Search for bracketing index
+            m = ilow + 1
+            for k in (ilow+1):ihi
+                abs(xs[k] - arg) < 1e-10 * abs(arg) && return ys[k]
+                if xs[k] > arg; m = k; break; end
+            end
+            l = m - il2 + iadd
+        end
+        l = max(1, min(l, n - il + 1))
+        # Lagrangian interpolation
+        s = 0.0
+        for i in 1:il
+            p = 1.0; pk = 1.0
+            idx_n = l + i - 1
+            for ip in 1:il
+                ip == i && continue
+                idx_p = l + ip - 1
+                p *= (arg - xs[idx_p])
+                pk *= (xs[idx_n] - xs[idx_p])
+            end
+            s += p * ys[idx_n] / pk
+        end
+        return s
+    end
     mt229_xs = Float64[]
     for e in oracle_e
         if e > emax_thermr; push!(mt229_xs, 0.0)
         else
-            idx = searchsortedfirst(esi_sab, e)
-            if idx <= 1; push!(mt229_xs, xsi_sab[1])
-            elseif idx > length(esi_sab); push!(mt229_xs, 0.0)
-            else
-                f = (e - esi_sab[idx-1]) / (esi_sab[idx] - esi_sab[idx-1])
-                push!(mt229_xs, xsi_sab[idx-1] + f * (xsi_sab[idx] - xsi_sab[idx-1]))
-            end
+            push!(mt229_xs, terp_lagrange(esi_sab, xsi_sab, e, 5))
         end
     end
     extra_mf3[229] = (oracle_e, mt229_xs)
