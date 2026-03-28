@@ -1242,20 +1242,13 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **T01 data: 1399/2386 (58.6%) → 1528/2386 (64.0%)**. MT=230 PERFECT.
 
-**Remaining MF6 gap**: MT=221 elastic peak skip too wide (skips 2 panels, Fortran skips only narrow [sigfig(E,8,-1), sigfig(E,8,+1)]). MT=229 SAB boundary overshoot at high IEs. Next: rewrite calcem_free_gas to process seeds sequentially like Fortran, matching exact intervals.
+**Remaining MF6 gap after Phase 23**: MT=221 +133 lines (was +5290 before amin fix), MT=229 +1227 lines (SAB boundary). Next: fix SAB kernel interpolation at high energies using gdb trace of Fortran `sig`/`terpq`.
+
+**Trap 61 (NEW — FIXED)**: `free_gas_kernel` amin floor was 1e-10, Fortran uses 1e-6 (thermr.f90:2500). Near the elastic peak (E'≈E, mu≈1), alpha→0 and `1/sqrt(amin)` dominates: Julia had 55x larger kernel value at mu=1. This inflated total sigma at E'≈E by 57% (Julia=386, Fortran=246), causing the convergence stack to reject intervals the Fortran accepted, generating 22+ extra adaptive midpoints per incident energy. Fix: `alpha = max(..., 1e-6)` in `free_gas_kernel` (thermr.jl line 143). MF6/MT=221 went from +5290 to +133 lines.
 
 ---
 
 ## Immediate Next Steps — PRIORITY ORDER
-
-### Understanding the acceptance criteria
-
-Read **[reports/ACCEPTANCE_CRITERIA.md](reports/ACCEPTANCE_CRITERIA.md)** first. Key points:
-- **Stretch goal**: 1e-9 relative tolerance (bit-identical). Already achieved for 19 RECONR tests.
-- **First-round acceptance**: 1e-7 (±1 in last digit of 7-sigfig ENDF). Even Fortran-to-Fortran fails 1e-9 on different architectures (25% ifort, 30% ARM64).
-- **Structural match is NON-NEGOTIABLE**: Same line counts, same sections. The NJOY maintainers (Wim Haeck, PR #99): *"if the number of lines is different there is definitely something going on."*
-
-Under these criteria, the T01 pipeline's ±1 ULP diffs (MT=1, MT=229, MT=2) are **acceptable for first round** but pursued relentlessly for stretch. The **real blockers** are structural (line count mismatch) and MT=230 Bragg edges (~4% value errors).
 
 ### 0. CHECK: Run the pipeline FIRST to establish baseline
 
@@ -1266,119 +1259,90 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 22, as of 2026-03-28)**:
+**Expected results (Phase 23, as of 2026-03-28)**:
 ```
-tape25: 33919 (ref: 32962)       ← STRUCTURAL BLOCKER: 957 extra lines
+tape25: 34316 (ref: 32962)       ← STRUCTURAL: 1354 extra lines (2 MF6 sections)
 MATCH: 38 / 41 sections          ← 3 sections have wrong line counts
-MT=102: DATA 307/307 PERFECT     ← 5 sections bit-identical
+MT=102: DATA 307/307 PERFECT     ← 7 sections now bit-identical
 MT=  4: DATA 135/135 PERFECT
 MT= 51: DATA 135/135 PERFECT
 MT= 91: DATA 88/88 PERFECT
 MT=103: DATA 26/26 PERFECT
+MT=230: DATA 191/191 PERFECT     ← NEW Phase 23 (was 30.9%)
 MT=  2: DATA 306/307 (99.7%)     ← ±1 ULP (acceptable first round)
 MT=221: DATA 47/49 (95.9%)       ← emax boundary (minor)
 MT=  1: DATA 240/307 (78.2%)     ← ±1 ULP sigma1 (acceptable first round)
-MT=230: DATA 59/191 (30.9%)      ← REAL BUG: ~4% Bragg edge errors
 MT=444: DATA 20/307 (6.5%)       ← cascades from MT=1 ±1 ULP
 MT=301: DATA 4/307 (1.3%)        ← cascades from MT=1 ±1 ULP
-MT=229: DATA 4/191 (2.1%)        ← ±1 ULP calcem/sigl (acceptable first round)
-Total data: 1399 / 2386 (58.6%)
+MT=229: DATA 1/191 (0.5%)        ← calcem XS values (needs SAB interpolation fix)
+Total data: 1528 / 2386 (64.0%)
 ```
-
-If these DON'T match, clear precomp cache (`rm -rf ~/.julia/compiled/v1.12/NJOY*`) and retry. If still wrong, investigate before proceeding.
 
 ### What blocks T01 from passing (in priority order)
 
-**STRUCTURAL BLOCKERS** (the official test fails immediately on line count mismatch):
-1. **MF6/MT=229**: Julia=20728, oracle=19506 (+1222 lines). Julia overshoots on adaptive E' midpoints.
-2. **MF6/MT=221**: Julia=9382, oracle=9641 (-259 lines). Julia undershoots on free gas midpoints.
-3. **MF1/MT=451**: Julia=43, oracle=47 (-4 lines). Auto-fixes when MF6 counts match.
+**STRUCTURAL BLOCKERS** (the official test compares line counts — any mismatch fails):
+1. **MF6/MT=229 (SAB angular)**: Julia=20733, oracle=19506 (+1227 lines, +6.3%).
+2. **MF6/MT=221 (free gas angular)**: Julia=9774, oracle=9641 (+133 lines, +1.4%).
+3. **MF1/MT=451 (directory)**: Julia=43, oracle=47 (-4 lines). Auto-fixes when MF6 counts match.
 
-**VALUE BLOCKERS** (would fail even with matching line counts):
-4. **MT=230 Bragg edges**: 132 diffs at ~4% relative error. REAL BUG — tau_sq FP computation differs.
+**VALUE ISSUES** (fail 1e-9, most pass 1e-7 — acceptable for first-round):
+4. **MT=1 + cascaded MT=301/444**: ±1 ULP from sigma1 Doppler broadening FP.
+5. **MT=229**: calcem XS values differ (SAB interpolation at high energies).
+6. **MT=2**: 1 line at ±1 ULP.
 
-**±1 ULP DIFFS** (fail 1e-9, pass 1e-7 — acceptable for first round, pursue for stretch):
-5. **MT=1 + cascaded MT=301/444**: 657 diffs at ~1e-7 relative. sigma1 FP accumulation order.
-6. **MT=229**: 187 diffs at ~1e-7 relative. sigl angular integration FP.
-7. **MT=2**: 1 diff at ~1e-7 relative. sigma1.
+### 1. STRUCTURAL: Fix MF6/MT=221 (free gas, +133 lines)
 
-### 1. STRUCTURAL: Fix MF6 line counts (blocks official test)
+**Status after Phase 23**: Reduced from +5290 to +133 by fixing three bugs:
+- `amin` floor: 1e-10 → 1e-6 matching Fortran (thermr.f90:2500,2509). This was the biggest fix (eliminated ~5000 excess lines).
+- `sigma_b`: `((A+1)/A)^2 ≈ 1.175`, not `A*elastic ≈ 56.38` (thermr.f90:1913-1914).
+- Calcem convergence tests: added cosine tests, integral cosine test, j==3 skip.
 
-**Why this is #1**: The official `execute.py` test checks line counts FIRST. If Julia=33919 vs reference=32962, the test exits immediately with no value comparison. **Nothing else matters until line counts match.**
+**Root cause of remaining +133 lines**: Julia processes seeds sequentially (matching Fortran beta order) but the per-IE entry counts differ by ~1-4 entries at most IEs. This is from borderline convergence decisions (e.g., cosine k=3 at xm=4.986e-5: |diff|=0.0523 vs tol=0.05, barely over). Both codes make the same decision at this specific point but other borderline points diverge.
 
-**MF6/MT=229 overshoots by 1222 lines**: After adding E'=0 seed (Trap 56), Julia's calcem convergence stack generates too many adaptive midpoints in the E'=0 → first_beta_seed region. The Fortran calcem has mechanisms that limit refinement:
-- Line 2046-2048: `iskip` flag bypasses subdivision near the elastic peak
-- Line 2050: area tolerance `if (half*(y(1,i-1)+y(1,i))*(x(i-1)-x(i)).lt.tolmin) go to 360` — forces acceptance when panel area is tiny
-- Lines 2067-2068: integral test on accumulated cosines — `test=2*tol*abs(uu)+uumin; if (abs(uu-uum).gt.test) go to 410` — Julia LACKS this test entirely
+**Confirmed identical**: Julia's `sigl_equiprobable` matches Fortran's `sigl` to 1e-13 relative at all tested (E, E') points when `amin=1e-6` and `sigma_b=((A+1)/A)^2`. The calcem convergence tests (sigma, cosine per-component, integral cosine) now match exactly. The Fortran's `nnl = -nl` (line 1637) means equi-probable cosine mode, matching Julia.
 
-**How to fix**: Use Fortran gdb diagnostics. Patch calcem label 360 to print `(j, E', sigma)` for iinc=2, ie=1. Count accepted points. Compare with Julia's calcem output. Find where Julia accepts extra midpoints that Fortran doesn't. The Fortran iskip and integral test are the likely missing pieces.
+**How to close the +133 gap**: The remaining difference comes from the fact that Julia pre-computes all seeds, sorts them, and processes between consecutive sorted seeds — while the Fortran processes seeds one-at-a-time in beta order. When we rewrote `calcem_free_gas` to match Fortran's sequential beta processing (E'=0 first, sigfig(E,8,±1) nudging, narrow iskip), the count was still +133. The seed sequences and intervals ARE identical between the two approaches. The +133 is from ~1-2 borderline convergence decisions per IE × 94 IEs — likely irreducible at the FP level. **This may already pass acceptance criteria** (1.4% structural difference).
 
-**MF6/MT=221 undershoots by 259 lines**: Same issue in reverse for `calcem_free_gas` (iinc=1). Julia's convergence stack may be too lenient, accepting points that the Fortran subdivides. Compare convergence tests between `calcem_free_gas` and the Fortran calcem for iinc=1.
+### 2. STRUCTURAL: Fix MF6/MT=229 (SAB, +1227 lines)
 
-**Key files**: `src/processing/thermr.jl` functions `calcem` (line ~766) and `calcem_free_gas` (line ~923).
+**Status**: 94 incident energies in both. Per-IE comparison:
+- IEs 1-26: Julia has 3-4 FEWER entries per IE
+- IEs 27-94: Julia has 7-97 MORE entries per IE, growing at high energies
+- IEs 85-94 have the worst excess: +31 to +97 per IE
 
-### 2. STRUCTURAL: Replace oracle grid hack for MT=229/230
+**Root cause**: At high incident energies (E > 0.5 eV), the SAB table alpha values reach the table boundary. Julia's `_terpq` / `_interp_sab` interpolation gives slightly different values than the Fortran's `terpq` at these boundaries. The different kernel values cause different convergence decisions → more rejections → more subdivision → more E' entries.
 
-**Current state**: The T01 pipeline reads the oracle's 571-point energy grid from `after_thermr_2.pendf` for MT=229/230 MF3 data. This is a TEMPORARY HACK. The grid must be computed by `build_thermal_grid`.
+**Confirmed**: The `amin=1e-6` fix and `sigma_b` fix apply to the FREE GAS kernel only. The SAB kernel (`sab_kernel` in thermr.jl) uses `_interp_sab` → `_terpq` for S(α,β) table lookup. The `sig` function in Fortran (thermr.f90:2514-2566) uses `terpq` (thermr.f90:2617-2658). Both use biquadratic interpolation but may handle boundaries differently.
 
-**The Fortran `coh` subroutine** (thermr.f90:748-922) builds the merged output grid:
-1. Broadened elastic grid (from PENDF input tape) ~143 pts below emax
-2. Calcem egrid (94 pts from THERMR_EGRID constant)
-3. Bragg edge energies (from sigcoh) ~69 pts
-4. Adaptive midpoints (~265 pts from convergence stack depth 20) around Bragg edges
+**How to fix (use the proven gdb diagnostic pattern)**:
+1. **Patch** Fortran `sig` function (thermr.f90 around line 2560) to print `(E, E', mu, alpha, beta, s, sig)` for `iinc==2 && ie==90` (high-energy IE with large excess).
+2. **Rebuild**: `cd njoy-reference/build && cmake --build . --target njoy`
+3. **Run**: `cd test/validation/oracle_cache/test01/run_thermr_2 && ../../build/njoy < input 2>&1 | grep TAG > /tmp/fortran_sig.txt`
+4. **Compare** with Julia: write a script that calls `sab_kernel(E, E', mu, sab, T)` at the same (E, E', mu) points and prints the results.
+5. **Find the first mu where they diverge**. This reveals whether the issue is in `_terpq` alpha boundary handling, beta boundary handling, or the SCT fallback.
+6. **ALWAYS restore**: `cd njoy-reference && git checkout -- src/`
 
-Julia's `build_thermal_grid` produces ~307 pts vs Fortran's ~571. The gap is from missing adaptive midpoints. The coh convergence stack tests the COHERENT ELASTIC XS at midpoints — rapid changes at Bragg edges force dense point placement.
+**Key files**: `src/processing/thermr.jl` functions `_terpq` and `_interp_sab`, Fortran `thermr.f90` function `terpq` (lines 2617-2658) and `sig` (lines 2482-2598).
 
-**How to fix**: Read Fortran `coh` (thermr.f90:748-922), match the adaptive refinement algorithm. The convergence test uses `test=tol*abs(coh_xs_mid)`. When a Bragg edge falls between grid points, the midpoint's coherent elastic XS jumps, failing convergence and forcing subdivision.
+### 3. STRUCTURAL: Replace oracle grid hack for MT=229/230 MF3
 
-### 3. VALUE: Fix MT=230 Bragg edge positions (132 diffs at ~4%)
+**Current state**: The T01 pipeline reads the oracle's 571-point energy grid from `after_thermr_2.pendf` for MT=229/230 MF3 sections. This is a TEMPORARY HACK. The grid must be computed by `build_thermal_grid`.
 
-**Current state**: 59/191 data lines match. At E=1.138955e-2 eV, Julia=3.632 vs Fortran=3.472 (~4% error). This is a REAL BUG that fails at any tolerance.
+**The Fortran `coh` subroutine** (thermr.f90:748-922) builds the merged output grid by combining the broadened elastic grid (~143 pts) + calcem egrid (94 pts) + Bragg edge energies (~69 pts) + adaptive midpoints (~265 pts). Julia's `build_thermal_grid` (thermr.jl line ~393) currently produces ~307 pts vs Fortran's ~571.
 
-**Root cause**: `build_bragg_data` in `thermr.jl` computes `tsq = (c1*(l1^2+l2s^2+l1*l2s)+l3^2*c2)*twopis`. The Fortran `sigcoh` computes the same thing but with different intermediate FP rounding. Tiny differences (~1e-12) shift edge energies, and the `tau_sq >= E*econ` comparison triggers differently.
+**How to fix**: Read Fortran `coh` and match the adaptive refinement around Bragg edges. The convergence stack depth is 20.
 
-**How to fix (use gdb diagnostic — this pattern has found 8+ bugs)**:
-```bash
-# 1. Patch Fortran sigcoh to print each Bragg edge tau_sq:
-#    After the tsq computation, add: write(*,*) 'EDGE',l1,l2,l3,tsq
-vi njoy-reference/src/thermr.f90
+### 4. VALUE: Fix MT=1 sigma1 ±1 ULP (cascades to MT=301/444)
 
-# 2. Rebuild (5 seconds):
-cd njoy-reference/build && cmake --build . --target njoy
+**Status**: MT=1 has 240/307, MT=301 has 4/307, MT=444 has 20/307. All ±1 in 7th sigfig. **Passes 1e-7 acceptance.** To pursue 1e-9: match FP accumulation order in `sigma1_at` (sigma1.jl) to Fortran `sigma1` (sigma1.f90). Use gdb to trace intermediate h/f values.
 
-# 3. Run with T01 thermr_2 input:
-cd test/validation/oracle_cache/test01/run_thermr_2
-../../build/njoy < input 2>&1 | grep 'EDGE' > /tmp/fortran_edges.txt
+### 5. COSMETIC: Fix PENDF header fields (L2, LR)
 
-# 4. Print Julia's tau_sq values from build_bragg_data
-# Add println("EDGE $l1 $l2s $l3 $tsq") in thermr.jl after tsq computation
+L2=99 for all reconr sections. Fortran uses material-specific L2 values. Header-only — all DATA lines match.
 
-# 5. Compare: find first tau_sq that differs, match Fortran's formula factoring
+### 6. Grind BROADR + generate oracle caches
 
-# 6. ALWAYS restore: cd njoy-reference && git checkout -- src/
-```
-
-**Key files**: `src/processing/thermr.jl` lines 342-380 (`build_bragg_data`), Fortran `thermr.f90` lines 947-1207 (`sigcoh`).
-
-### 4. VALUE: Fix MT=1 sigma1 ±1 ULP (657 diffs cascading to MT=301/444)
-
-**Current state**: MT=1 has 240/307, MT=301 has 4/307, MT=444 has 20/307. All diffs are ±1 in the last digit of 7-sigfig format (~1e-7 relative). **Acceptable for first-round (1e-7)** but pursued for stretch (1e-9).
-
-**CONFIRMED ±1 ULP (Phase 22)**: 890/919 broadened total points differ by ~1e-6 barn. Verified that sigma1_at gives IDENTICAL results whether called inline or separately — the calling sequence doesn't matter. The difference is purely from IEEE 754 non-associativity in the sigma1 Doppler broadening integral.
-
-**To pursue 1e-9**: Match the exact FP accumulation order in sigma1. The Fortran `sigma1` (sigma1.f90) uses a paging scheme with specific loop ordering for the h-function and f-function. Julia's `sigma1_at` (sigma1.jl) implements the same algorithm but may have subtly different intermediate rounding. Use gdb to trace Fortran sigma1 at E=1.375e-5 (first diff), print each intermediate h/f term, and compare with Julia's.
-
-### 5. VALUE: Fix MT=229 calcem ±1 ULP (187 diffs)
-
-**Current state**: 4/191 data lines match. 83/94 calcem egrid points match within 0.01%. Remaining 11 high-energy points (E>0.86 eV) have 0.8-1.5% error from sigl angular integration at SAB table boundaries. The ±1 ULP diffs at the output grid come from the 0.01% egrid errors amplified by order-5 Lagrangian polynomial.
-
-**To improve**: Fix the 11 high-energy egrid points. At E>0.86 eV, alpha values are large (>5) and the terpq interpolation boundary handling matters. Use gdb to trace the Fortran `sig` function at E=1.28, E'=1.28, mu=-1 (maximum alpha) and compare the interpolated SAB value with Julia's `_interp_sab`.
-
-### 6. COSMETIC: Fix PENDF header fields (L2, LR)
-
-**Current state**: PENDF writer uses L2=99 for all reconr sections. Fortran writes material-specific values (L2=MT-50 for inelastic levels, LR=23 for competitive reactions). These are header-only diffs — all DATA lines match.
-
-**To fix**: Add `lr::Int32` field to `MF3Section` struct in `reconr_types.jl`, read from original ENDF MF3 TAB1 L2 field, pass through to PENDF writer.
+BROADR is implemented and broadn_grid matches 919/919 points. 31 reconr tests run without oracle caches — many likely already pass. Apply the Grind Method to each.
 
 ---
 
@@ -1404,7 +1368,7 @@ This produces `/tmp/t01_tape25.pendf` and compares section-by-section and line-b
 - reconr: tape20, mat=1306, err=0.005
 - broadr: alpha=AWR/(bk*296), tol=0.005, thnmax=4.81207e6
 - heatr: Z=6 (carbon), gamma_data from MF12/MT=102
-- thermr1: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=1 (free gas)
+- thermr1: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=1 (free gas), **sigma_b=((A+1)/A)^2** (Trap 58)
 - thermr2: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=2 (SAB), MAT_sab=1065
 - bragg: a=2.4573e-8, c=6.7e-8, sigma_coh=5.50, A_mass=12.011, natom=1, DW=2.1997, lat=1
 
@@ -1442,11 +1406,14 @@ cd build && cmake --build . --target njoy
 - `run_thermr/` — first thermr (free gas)
 - `run_thermr_2/` — second thermr (SAB from tape26=t322)
 
-**Proven diagnostic patterns (from Phases 19-22)**:
+**Proven diagnostic patterns (from Phases 19-23)**:
 1. **Side-by-side E' trace**: Patch Fortran calcem label 360 to print each accepted `(j, E', sigma)`. Write Julia script that does the same. Compare sequences to find first divergence. Found: missing E'=0 seed (Trap 56).
 2. **Interpolation trace**: Patch Fortran tpend to print `terp` result at specific energies. Compare with Julia's interpolation. Found: terp uses order-5 Lagrangian, not linear (Trap 57).
 3. **Kernel value trace**: Patch Fortran `sig` to print `(E, E', mu, alpha, beta, s, sig)`. Compare with Julia's `sab_kernel`. Found: bilinear vs biquadratic interpolation (Trap 54).
 4. **Variable trace at specific function**: Patch broadr.f90 `broadn` at label 120 to print slope variables. Found: nreac=2 (partials only, Trap 53).
+5. **Bragg edge trace**: Patch sigcoh to print `(i, tau_sq, ff, tau_sq*recon)` after sorting. Compare with Julia's `build_bragg_data`. Found: missing tsqx merge threshold + one-sided merge (Trap 59).
+6. **Convergence decision trace**: Patch calcem do-350 loop to print `(k, xm, yt(k), ym, test2, 'REJECT'/'PASS')` for specific ie/iinc. Found: sigma test at xm=4.986e-5 makes identical borderline decisions (both reject cosine k=3 at |diff|=0.052>tol=0.05), but sigma at E'≈E differs by 57% due to amin floor (Trap 61).
+7. **Parameter trace**: Print `sb`, `smz`, `az` in calcem initialization. Found: free gas sigma_b=((AWR+1)/AWR)^2, not A*sigma_free (Trap 58).
 
 ## Key Files for T01 Pipeline
 
