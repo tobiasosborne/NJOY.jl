@@ -1099,25 +1099,22 @@ function merge_background_legacy(energies::Vector{Float64},
 
     n = length(energies)
     result = Vector{CrossSections{Float64}}(undef, n)
+    # Pre-allocate per-section sigfig'd contributions for tape-order total
+    ns = length(mf3_sections)
+    sec_sn = Vector{Float64}(undef, ns)
     for i in 1:n
         e = energies[i]
         elastic = res_xs[i].elastic
         fission = res_xs[i].fission
         capture = res_xs[i].capture
-        other_bg = 0.0
-        for sec in mf3_sections
+        fill!(sec_sn, 0.0)
+        for (si, sec) in enumerate(mf3_sections)
             mt = Int(sec.mt)
             _skip(mt) && continue
-
-            # Below/at threshold → skip (Fortran emerge lines 4792-4795:
-            # if (thresh-eg > test*thresh) go to 370; if |thresh-eg|<test → sn=0)
             thrx = get(thresholds, mt, 0.0)
             if thrx > 1.0 && (thrx - e) > 1.0e-10 * thrx
-                continue  # below threshold
+                continue
             end
-
-            # Near threshold, modify first breakpoint to (thrx, 0) and interpolate
-            # using the MF3 interpolation law (Fortran emerge:1936 + gety1)
             tab = sec.tab
             bg = if thrx > 1.0 && e >= thrx && length(tab.x) >= 2 &&
                     e < tab.x[2] && tab.x[1] < thrx
@@ -1126,17 +1123,10 @@ function merge_background_legacy(energies::Vector{Float64},
                 interpolate(tab, e)
             end
             bg == 0.0 && continue
-            # Fortran emerge line 4800: suppress MF3 background for primary
-            # channels (itype=1-4) in the URR range when LSSF=0, because the
-            # URR table already includes the MF3 background.
             is_primary = (mt == 2 || mt == 18 || mt == 19 || mt == 102)
             if is_primary && urr_lssf == 0 && e >= eresr && e < eresh
                 continue
             end
-            # Fortran emerge: sn = gety1(bg) + resonance, then sigfig(sn,7,0).
-            # Primary channels add UNROUNDED bg to resonance (the combined
-            # value is rounded to 7 sigfigs only at output and for the total).
-            # Non-primary channels round bg before accumulating into other_bg.
             if mt == 2
                 elastic += bg
             elseif mt == 18 || mt == 19
@@ -1144,25 +1134,34 @@ function merge_background_legacy(energies::Vector{Float64},
             elseif mt == 102
                 capture += bg
             elseif haskey(res_xs[i].reactions, mt)
-                # RML reaction channel: add MF3 bg + resonance XS together,
-                # then round (matching Fortran emerge: sn = bg + res(1+itype),
-                # followed by sigfig(sn,7,0))
-                other_bg += round_sigfig(bg + res_xs[i].reactions[mt], 7)
+                sec_sn[si] = round_sigfig(bg + res_xs[i].reactions[mt], 7)
             else
-                other_bg += round_sigfig(bg, 7)
+                sec_sn[si] = round_sigfig(bg, 7)
             end
         end
         if elastic <= 1.0e-8
             elastic = 1.0e-8
         end
-        # Fortran emerge (line 4832): sn = sigfig(sn, 7, 0) applied to each
-        # section's combined (bg + resonance) value before output AND before
-        # accumulating into the total. Round primary channels to match.
         elastic = round_sigfig(elastic, 7)
         fission = round_sigfig(fission, 7)
         capture = round_sigfig(capture, 7)
-        # Recout (line 5308) applies a final sigfig(total, 7, 0).
-        total = round_sigfig(other_bg + elastic + fission + capture, 7)
+        # Fortran emerge accumulates total in tape order (line 4893: tot(2)+=sn).
+        # Each section adds its sigfig'd value to the running total.
+        total = 0.0
+        for (si, sec) in enumerate(mf3_sections)
+            mt = Int(sec.mt)
+            _skip(mt) && continue
+            if mt == 2
+                total += elastic
+            elseif mt == 18 || mt == 19
+                total += fission
+            elseif mt == 102
+                total += capture
+            else
+                total += sec_sn[si]
+            end
+        end
+        total = round_sigfig(total, 7)
         result[i] = CrossSections(total, elastic, fission, capture)
     end
     return result
