@@ -681,7 +681,8 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
             if i == imax
                 @goto accept
             end
-            xm = 0.5*(xs[i-1] + xs[i])  # Fortran sigl line 2722: NO sigfig
+            xm = 0.5*(xs[i-1] + xs[i])
+            xm = round_sigfig(xm, 8, 0)  # Fortran sigl line 2739: sigfig(xm,8,0)
             ym_linear = 0.5*(ys[i-1] + ys[i])
             yt = sig_mu(xm)
             test = half_tol * abs(yt) + half_tol * ymax / 50
@@ -726,7 +727,8 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
     while j < nbin
         # Adaptive refinement (same convergence as phase 1)
         if i > 1 && i < imax
-            xm = 0.5*(xs[i-1] + xs[i])  # Fortran sigl line 2782: NO sigfig
+            xm = 0.5*(xs[i-1] + xs[i])
+            xm = round_sigfig(xm, 8, 0)  # Fortran sigl line 2799: sigfig(xm,8,0)
             ym_linear = 0.5*(ys[i-1] + ys[i])
             yt = sig_mu(xm)
             test = half_tol * abs(yt) + half_tol * ymax / 50
@@ -1136,7 +1138,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                     emit_point!(stk_e[depth], stk_s[depth], stk_c[depth])
                     depth -= 1; continue
                 end
-                sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol)
+                sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol, awr=A)
                 ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
                 pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
                 uu = 0.0; uum = 0.0
@@ -1168,7 +1170,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
 
         # Initialize with E'=0 (Fortran line 1985-1988)
         x1_e = 0.0
-        x1_s, x1_c = sigl_equiprobable(E, 0.0, nbin, kernel, kT; tol=tol)
+        x1_s, x1_c = sigl_equiprobable(E, 0.0, nbin, kernel, kT; tol=tol, awr=A)
         iskip = false
 
         # Sequential beta loop matching Fortran (lines 1992-2148)
@@ -1205,7 +1207,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             # Set up panel: x2=previous, x1=new seed (Fortran lines 1999-2038)
             x2_e = x1_e; x2_s = x1_s; x2_c = copy(x1_c)
             x1_e = ep
-            x1_s, x1_c = sigl_equiprobable(E, ep, nbin, kernel, kT; tol=tol)
+            x1_s, x1_c = sigl_equiprobable(E, ep, nbin, kernel, kT; tol=tol, awr=A)
 
             # Run convergence stack (Fortran labels 330-410)
             run_stack!(x1_e, x1_s, x1_c, x2_e, x2_s, x2_c, iskip)
