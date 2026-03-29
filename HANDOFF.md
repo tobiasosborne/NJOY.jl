@@ -1351,6 +1351,41 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Results**: T01 structural 41/41 MATCH, 32962/32962 lines. Value failures: 16661 (50.5%) → **59 (0.2%)**.
 
+### Phase 27: PENDF header fixes + Bragg sentinel — 59→11 tolerance failures
+
+**6 fixes applied to pendf_writer.jl, reconr_types.jl, thermr.jl:**
+
+1. **MF3Section L2/LR fields**: Added `L2::Int32` (level number from HEAD) and `LR::Int32` (breakup flag from TAB1) to `MF3Section` struct. `read_mf3_sections` now captures `head.L2` and `tab1.L2` from the original ENDF. Backward-compatible constructors default both to 0.
+
+2. **MF3 HEAD L2 values**: `write_full_pendf` now writes correct L2 per section type:
+   - Redundant MTs (1, 4, 103-107): L2=99 (Fortran recout hardcodes `scr(4)=99` at lines 5234, 5266, 5349)
+   - Non-redundant from ENDF: L2 from MF3 HEAD (e.g., MT=51-68 get level numbers 1-18)
+   - Broadened (override_mf3): preserves reconr L2 (MT=1→99, MT=2→1, MT=102→99)
+   - Thermr extra: L2=0
+
+3. **MF3 TAB1 LR and QI**: TAB1 L2 field now writes LR from ENDF (was hardcoded 0). For C-nat MT=52-68: LR=23 (breakup reaction flag). Also: QI=0 for redundant MT=4, and thermr sections get TAB1 C1=temperature.
+
+4. **MF2/MT=151**: ZAI→ZA in isotope CONT (Fortran recout uses `za`, not `iso.ZAI`). EH = max(range EH) instead of last range only.
+
+5. **MF1/MT=451 self-count**: NC = NWD + NXC (was 3 + NWD + NXC, overcounting by 3 header lines). MF6 NC excludes SEND.
+
+6. **Bragg edge sentinel** (thermr.jl): Fortran `sigcoh` lines 1134-1137 add a sentinel point at `ulim` with the last sorted form factor. This gives 294 edges (was 293), matching Fortran LIP=-294.
+
+**Impact**: 48 of 59 tolerance failures eliminated. All MF3 headers now 3/3 (was 2/3 for 17 MTs).
+
+**Remaining 11 failures**:
+- 5 MF1/MT=451 directory NC values: Fortran tpend computes NC with inconsistent truncation for some sections (metadata only, no physics impact)
+- 2 MF6/MT=229 structural: sigl at near-zero kernel (sigma≈3.8e-10) produces completely different cosines
+- 4 MF6/MT=229 ±1 cosine: irreducible sigl FP precision at high incident energies
+
+**Trap 78 (NEW — FIXED)**: Fortran recout writes L2=99 for ALL redundant/computed reactions (MT=1, MT=4, MT=18, MT=103-107). The code at lines 5234, 5266, 5349 hardcodes `scr(4)=99`. Previous assumption was L2=0.
+
+**Trap 79 (NEW — FIXED)**: MF3 TAB1 L2 field is LR (breakup reaction flag), not zero. For C-nat MT=52-68: LR=23 from original ENDF. For MT=91: LR=23. This must be read from ENDF and carried through to PENDF output.
+
+**Trap 80 (NEW — FIXED)**: Fortran recout writes ZA (not ZAI) in MF2 isotope CONT record. For C-nat: ZA=6000.0 (not ZAI=6012.0).
+
+**Trap 81 (NEW — FIXED)**: Fortran sigcoh adds a sentinel Bragg edge at ulim (lines 1134-1137: `k=k+1; wrk(2*k-1)=ulim; wrk(2*k)=wrk(2*k-2)`). The form factor of the sentinel copies the last sorted edge. Without this, nbragg is 1 too low.
+
 ---
 
 ## Immediate Next Steps — PRIORITY ORDER
@@ -1364,33 +1399,38 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 26, as of 2026-03-29)**:
+**Expected results (Phase 27, as of 2026-03-29)**:
 ```
 tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
 MATCH: 41 / 41 sections          ← ALL sections match ✓
-MT=102: DATA 307/307 PERFECT
-MT=  4: DATA 135/135 PERFECT
-MT= 51: DATA 135/135 PERFECT
-MT= 91: DATA 88/88 PERFECT
-MT=103: DATA 26/26 PERFECT
-MT=230: DATA 191/191 PERFECT
-MT=  2: DATA 306/307 (99.7%)     ← 1 line ±1 ULP
-MT=221: DATA 47/49 (95.9%)       ← 2 lines emax boundary
-MT=229: DATA 29/191 (15.2%)      ← calcem XS interp (terp stencil fixed, ±1 ULP remains)
-MT=  1: DATA 240/307 (78.2%)     ← ±1 ULP sigma1
-MT=444: DATA 20/307 (6.5%)       ← cascades from MT=1
-MT=301: DATA 4/307 (1.3%)        ← cascades from MT=1
-Total data: 1556 / 2386 (65.2%)
+MT=102: DATA 307/307 PERFECT     hdr=3/3
+MT=  4: DATA 135/135 PERFECT     hdr=3/3
+MT= 51: DATA 135/135 PERFECT     hdr=3/3
+MT= 91: DATA 88/88 PERFECT       hdr=3/3
+MT=103: DATA 26/26 PERFECT       hdr=3/3
+MT=230: DATA 191/191 PERFECT     hdr=3/3
+MT=  2: DATA 306/307 (99.7%)     hdr=3/3  ← 1 line ±1 ULP sigma1
+MT=221: DATA 47/49 (95.9%)       hdr=3/3  ← 2 lines emax boundary
+MT=229: DATA 29/191 (15.2%)      hdr=3/3  ← calcem XS ±1 ULP
+MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1
+MT=444: DATA 20/307 (6.5%)       hdr=3/3  ← cascades from MT=1
+MT=301: DATA 4/307 (1.3%)        hdr=3/3  ← cascades from MT=1
+Total data: 1564 / 2386 (65.5%)
 ```
 
 **Tolerance test** (run with the Python script below):
 ```
-rel_tol=1e-9: 59 lines fail (0.2%)
-rel_tol=1e-7: 59 lines fail (0.2%)
-rel_tol=1e-5: 56 lines fail (0.2%)
-rel_tol=1e-4: 55 lines fail (0.2%)  ← NJOY21 reimplementation standard
-rel_tol=1e-3: 53 lines fail (0.2%)  ← inter-code standard
+rel_tol=1e-9: 11 lines fail (0.0%)
+rel_tol=1e-7: 11 lines fail (0.0%)
+rel_tol=1e-5: 8 lines fail (0.0%)
+rel_tol=1e-4: 6 lines fail (0.0%)   ← NJOY21 reimplementation standard
+rel_tol=1e-3: 5 lines fail (0.0%)   ← inter-code standard
 ```
+
+**The 11 remaining failures**:
+- 5 MF1/MT=451 directory NC values (Fortran tpend truncation bug — metadata only)
+- 2 MF6/MT=229 near-zero kernel cosines (sigl at sigma≈3.8e-10, structural diff)
+- 4 MF6/MT=229 ±1 cosine values (irreducible sigl FP precision)
 
 **How to run the tolerance test** (simulates execute.py):
 ```bash
