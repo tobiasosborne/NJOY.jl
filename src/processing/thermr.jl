@@ -1087,6 +1087,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
     kernel = (E, Ep, mu) -> free_gas_kernel(E, Ep, mu, A, T; sigma_b=sigma_b)
 
     records = Vector{MF6ListRecord}()
+    xsi_out = zeros(nne)
 
     for ie in 1:nne
         E = round_sigfig(egrid[ie], 8, 0)  # Fortran enow=sigfig(enow,8,0) line 1979
@@ -1231,9 +1232,10 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             resize!(entries, jnz + 1)
         end
 
+        xsi_out[ie] = round_sigfig(total_xs, 9, 0)
         push!(records, MF6ListRecord(E, entries))
     end
-    return records
+    return (egrid, xsi_out, records)
 end
 
 """

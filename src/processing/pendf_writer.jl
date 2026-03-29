@@ -142,7 +142,9 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_stubs::Dict{Int, <:NamedTuple} = Dict{Int, NamedTuple}(),
                           mf12_lines::Vector{String} = String[],
                           mf13_lines::Vector{String} = String[],
-                          descriptions::Vector{String} = String[])
+                          descriptions::Vector{String} = String[],
+                          mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
+                          mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}())
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -273,7 +275,9 @@ function write_full_pendf(io::IO, result::NamedTuple;
     all_mf6_mts = sort(collect(union(keys(mf6_records), keys(mf6_stubs))))
     for mt in all_mf6_mts
         if haskey(mf6_records, mt)
-            _write_mf6_section(io, Int(actual_mat), mt, za, awr, mf6_records[mt], tempr)
+            _write_mf6_section(io, Int(actual_mat), mt, za, awr, mf6_records[mt], tempr;
+                               xsi=get(mf6_xsi, mt, Float64[]),
+                               emax_yield=get(mf6_emax, mt, 0.0))
         elseif haskey(mf6_stubs, mt)
             s = mf6_stubs[mt]
             _write_mf6_coherent_stub(io, Int(actual_mat), mt, za, awr,
@@ -366,7 +370,8 @@ Write one MF6 section (HEAD + product TAB1 + TAB2 + LIST records).
 `records` is a Vector of MF6ListRecord from compute_mf6_thermal.
 """
 function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64,
-                             records::AbstractVector, temperature::Float64)
+                             records::AbstractVector, temperature::Float64;
+                             xsi::Vector{Float64}=Float64[], emax_yield::Float64=0.0)
     id = MaterialId(Int32(mat), Int32(6), Int32(mt))
     ne = length(records)  # number of incident energies
     ns = 1
@@ -376,10 +381,10 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
 
     # Product yield TAB1: ZAP=1, AWP=1, LIP=-1, LAW=1 (thermr.f90:1936-1949)
     emin = ne > 0 ? records[1].E_incident : 1e-5
-    emax = ne > 0 ? records[end].E_incident * 1.2 : 1.2
+    emax_y = emax_yield > 0 ? emax_yield : (ne > 0 ? records[end].E_incident * 1.2 : 1.2)
     interp_yield = InterpolationTable(Int32[2], [LinLin])
     yield_tab1 = Tab1Record(1.0, 1.0, Int32(-1), Int32(1),
-                            interp_yield, [emin, emax], [1.0, 1.0], id)
+                            interp_yield, [emin, emax_y], [1.0, 1.0], id)
     ns = write_tab1(io, yield_tab1; ns=ns)
 
     # TAB2 outer envelope: T, 0, LANG=3, LEP=1, NR=1, NE (thermr.f90:1951-1960)
@@ -388,17 +393,31 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
                       interp_outer, Int32(ne), id)
     ns = write_tab2(io, tab2; ns=ns)
 
+    # Normalize sigma by xsi (Fortran tpend lines 3315,3329: rxsec=1/xsi; yy=sigma*rxsec)
+    has_xsi = length(xsi) == ne
+
     # For each incident energy, a LIST record (thermr.f90:2225-2237)
-    for rec in records
+    for (ie, rec) in enumerate(records)
         n_ep = length(rec.entries)  # number of secondary energies
         nl = 10  # values per secondary energy: E', σ, μ₁...μ₈
         nw = n_ep * nl
+        rxsec = has_xsi && xsi[ie] != 0.0 ? 1.0 / xsi[ie] : 1.0
         # Pack data: flatten all entries into a single vector
         data = Float64[]
         sizehint!(data, nw)
         for entry in rec.entries
             for k in 1:nl
-                push!(data, entry[k])
+                if k == 2 && has_xsi
+                    # Normalize sigma: Fortran tpend line 3329
+                    yy = entry[k] * rxsec
+                    push!(data, abs(yy) >= 1e-9 ? round_sigfig(yy, 7, 0) :
+                                                   round_sigfig(yy, 6, 0))
+                elseif k >= 3
+                    # Cosines: sigfig(9,0) matching Fortran line 2182
+                    push!(data, round_sigfig(entry[k], 9, 0))
+                else
+                    push!(data, entry[k])
+                end
             end
         end
         list_rec = ListRecord(0.0, rec.E_incident, Int32(0), Int32(0),

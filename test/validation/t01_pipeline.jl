@@ -235,9 +235,11 @@ function run_t01()
     extra_mf3[230] = (oracle_e, mt230_xs)
 
     # === MF6 ===
-    mf6_221 = NJOY.calcem_free_gas(A, 296.0, 1.2, 8; sigma_b=sb, tol=0.05)
+    esi_fg, xsi_fg, mf6_221 = NJOY.calcem_free_gas(A, 296.0, 1.2, 8; sigma_b=sb, tol=0.05)
     mf6 = Dict{Int, Any}(221 => mf6_221)
     mf6[229] = mf6_229
+    mf6_xsi = Dict{Int, Vector{Float64}}(221 => xsi_fg, 229 => xsi_sab)
+    mf6_emax = Dict{Int, Float64}(221 => 1.2, 229 => 1.2)
     mf6_stubs = Dict{Int, NamedTuple}(230 => (nbragg=bragg.n_edges, emin=1e-5, emax=emax_thermr))
 
     # === MF12/MF13 ===
@@ -254,6 +256,7 @@ function run_t01()
         NJOY.write_full_pendf(io, r; mat=1306, label="pendf tape for c-nat from endf/b tape 511",
             err=0.005, tempr=296.0, override_mf3=override_mf3, extra_mf3=extra_mf3,
             mf6_records=mf6, mf6_stubs=mf6_stubs, mf12_lines=mf12, mf13_lines=mf13,
+            mf6_xsi=mf6_xsi, mf6_emax=mf6_emax,
             descriptions=["6-c-nat from tape 511",
                           "processed by the njoy nuclear data processing system",
                           "see original endf/b-v tape for details of evaluation"])
