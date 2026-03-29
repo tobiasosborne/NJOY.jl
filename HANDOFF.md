@@ -1290,7 +1290,17 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Trap 71 (FIXED — Phase 25)**: Precompute `seep=1/sqrt(E*E')` and multiply (matching Fortran line 2700/2710).
 
-**Trap 72 (REMAINING)**: Free gas MF6/MT=221 has -8 net entry deficit (-23 lines). Root cause: sigl phase 2 CDF inversion produces 4.6% different cosine sums at specific (E, E') points. First divergence at IE=15 xm=0.003814: Fortran integral cosine test rejects (|uu-uum|=0.0294 > 0.0237) while Julia passes. All known Fortran-matching fixes have been applied. The remaining difference is from IEEE 754 non-associativity in the adaptive mu integration accumulation — same irreducible class as reconr ±1 FP diffs.
+**Trap 72 (FIXED — Phase 26)**: Free gas MF6/MT=221 -23 lines was NOT from IEEE 754 non-associativity. Root cause: calcem_free_gas did not pass `awr=A` to sigl_equiprobable, so peak cosine used awr=1 instead of 11.9. This completely changed the adaptive linearization, producing 4.5% different cosine sums.
+
+**Trap 73 (FIXED — Phase 26)**: calcem_free_gas must pass `awr=A` to ALL sigl_equiprobable calls (initialization at E'=0, beta seed evaluation, convergence stack midpoint). Without awr, the peak cosine x_peak = 0.5*(E+E'-(s1bb-1)*awr*kT)/sqrt(E*E') uses awr=1 instead of the material's AWR.
+
+**Trap 74 (FIXED — Phase 26)**: Fortran tpend normalizes MF6 sigma by dividing by xsi(ie) at line 3329: `yy=scr(nl1*i+indx)*rxsec` where `rxsec=1/xsi(ie)`. Then applies `sigfig(yy,7,0)` (or 6,0 for small values). Cosines also get `sigfig(cosine,9,0)`. Without normalization, Julia's MF6 sigma values were 16.67x too large (raw differential XS instead of normalized PDF). Also: MF6 TAB1 yield emax should be the thermr emax (1.2 eV), not records[end].E*1.2.
+
+**Trap 75 (FIXED — Phase 26)**: Fortran terp (thermr.f90:1468) overwrites `iadd=0` for increasing sequences AFTER using the original iadd to compute ihi. Julia's terp_lagrange kept iadd=il%2=1, shifting the order-5 Lagrangian stencil by 1. Also: Fortran search goes from ibeg to iend (=ihi-1), with fallback l=last=iend-il2+1. Julia was searching to ihi.
+
+**Trap 76 (FIXED — Phase 26)**: Trap 68 was WRONG. Fortran sigl DOES apply `sigfig(xm,8,0)` to mu midpoints at lines 2739 (phase 1) and 2799 (phase 2). The previous agent checked lines 2722 and 2782 (stack initialization) and saw no sigfig — but the sigfig is on the NEXT line each time. Rule 6 applies.
+
+**Trap 77 (FIXED — Phase 26)**: MF12/MF13 passthrough needs explicit SEND records (MAT,MF,MT=0,NS=99999) after the raw data lines and before FEND. The raw passthrough lines from the ENDF exclude the SEND (filtered by mt>0). MF1/MT=451 header needs blank CONT + NWD description text lines matching Fortran tpend format.
 
 ### Phase 25: T01 structural gap 584 → 29 lines — 8 bugs fixed in thermr.jl
 
@@ -1325,6 +1335,22 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 **Files changed**: `src/processing/thermr.jl` (calcem, calcem_free_gas, sigl_equiprobable, sab_kernel, free_gas_kernel, _interp_sab)
 
+### Phase 26: T01 structural PASS + MF6 normalization — 59 lines remain
+
+**5 bugs found and fixed this session:**
+
+1. **calcem_free_gas missing `awr=A` in sigl_equiprobable calls (CRITICAL)**: `sigl_equiprobable` was called with default awr=1.0 instead of awr=A (11.898 for carbon). The peak cosine formula `x_peak = 0.5*(E+E'-(s1bb-1)*awr*kT)/sqrt(E*E')` was completely wrong with awr=1, producing 4.5% different cosine sums. This caused calcem's convergence test to accept midpoints that Fortran rejected, generating -23 MF6/MT=221 lines. Fixed: pass `awr=A` to all 3 sigl_equiprobable calls in calcem_free_gas.
+
+2. **Trap 68 was WRONG — Fortran sigl DOES sigfig mu midpoints**: The previous agent (Phase 25) checked Fortran lines 2722/2782 (stack initialization, not midpoint computation) and concluded "no sigfig". But lines 2739/2799 (the NEXT line each time) DO apply `xm=sigfig(xm,8,0)`. Rule 6 confirmed: be skeptical of everything.
+
+3. **MF1/MT=451 header format**: Fortran tpend writes HEAD(L1=0) + blank CONT + CONT(T,err,NWD=3,NXC) + 3 description text lines. Julia had HEAD(L1=2) + CONT(T,err,0,NXC) with no text. Added `descriptions` parameter to `write_full_pendf`. Also added SEND records after MF12/MF13 passthrough (were missing, -1 line each).
+
+4. **terp_lagrange stencil shift**: Fortran `terp` (thermr.f90:1468) overwrites `iadd=0` for increasing sequences AFTER computing `ihi`. Julia kept `iadd=il%2=1`, shifting the order-5 Lagrangian stencil by 1 position. For E=2.5625e-5: Fortran stencil [2,3,4,5,6] vs Julia [3,4,5,6,7] → 0.07% XS error. Fixed: add `iadd=0` overwrite.
+
+5. **MF6 sigma normalization missing (CRITICAL)**: Fortran `tpend` (thermr.f90:3315,3329) divides each MF6 sigma by `xsi(ie)` (total integrated XS per incident energy), converting raw differential XS to normalized PDF. Julia wrote raw values — **16.67x too large**. Also: Fortran applies `sigfig(yy,7,0)` to normalized sigma and `sigfig(cosine,9,0)` to cosine values. Fixed: `_write_mf6_section` now takes `xsi` parameter; `calcem_free_gas` now returns `(esi, xsi, records)`.
+
+**Results**: T01 structural 41/41 MATCH, 32962/32962 lines. Value failures: 16661 (50.5%) → **59 (0.2%)**.
+
 ---
 
 ## Immediate Next Steps — PRIORITY ORDER
@@ -1338,74 +1364,145 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 25, as of 2026-03-29)**:
+**Expected results (Phase 26, as of 2026-03-29)**:
 ```
-tape25: 32933 (ref: 32962)       ← STRUCTURAL: -29 lines (1 MF6 section)
-MATCH: 39 / 41 sections          ← 2 sections have wrong line counts
+tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
+MATCH: 41 / 41 sections          ← ALL sections match ✓
 MT=102: DATA 307/307 PERFECT
 MT=  4: DATA 135/135 PERFECT
 MT= 51: DATA 135/135 PERFECT
 MT= 91: DATA 88/88 PERFECT
 MT=103: DATA 26/26 PERFECT
 MT=230: DATA 191/191 PERFECT
-MT=  2: DATA 306/307 (99.7%)     ← ±1 ULP sigma1 (acceptable first round)
-MT=221: DATA 47/49 (95.9%)       ← emax boundary (minor)
-MT=229: DATA 5/191 (2.6%)        ← calcem XS values (SAB interpolation)
-MT=  1: DATA 240/307 (78.2%)     ← ±1 ULP sigma1 (acceptable first round)
-MT=444: DATA 20/307 (6.5%)       ← cascades from MT=1 ±1 ULP
-MT=301: DATA 4/307 (1.3%)        ← cascades from MT=1 ±1 ULP
-Total data: 1532 / 2386 (64.2%)
+MT=  2: DATA 306/307 (99.7%)     ← 1 line ±1 ULP
+MT=221: DATA 47/49 (95.9%)       ← 2 lines emax boundary
+MT=229: DATA 29/191 (15.2%)      ← calcem XS interp (terp stencil fixed, ±1 ULP remains)
+MT=  1: DATA 240/307 (78.2%)     ← ±1 ULP sigma1
+MT=444: DATA 20/307 (6.5%)       ← cascades from MT=1
+MT=301: DATA 4/307 (1.3%)        ← cascades from MT=1
+Total data: 1556 / 2386 (65.2%)
 ```
 
-### What blocks T01 from passing
+**Tolerance test** (run with the Python script below):
+```
+rel_tol=1e-9: 59 lines fail (0.2%)
+rel_tol=1e-7: 59 lines fail (0.2%)
+rel_tol=1e-5: 56 lines fail (0.2%)
+rel_tol=1e-4: 55 lines fail (0.2%)  ← NJOY21 reimplementation standard
+rel_tol=1e-3: 53 lines fail (0.2%)  ← inter-code standard
+```
 
-**The official test** (`njoy-reference/tests/execute.py`) FIRST checks line count equality (line 79: `if len(refLines) != len(trialLines): return False`), THEN compares values with rel_tol=1e-9. Different line counts = instant fail.
+**How to run the tolerance test** (simulates execute.py):
+```bash
+python3 -c "
+import re; from math import isclose
+fp=re.compile(r'(([-+]?\d+)(\.\d+)?(([eE])?[-+]\d+)?)',re.VERBOSE)
+def mf(D):
+    try: return float(D[0])
+    except: return float('{}{}E{}'.format(D[1],D[2],D[3])) if not D[-1] else None
+ref=open('njoy-reference/tests/01/referenceTape25').readlines()
+trial=open('/tmp/t01_tape25.pendf').readlines()
+for rtol in [1e-9,1e-7,1e-5,1e-4,1e-3]:
+    f=0
+    for r,t in zip(ref,trial):
+        if r==t: continue
+        rF=fp.findall(r); tF=fp.findall(t)
+        if not rF:
+            if fp.sub('',r)!=fp.sub('',t): f+=1
+            continue
+        if len(rF)!=len(tF): f+=1; continue
+        ok=True
+        for a,b in zip(rF,tF):
+            rv=mf(a); tv=mf(b)
+            if rv is None or tv is None: continue
+            if not isclose(rv,tv,rel_tol=rtol,abs_tol=1e-10): ok=False; break
+        if not ok: f+=1
+    print(f'rel_tol={rtol:.0e}: {f} lines fail ({f/len(ref)*100:.1f}%)')
+"
+```
 
-**STRUCTURAL BLOCKERS** (must be exactly 0 to pass):
-1. **MF6/MT=221 (free gas angular)**: Julia=9618, oracle=9641 (**-23 lines**). Root cause: sigl_equiprobable produces 4.6% different cosine sums at specific (E,E') points, causing borderline integral cosine test decisions to flip. Net -8 entries across 55 differing IEs, with ±18 swings at IE=15/16/30. See Trap 72.
-2. **MF1/MT=451 (directory)**: Julia=43, oracle=47 (-4 lines). Auto-fixes when MF6/MT=221 matches.
+### What blocks T01 from fully passing
 
-**VALUE ISSUES** (fail 1e-9, most pass 1e-7 — acceptable for first-round):
-3. **MT=1 + cascaded MT=301/444**: ±1 ULP from sigma1 Doppler broadening FP.
-4. **MT=229**: calcem XS values differ (SAB interpolation difference).
-5. **MT=2**: 1 line at ±1 ULP.
+**See `reports/ACCEPTANCE_CRITERIA.md` for the tolerance hierarchy.** Summary:
+- **Structural (line count)**: PASSES ✓
+- **1e-9 (stretch, same-binary regression)**: 59 lines fail — 40 are headers, 19 are ±1 ULP data
+- **1e-4 (NJOY21 reimplementation)**: 55 lines fail — 40 are headers, 15 are ±1 ULP data
+- **1e-3 (inter-code agreement)**: 53 lines fail — nearly all are headers
 
-### 1. PRIORITY: Fix MF6/MT=221 (free gas, -23 lines) — THE LAST STRUCTURAL BLOCKER
+**If the ~40 header lines are fixed, T01 passes at 1e-4 with only ~15 genuine data diffs.**
 
-**Status after Phase 25**: Down from +133 to **-23 lines** (from +5290 originally).
+### The 59 failing lines — exact breakdown
 
-**What was fixed in Phase 25**: sigmin=1e-10 threshold, emit-all-entries, sigfig on enow, sigl midpoint rounding, third constant, seep precomputation. These collectively eliminated the +133 excess but now Julia has -23 (too FEW entries, net -8 across 55 IEs).
+| Section | Failing | Total | Root cause | Fix approach |
+|---------|---------|-------|------------|--------------|
+| MF1/MT=451 | 6 | 47 | Header: L2 value, self-ref count, directory entries | Match Fortran tpend header format |
+| MF2/MT=151 | 2 | 4 | Header: L1/L2 in HEAD record | Match Fortran reconr MF2 output |
+| MF3/MT=52-68 | 2 each (34 total) | varies | Header: QI and L2 in TAB1 HEAD record for threshold MTs | Read QI/L2 from original ENDF (Fortran reconr emerge writes level-specific L2 values) |
+| MF3/MT=1 | 1 | 310 | ±1 ULP sigma1 broadening | Match sigma1 FP accumulation order (stretch goal) |
+| MF3/MT=4,51,91 | 1 each | varies | ±1 ULP or header | Check if header or data diff |
+| MF3/MT=102 | 1 | 310 | Header QI | Write QI=0 for capture |
+| MF3/MT=221 | 1 | 52 | emax boundary | Minor |
+| MF3/MT=229 | 1 | 194 | ±1 ULP calcem XS interpolation | FP precision class |
+| MF3/MT=230 | 1 | 194 | Header | Match Fortran format |
+| MF6/MT=229 | 8 | 19506 | ±1 ULP cosine values | sigl FP accumulation order (stretch goal) |
+| MF6/MT=230 | 1 | 4 | Header | Match Fortran format |
 
-**Root cause of remaining -23 lines**: The `sigl_equiprobable` function produces sigma and cosine values that differ from Fortran's `sigl` by enough to flip borderline convergence decisions in calcem_free_gas. The first divergence at IE=15 (E=5.06e-4 eV):
-- Panel: [sigfig(E,8,+1), E+0.1*kT] = [5.06e-4, 3.057e-3]
-- Midpoint xm=0.003814: both codes evaluate sigl, compute convergence tests
-- Fortran: sigma test PASSES, cosine per-component tests PASS, but **integral cosine test REJECTS** (|uu-uum|=0.0294 > threshold=0.0237)
-- Julia: integral cosine test PASSES (Julia's uu=0.248 vs Fortran uu=0.237, a 4.6% difference)
-- This single flip cascades: Fortran subdivides and adds 18 midpoints, Julia doesn't
+### 1. PRIORITY: Fix the ~40 header lines (QI/L2 values in MF3 TAB1 records)
 
-**What causes the 4.6% cosine sum difference**: The equi-probable bin boundaries in sigl phase 2 are determined by CDF inversion over the linearized sigma(mu). Julia's adaptive mu linearization produces slightly different panel boundaries than Fortran's (even after removing all known differences: round_sigfig, third, seep, enow sigfig). The residual is from IEEE 754 non-associativity in the trapezoid accumulation — the SAME class as reconr's ±1 FP diffs and T34's irreducible Frobenius-Schur accumulation.
+**This is the highest-impact fix**: eliminating 40 of 59 failures, making T01 pass at 1e-4.
 
-**Approach to close the gap (not yet tried)**:
-1. **Match Fortran's sigl phase 1 accumulation order**: Fortran accumulates `sum=sum+half*(y(i)+yl)*(x(i)-xl)` in a specific stack-pop order. Julia's `adaptive_integrate()` may accumulate in a different order due to the `@goto accept` control flow. Compare intermediate `sum` values side-by-side at each accepted panel.
-2. **Match Fortran's phase 2 gral computation**: The moment integral uses `half*(yl*x(i)-y(i)*xl)*(x(i)+xl) + third*(y(i)-yl)*(x(i)^2+x(i)*xl+xl^2)`. Check FP evaluation order matches Fortran's.
-3. **Match bin boundary precision**: The quadratic inversion `disc=(yl*rf)^2+2*(fract-sum)*rf; xn=xl-(yl*rf)+sqrt(disc)` (Fortran lines 2832-2838) may give different results from Julia's equivalent if rf=1/f is computed differently.
-4. **gdb trace**: Patch Fortran sigl to print `(j, xbar, sum, gral, xl, xn)` at each bin boundary. Compare with Julia's bin boundaries to find the first bin where they diverge.
+**Root cause**: Fortran `reconr` emerge writes material-specific L2 and QI values in MF3 section HEAD records. Julia's `write_full_pendf` writes generic values (L2=99 for reconr sections, QI computed from threshold).
 
-### 2. VALUE: Fix MT=229 calcem XS values (5/191 → target 191/191)
+**What the Fortran writes for each MT's HEAD record**:
+- `L2` = level number for excited-state MTs (MT=51-68), LR for competitive reactions, 0 for most MTs
+- `QI` = Q-value from ENDF MF3 HEAD record. For redundant MTs (MT=1, MT=4): QI=0
+- These come from the original ENDF file's MF3 HEAD records
 
-**Status**: MF6/MT=229 line count now MATCHES (19506). But the MF3/MT=229 XS values only match at 5/191 grid points (2.6%). The calcem XS is interpolated via order-5 Lagrangian from the 94-point calcem egrid to the output grid. The interpolated values differ because the underlying calcem XS differ at the 94 egrid points.
+**How to fix**:
+1. Read the original ENDF MF3 HEAD records to get L2 and QI for each MT
+2. Store these in the `MF3Section` struct (or pass them through the pipeline)
+3. In `write_full_pendf`, use the correct L2 and QI when writing each MF3 TAB1 header
+4. For broadened/heatr/thermr sections, the Fortran tpend writes specific L2 values too — check `after_broadr.pendf` for reference
 
-### 3. VALUE: Fix MT=1 sigma1 ±1 ULP (cascades to MT=301/444)
+**Key Fortran code**: reconr.f90 `emerge` subroutine (line ~4646), specifically the HEAD record writes for each MT section. Also check `recout` (line ~4984) for the TAB1 header format.
 
-**Status**: MT=1 has 240/307, MT=301 has 4/307, MT=444 has 20/307. All ±1 in 7th sigfig. **Passes 1e-7 acceptance.** To pursue 1e-9: match FP accumulation order in `sigma1_at` (sigma1.jl) to Fortran `sigma1` (sigma1.f90).
+**Files to modify**: `src/processing/pendf_writer.jl` (`write_full_pendf`, `_write_full_mf3_section`)
 
-### 4. STRUCTURAL: Replace oracle grid hack for MT=229/230 MF3
+**Verification**: After fix, run the tolerance test and check that the ~34 MF3/MT=52-68 header lines now pass.
 
-The T01 pipeline reads the oracle's 571-point energy grid from `after_thermr_2.pendf` for MT=229/230 MF3 sections. This is a TEMPORARY HACK. The grid must be computed by `build_thermal_grid` (Fortran `coh` subroutine, thermr.f90:748-922).
+### 2. Fix MF1/MT=451 directory (6 lines)
 
-### 5. Grind BROADR + generate oracle caches for remaining tests
+The 6 failing lines in MF1/MT=451 are from:
+- Self-referential line count (Julia says 49, should match actual count)
+- Directory entry line counts for sections where the header changed
+- Possible NWD/NXC count differences
 
-BROADR is implemented and broadn_grid matches 919/919 points. 31 reconr tests run without oracle caches — many likely already pass. Apply the Grind Method to each.
+Fix: ensure `_write_full_mf1` computes correct self-referential NC and that all section line counts in the directory match the actual written line counts. Run the pipeline and count actual lines per section.
+
+### 3. Fix MF2/MT=151 header (2 lines)
+
+Julia writes L1=0, L2=0 for MF2. Fortran may write different values. Check `after_reconr.pendf` oracle for the correct MF2 HEAD record.
+
+### 4. VALUE: Fix remaining ~19 data diffs (stretch goal for 1e-9)
+
+These are the irreducible FP precision class:
+- **MF3/MT=1** (1 line): sigma1 broadening ±1 ULP. Would need matching FP accumulation order in `sigma1_at`.
+- **MF6/MT=229** (8 lines): sigl cosine values ±1 ULP. Would need matching sigl phase 1/2 FP order.
+- **MF3/MT=229** (1 line): calcem XS Lagrangian interpolation ±1 ULP.
+- Others (9 lines): Various ±1 ULP.
+
+Approach: Use gdb to trace the Fortran sigma1/sigl at specific energies and match the exact FP computation order. See "How to Use gdb" section below.
+
+### 5. Replace oracle grid hack for MT=229/230 MF3
+
+The T01 pipeline reads the oracle's 571-point energy grid from `after_thermr_2.pendf` for MT=229/230 MF3 sections. This is a TEMPORARY HACK. The grid should be computed by `build_thermal_grid` (Fortran `coh` subroutine, thermr.f90:748-922), which merges elastic grid + calcem egrid + Bragg edges + adaptive midpoints.
+
+### 6. Grind remaining RECONR tests + BROADR
+
+- **19 BIT-IDENTICAL RECONR tests** (T01-03,08-13,18-19,25-27,30,45,47,55,84)
+- **31 tests RAN_OK without oracle** — many share materials with BIT-IDENTICAL tests
+- BROADR is implemented (broadn_grid matches 919/919 points for T01)
+- Apply the Grind Method to each test
 
 ---
 
@@ -1423,17 +1520,18 @@ This produces `/tmp/t01_tape25.pendf` and compares section-by-section and line-b
 1. **reconr**: Runs reconr on tape20 → gets 0K pointwise XS (r.energies, r.elastic, r.capture, r.total)
 2. **broadr**: Runs `broadn_grid(r.energies, hcat(r.elastic, r.capture), alpha, ...)` with PARTIALS ONLY (Trap 53). Then broadens total via sigma1_at on the same grid.
 3. **heatr**: Reads MF12/MT=102 gamma data from ENDF, computes KERMA via `compute_kerma` with `gamma_data` dict.
-4. **thermr1 (free gas)**: MT=221 = broadened elastic below emax (Trap 50). MF6/MT=221 via `calcem_free_gas`.
-5. **thermr2 (SAB)**: Reads SAB from t322, computes MT=229 via `calcem` (includes E'=0 initial point, Trap 56), MT=230 via `build_bragg_data`. **Currently uses oracle grid for MT=229/230 (temporary hack — needs build_thermal_grid).** Calcem xsi interpolated to output grid via ORDER-5 Lagrangian (Trap 57).
-6. **write**: `write_full_pendf` with override_mf3 (broadened), extra_mf3 (thermr+heatr), MF6 records, MF12/13 passthrough.
+4. **thermr1 (free gas)**: MT=221 = broadened elastic below emax (Trap 50). MF6/MT=221 via `calcem_free_gas` (returns `(esi, xsi, records)` — xsi used for MF6 normalization).
+5. **thermr2 (SAB)**: Reads SAB from t322, computes MT=229 via `calcem` (returns `(esi, xsi, records)`), MT=230 via `build_bragg_data`. **Currently uses oracle grid for MT=229/230 MF3** (temporary hack — needs build_thermal_grid). Calcem xsi interpolated to output grid via ORDER-5 Lagrangian with `terp_lagrange` (Fortran `terp` with iadd=0 for increasing sequences).
+6. **write**: `write_full_pendf` with override_mf3, extra_mf3, MF6 records (with xsi normalization via `mf6_xsi` and `mf6_emax` parameters), MF12/13 passthrough, description text.
 
 **Key parameters** (must match `test/validation/oracle_cache/test01/run_*/input`):
 - reconr: tape20, mat=1306, err=0.005
 - broadr: alpha=AWR/(bk*296), tol=0.005, thnmax=4.81207e6
 - heatr: Z=6 (carbon), gamma_data from MF12/MT=102
-- thermr1: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=1 (free gas), **sigma_b=((A+1)/A)^2** (Trap 58)
+- thermr1: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=1 (free gas), **sigma_b=((A+1)/A)^2** (Trap 58), **awr=A passed to sigl** (Trap 73)
 - thermr2: emax=1.2, nbin=8, tol=0.05, natom=1, iinc=2 (SAB), MAT_sab=1065
 - bragg: a=2.4573e-8, c=6.7e-8, sigma_coh=5.50, A_mass=12.011, natom=1, DW=2.1997, lat=1
+- MF6 normalization: sigma divided by xsi(ie) in _write_mf6_section (Trap 74)
 
 ## How to Use gdb / Fortran Diagnostics (PROVEN EFFECTIVE)
 
