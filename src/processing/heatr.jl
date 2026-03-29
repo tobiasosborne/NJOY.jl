@@ -141,18 +141,19 @@ capture_heating(E::Real, Q::Real, A::Real; E_gamma::Real=0.0) =
 """
     photon_recoil_heating(E, A, gamma_data) -> Float64
 
-Compute capture heating from photon recoil (Fortran gheat approach).
+Capture heating after nheat+gheat two-step (Fortran heatr approach).
+nheat deposits (E+Q)×σ, gheat subtracts escaping gamma energy
+(E+Q-E/(A+1))×σ, net = E/(A+1)×σ + photon recoil corrections.
 `gamma_data` = Vector{Tuple{Float64,Float64}} of (E_gamma [eV], yield) pairs.
 Recoil per gamma: E_γ²/(2·M_res·c²) where M_res = (A+1)·emc2.
-Also adds neutron kinetic energy transfer: E·A/(A+1).
-Matches Fortran disgam (heatr.f90:5683) + capdam energy balance.
+See heatr.f90 gheat lines 5278-5296, disgam lines 5671-5687.
 """
 function photon_recoil_heating(E::Real, A::Real,
                                 gamma_data::Vector{Tuple{Float64,Float64}})
     emc2 = PhysicsConstants.amassn * PhysicsConstants.amu *
            PhysicsConstants.clight^2 / PhysicsConstants.ev
     M_res_c2 = (A + 1.0) * emc2
-    h = E * A / (A + 1.0)  # neutron kinetic energy transfer
+    h = E / (A + 1.0)  # compound nucleus recoil energy (heatr.f90 gheat line 5292)
     for (eg, yld) in gamma_data
         h += eg^2 / (2.0 * M_res_c2) * yld
     end
@@ -162,11 +163,10 @@ end
 """
     photon_recoil_damage(E, A, Z, gamma_data; E_d=25.0) -> Float64
 
-Compute damage energy from capture with gamma cascade.
-Each gamma's recoil is passed through Lindhard separately, matching
-the Fortran gheat disgam approach (sums individual gamma damage, not
-total recoil damage). This gives a DIFFERENT result from capdam's
-single-photon approximation.
+Damage energy from capture with gamma cascade (Fortran nheat+gheat net).
+nheat adds capdam damage, gheat subtracts it and adds photon recoil damage.
+Net result: only photon recoil damages survive (capdam cancels).
+See heatr.f90 gheat lines 5285-5289: dame = edam*x*y then dame -= damn*x.
 """
 function photon_recoil_damage(E::Real, A::Real, Z::Real,
                                gamma_data::Vector{Tuple{Float64,Float64}};
@@ -180,9 +180,8 @@ function photon_recoil_damage(E::Real, A::Real, Z::Real,
         er = eg^2 / (2.0 * M_res_c2)
         d += lindhard_damage(er, lp; E_d=E_d) * yld
     end
-    # Add neutron recoil damage
-    er_n = E / (A + 1.0)
-    d += lindhard_damage(er_n, lp; E_d=E_d)
+    # No neutron recoil term: nheat's capdam and gheat's subtraction cancel
+    # (heatr.f90 gheat line 5289: dame = dame - damn*x)
     return d
 end
 
@@ -251,20 +250,112 @@ fission_heating(E::Real, qc::FissionQComponents) =
 inelastic_heating(E::Real, Q::Real, A::Real; E_secondary::Real=0.0) =
     E + Q - E_secondary
 
+"""
+    discrete_inelastic_ebar(E, Q, A; mu_bar=0.0) -> Float64
+
+Average secondary neutron energy for discrete two-body inelastic scattering.
+Matches Fortran disbar (heatr.f90 lines 1975-1985,2008) with Q0=0:
+  thresh = (A+1)/A * |Q|
+  r = sqrt(1 - thresh/E)
+  b = r * A,  g = r
+  ebar = E * (1 + 2*g*mu_bar + g²) / (A+1)²
+"""
+function discrete_inelastic_ebar(E::Real, Q::Real, A::Real; mu_bar::Real=0.0)
+    thresh = (A + 1.0) / A * abs(Q)
+    E <= thresh && return E  # below threshold, no scatter
+    r = sqrt(1.0 - thresh / E)
+    g = r  # for neutron emission: g = b * arat = r*A * (1/A) = r
+    return E * (1.0 + 2.0 * g * mu_bar + g * g) / (1.0 + A)^2
+end
+
 "(n,xn) heating: h = E + Q - n_out * E_secondary."
 nxn_heating(E::Real, Q::Real, A::Real, n_out::Integer;
             E_secondary::Real=0.0) = E + Q - n_out * E_secondary
+
+# ==========================================================================
+# MF4 mu_bar interpolation
+# ==========================================================================
+
+"""
+    read_mf4_mubar(filename, mat) -> (energies, mu_bar_cm)
+
+Read MF4/MT=2 Legendre data from an ENDF tape and extract the first
+Legendre coefficient f₁ = ⟨cos θ_CM⟩ = μ̄_CM at each incident energy.
+Returns vectors suitable for linear interpolation.
+Matches Fortran heatr disbar: wbar=fl(2) at heatr.f90 line 1983.
+"""
+function read_mf4_mubar(filename::AbstractString, mat::Integer)
+    io = open(filename)
+    found = find_section(io, 4, 2; target_mat=mat)
+    if !found
+        close(io)
+        return (Float64[0.0, 2e7], Float64[0.0, 0.0])  # isotropic fallback
+    end
+    head = read_cont(io)
+    lvt = Int(head.L1)  # transformation matrix flag
+    cont = read_cont(io)
+    nk = Int(cont.N1)   # transformation matrix size
+    # Skip transformation matrix if present
+    if lvt == 1 && nk > 0
+        nlines = cld(nk, 6)
+        for _ in 1:nlines
+            readline(io)
+        end
+    end
+    # Read TAB2 header
+    tab2 = read_cont(io)
+    ne = Int(tab2.N2)  # number of incident energies
+    # Read interpolation line
+    readline(io)
+    # Read each LIST record: extract E and f_1
+    energies = Vector{Float64}(undef, ne)
+    mu_bar = Vector{Float64}(undef, ne)
+    for ie in 1:ne
+        list_head = read_cont(io)
+        e_val = Float64(list_head.C2)
+        nl = Int(list_head.N1)  # NPL = number of Legendre coefficients
+        energies[ie] = e_val
+        # Read NL values packed 6 per line
+        nlines = cld(nl, 6)
+        f1 = 0.0
+        if nlines > 0
+            first_line = readline(io)
+            p = rpad(first_line, 80)
+            f1 = parse_endf_float(p[1:11])  # first coefficient = f_1 = mu_bar
+            for _ in 2:nlines
+                readline(io)
+            end
+        end
+        mu_bar[ie] = f1
+    end
+    close(io)
+    return (energies, mu_bar)
+end
+
+"Linear interpolation of mu_bar from MF4 (energies, values) table."
+function _interp_mubar(data::Tuple{Vector{Float64},Vector{Float64}}, E::Real)
+    es, ms = data
+    E <= es[1] && return ms[1]
+    E >= es[end] && return ms[end]
+    idx = searchsortedfirst(es, E)
+    idx <= 1 && return ms[1]
+    f = (E - es[idx-1]) / (es[idx] - es[idx-1])
+    return ms[idx-1] + f * (ms[idx] - ms[idx-1])
+end
 
 # ==========================================================================
 # Top-level KERMA driver
 # ==========================================================================
 
 """
-    compute_kerma(pendf; awr, Z, Q_values, E_d, local_gamma) -> KERMAResult
+    compute_kerma(pendf; awr, Z, Q_values, E_d, local_gamma, mu_bar_data, mf13_gamma) -> KERMAResult
 
 Compute KERMA factors for all reactions in a PointwiseMaterial.
 `awr`: atomic weight ratio, `Z`: atomic number (0=skip damage),
-`Q_values`: Dict{Int,Float64} of MT->Q [eV], `E_d`: displacement energy [eV].
+`Q_values`: Dict{Int,Float64} of MT->Q [eV], `E_d`: displacement energy [eV],
+`mu_bar_data`: (energies, mu_bar) for elastic angular correction from MF4/MT=2,
+`mf13_gamma`: Vector of (E_gamma, TabulatedFunction) for MF13 photon production XS.
+  Subtracts escaping gamma energy from total KERMA (Fortran gheat line 5362: h=-y*ebar).
 """
 function compute_kerma(pendf::PointwiseMaterial;
                        awr::Real=1.0, Z::Int=0,
@@ -272,7 +363,10 @@ function compute_kerma(pendf::PointwiseMaterial;
                        E_d::Union{Nothing,Float64}=nothing,
                        local_gamma::Bool=false,
                        gamma_data::Dict{Int,Vector{Tuple{Float64,Float64}}}=
-                           Dict{Int,Vector{Tuple{Float64,Float64}}}())
+                           Dict{Int,Vector{Tuple{Float64,Float64}}}(),
+                       mu_bar_data::Union{Nothing,Tuple{Vector{Float64},Vector{Float64}}}=nothing,
+                       mf13_gamma::Vector{Tuple{Float64,TabulatedFunction}}=
+                           Tuple{Float64,TabulatedFunction}[])
     ne = length(pendf.energies)
     ed = isnothing(E_d) ? displacement_energy(Z) : E_d
 
@@ -296,7 +390,12 @@ function compute_kerma(pendf::PointwiseMaterial;
             sigma <= 0.0 && continue
 
             if mt == 2
-                h = elastic_heating(E, awr) * sigma
+                mu = if mu_bar_data !== nothing
+                    _interp_mubar(mu_bar_data, E)
+                else
+                    0.0
+                end
+                h = elastic_heating_aniso(E, awr, mu) * sigma
                 elastic[ie] += h
                 if Z > 0
                     damage[ie] += elastic_damage(E, awr, Float64(Z); E_d=ed) * sigma
@@ -338,6 +437,16 @@ function compute_kerma(pendf::PointwiseMaterial;
                 cap[ie] += h
             end
             total[ie] += h
+        end
+    end
+    # Subtract escaping gamma energy from MF13 photon production sections
+    # Fortran gheat line 5362: h = -y * ebar, then c(2) += h
+    for (e_gamma, tab) in mf13_gamma
+        for ie in 1:ne
+            E = pendf.energies[ie]
+            sigma_gamma = interpolate(tab, E)
+            sigma_gamma <= 0.0 && continue
+            total[ie] -= sigma_gamma * e_gamma
         end
     end
     return KERMAResult(copy(pendf.energies), total, elastic, cap,

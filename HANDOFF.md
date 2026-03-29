@@ -1410,6 +1410,84 @@ Each oracle has a `run_*` directory with the Fortran input deck and tapes used.
 
 ---
 
+### Phase 29: HEATR KERMA/damage grind — 3 bugs fixed, 1 in progress
+
+**CRITICAL WARNING TO NEXT AGENT**: Phase 28 claimed "11 tolerance failures" after removing the oracle grid hack. This was WRONG. The actual number was always ~1170 at 1e-9 (measured with execute.py methodology). The "11" was never verified after code changes. DO NOT TRUST the Phase 28 tolerance numbers. Run the pipeline and measure yourself.
+
+**How to measure (execute.py methodology)**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+# Then run the Python tolerance test (see end of HANDOFF)
+```
+
+**Current state (Phase 29, as of 2026-03-29)**:
+```
+execute.py 1e-9: 1100 FAIL (was 1170 at start of Phase 29)
+execute.py 1e-7: 1099 FAIL (was 1169)
+execute.py 1e-4:  465 FAIL (was 592)
+Structural: 41/41 sections, 32962/32962 lines — UNCHANGED
+```
+
+**Failure breakdown by section**:
+
+| Section | byte_diff | pass@1e-9 | fail 1e-7..1e-4 | fail@1e-4 | Root cause |
+|---------|-----------|-----------|-----------------|-----------|------------|
+| MF6/MT229 | 511 | 150 | 323 | **37** | sigl FP precision |
+| MF3/MT301 | 244 | 13 | 96 | **135** | Missing disbar ebar for inelastic |
+| MF3/MT444 | 287 | 9 | 27 | **251** | Elastic damage angular integration |
+| MF3/MT229 | 162 | 2 | 123 | **37** | calcem XS interpolation |
+| MF3/MT1 | 67 | 21 | 46 | **0** | sigma1 broadening ULP |
+| MF6/MT221 | 28 | 12 | 16 | **0** | Free gas cosine ULP |
+| MF1/MT451 | 5 | 0 | 1 | **4** | Directory NC off-by-1 |
+| MF2/MT151 | 1 | 0 | 0 | **1** | EH=1e5 vs 2e7 |
+
+**3 bugs FIXED this session**:
+
+1. **photon_recoil_heating: E*A/(A+1) → E/(A+1) (FIXED)**: The capture heating formula used E*A/(A+1) (CM kinetic energy) instead of E/(A+1) (compound nucleus recoil). Traced via Fortran gdb diagnostic at E=750 eV — Fortran nheat+gheat two-step gives net E/(A+1). Impact: -14 MT=301 fail@1e-4 lines.
+
+2. **photon_recoil_damage: removed spurious E/(A+1) neutron recoil term (FIXED)**: In Fortran, nheat adds capdam damage but gheat subtracts it, so only photon recoil damage survives. Julia had an extra lindhard_damage(E/(A+1)) term. Impact: no measurable change (was below E_d threshold for C-nat).
+
+3. **MF13 gamma escape subtraction (FIXED)**: Fortran gheat subtracts σ_γ*E_γ for each MF13 photon production section. Julia didn't do this at all. For C-nat, MF13/MT=51 has 4.439 MeV gamma from first excited level. Traced via Fortran gdb diagnostic showing GHEAT13 correction of -115 eV-barn at E=4.812 MeV. Added mf13_gamma parameter to compute_kerma. Impact: -1 MT=301 fail@1e-4 (marginal because the dominant error is the missing disbar ebar).
+
+4. **MF4/MT=2 mu_bar angular correction (FIXED)**: Fortran disbar reads MF4 Legendre coefficients for elastic scattering and uses ebar = E*(1+2b*μ̄+b²)/(A+1)². Julia used isotropic 2EA/(A+1)². Added read_mf4_mubar() reader and mu_bar_data parameter to compute_kerma. Impact: -112 MT=301 fail@1e-4 lines.
+
+5. **All reconr MTs passed to compute_kerma (FIXED)**: Pipeline previously only passed [2, 18, 102]. Now passes all 24 non-redundant MTs from reconr, with broadened elastic/capture and reconr-interpolated inelastic. Impact: structural prerequisite, no tolerance change yet because inelastic_heating formula is wrong (see below).
+
+**1 bug IN PROGRESS — the next grind target**:
+
+6. **discrete_inelastic_ebar NOT YET WIRED IN**: `compute_kerma` still uses `inelastic_heating(E, Q, awr) = E + Q` for MT=51-91. The correct formula is `h = (E - ebar) * σ` where ebar is from two-body kinematics (Fortran disbar with Q0=0). The function `discrete_inelastic_ebar()` has been added to heatr.jl but NOT yet wired into compute_kerma's MT=51-91 branch. At E=4.85 MeV for MT=51: Julia gives (E+Q)*σ = 3,288 eV-barn, Fortran gives (E-ebar)*σ = 38,565 eV-barn — 12x difference. When combined with the MF13 gamma subtraction, Julia's inelastic contribution goes NEGATIVE (3,288 - 35,512 = -32,224) while Fortran gives +3,053.
+
+**To wire in the fix**: In compute_kerma, change the `51 <= mt <= 91` branch from:
+```julia
+h = inelastic_heating(E, Q, awr) * sigma
+```
+to:
+```julia
+ebar = discrete_inelastic_ebar(E, Q, awr)
+h = (E - ebar) * sigma
+```
+
+**After fixing inelastic ebar, the remaining MT=301 fail@1e-4 should drop significantly.** Then the next target is MT=444 (damage), which needs the full angular integration (64-point Gauss-Legendre over scattering angle) matching Fortran disbar lines 1989-2003.
+
+**Files changed this session**:
+- `src/processing/heatr.jl` — photon_recoil_heating/damage fixes, read_mf4_mubar, discrete_inelastic_ebar, compute_kerma mu_bar/mf13 params
+- `test/validation/t01_pipeline.jl` — reads MF4, MF13, passes all MTs to compute_kerma
+
+**Trap 86 (NEW — FIXED)**: photon_recoil_heating used E*A/(A+1) instead of E/(A+1). The Fortran nheat deposits (E+Q)*σ for capture, then gheat subtracts (E+Q-E/(A+1))*σ and adds photon recoil. Net = E/(A+1)*σ + photon_recoil*σ. NOT E*A/(A+1). Confirmed via gdb at E=750 eV: expected diff 1.04e-4, observed 1.05e-4.
+
+**Trap 87 (NEW — FIXED)**: photon_recoil_damage had a spurious lindhard_damage(E/(A+1)) term. In the Fortran, nheat adds capdam and gheat subtracts it — they cancel, leaving only photon recoil damage from individual gammas.
+
+**Trap 88 (NEW — FIXED)**: Fortran gheat subtracts MF13 photon production: h = -σ_γ*E_γ for each photon. Julia had no MF13 correction. For C-nat at E=4.812 MeV: MF13/MT=51 subtracts 115 eV-barn (4.439 MeV gamma × 2.59e-5 barn production XS).
+
+**Trap 89 (NEW — FIXED)**: Fortran heatr disbar reads MF4 angular distributions for elastic. mu_bar_CM ≠ 0 above ~1 keV, reaching 0.73 at 20 MeV. Julia used isotropic (mu_bar=0). elastic_heating_aniso already existed but wasn't being called.
+
+**Trap 90 (NEW — IN PROGRESS)**: For discrete inelastic (MT=51-91), the Fortran uses Q0=0 (NOT the physical Q) and computes ebar from two-body kinematics. The heating is (E - ebar)*σ, NOT (E + Q)*σ. These differ dramatically near threshold. The function discrete_inelastic_ebar() is implemented but not wired into compute_kerma yet.
+
+**Trap 91 (NEW)**: When interpolating reconr MF3 sections onto the broadened grid, DO NOT use broadened values for non-broadened MTs. MT=2 and MT=102 use the broadened XS (b_xs columns); all other MTs use reconr MF3 interpolation with threshold guards. At E=1e-5 eV: broadened elastic=78.4 vs reconr elastic=4.7 (16x difference from Doppler broadening below kT).
+
+---
+
 ## Immediate Next Steps — PRIORITY ORDER
 
 ### 0. CHECK: Run the pipeline FIRST to establish baseline

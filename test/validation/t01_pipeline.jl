@@ -101,11 +101,53 @@ function run_t01()
         println("  E_gamma=$(eg) eV, yield=$yld")
     end
 
-    # Build PointwiseMaterial from partials (elastic=col1, capture=col2)
-    pm_broad = PointwiseMaterial(Int32(1306), b_e,
-        hcat(b_xs[:,1], zeros(length(b_e)), b_xs[:,2]), [2, 18, 102])
+    # Read MF4/MT=2 angular data for elastic mu_bar correction (Fortran disbar)
+    mu_bar = NJOY.read_mf4_mubar(endf_file, 1306)
+    println("MF4/MT=2: $(length(mu_bar[1])) energies, mu_bar range [$(minimum(mu_bar[2])), $(maximum(mu_bar[2]))]")
+
+    # Read MF13 photon production sections for gheat gamma subtraction
+    mf13_io = open(endf_file)
+    mf13_secs = NJOY.read_mf13_sections(mf13_io, 1306)
+    close(mf13_io)
+    mf13_gamma = Tuple{Float64, NJOY.TabulatedFunction}[]
+    for sec in mf13_secs
+        push!(mf13_gamma, (Float64(sec.QM), sec.tab))  # QM = E_gamma from TAB1 C1
+    end
+    println("MF13 gammas: $(length(mf13_gamma)) sections")
+    for (eg, tab) in mf13_gamma
+        println("  E_gamma=$(eg) eV, $(length(tab.x)) points")
+    end
+
+    # Build PointwiseMaterial with ALL non-redundant MTs interpolated onto broadened grid
+    # Fortran heatr reads all MTs from the PENDF; skips MT=1,3,4,101,201-599
+    skip_mts = Set([1, 3, 4, 101, 203, 204, 207, 251, 252, 253])
+    heatr_secs = [sec for sec in r.mf3_sections if !(Int(sec.mt) in skip_mts)]
+    heatr_mts = Int32[sec.mt for sec in heatr_secs]
+    heatr_qs = Dict{Int,Float64}()
+    xs_cols = Matrix{Float64}(undef, length(b_e), length(heatr_secs))
+    for (j, sec) in enumerate(heatr_secs)
+        mt = Int(sec.mt)
+        heatr_qs[mt] = Float64(sec.QI)
+        if mt == 2
+            # Use broadened elastic (column 1 of b_xs)
+            xs_cols[:, j] .= b_xs[:, 1]
+        elseif mt == 102
+            # Use broadened capture (column 2 of b_xs)
+            xs_cols[:, j] .= b_xs[:, 2]
+        else
+            # Non-broadened: interpolate from reconr MF3, zero below threshold
+            thresh = sec.tab.x[1]
+            for i in eachindex(b_e)
+                xs_cols[i, j] = b_e[i] < thresh ? 0.0 : NJOY.interpolate(sec.tab, b_e[i])
+            end
+        end
+    end
+    println("heatr MTs: $(length(heatr_mts)) — ", heatr_mts)
+
+    pm_broad = PointwiseMaterial(Int32(1306), b_e, xs_cols, heatr_mts)
     gd = Dict{Int, Vector{Tuple{Float64,Float64}}}(102 => gamma_102)
-    kr = compute_kerma(pm_broad; awr=A, Z=6, gamma_data=gd)
+    kr = compute_kerma(pm_broad; awr=A, Z=6, gamma_data=gd, mu_bar_data=mu_bar,
+                       mf13_gamma=mf13_gamma, Q_values=heatr_qs)
     extra_mf3 = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(
         301 => (b_e, kr.total_kerma), 444 => (b_e, kr.damage_energy))
 
