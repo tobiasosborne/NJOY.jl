@@ -144,7 +144,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf13_lines::Vector{String} = String[],
                           descriptions::Vector{String} = String[],
                           mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
-                          mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}())
+                          mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
+                          thermr_mts::Set{Int} = Set{Int}())
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -181,9 +182,9 @@ function write_full_pendf(io::IO, result::NamedTuple;
         section_lines[(3, imt)] = 3 + cld(np, 3)
     end
 
-    # MF6 stub line counts (coherent elastic: HEAD + TAB1 = 4 lines + SEND)
+    # MF6 stub line counts (coherent elastic: HEAD + TAB1 = 4 lines, no SEND in NC)
     for (mt, _) in mf6_stubs
-        section_lines[(6, mt)] = 4 + 1  # HEAD + TAB1(3) + SEND
+        section_lines[(6, mt)] = 4  # HEAD(1) + TAB1_header(1) + interp(1) + data(1)
     end
 
     # MF6 line counts (HEAD + TAB1 + TAB2 + LIST records per MT)
@@ -196,7 +197,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
             nw = n_ep * 10
             n_lines += 1 + cld(nw, 6)  # LIST header + data lines
         end
-        n_lines += 1  # SEND
+        # Note: SEND not counted in NC (Fortran convention)
         section_lines[(6, mt)] = n_lines
     end
 
@@ -223,7 +224,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
     _write_tpid_line(io, label, Int(actual_mat))
 
     # MF1/MT451 with full directory
-    _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns; descriptions=descriptions)
+    _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns;
+                    descriptions=descriptions, thermr_mts=thermr_mts)
 
     # MF2/MT151
     _write_legacy_mf2(io, mf2, actual_mat, ns)
@@ -234,7 +236,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
         imt = Int(mt)
         ns[] = 1
 
-        qm = 0.0; qi = 0.0
+        qm = 0.0; qi = 0.0; l2_head = 0; lr_tab = 0
         if haskey(override_mf3, imt)
             sec_e, sec_xs = override_mf3[imt]
             # Get QM/QI from _get_legacy_section (handles redundant MTs correctly)
@@ -242,22 +244,59 @@ function write_full_pendf(io::IO, result::NamedTuple;
             if sec_orig !== nothing
                 qm, qi = sec_orig[3], sec_orig[4]
             end
+            # Broadened sections: L2 preserves reconr value (broadr doesn't change L2)
+            # MT=1 special: reconr recout writes L2=99
+            if imt == 1
+                l2_head = 99
+            else
+                # Look up L2/LR from original ENDF MF3 section
+                for sec in result.mf3_sections
+                    if Int(sec.mt) == imt
+                        l2_head = Int(sec.L2)
+                        lr_tab = Int(sec.LR)
+                        break
+                    end
+                end
+            end
         elseif haskey(extra_mf3, imt)
             sec_e, sec_xs = extra_mf3[imt]
+            # Extra sections: L2=0
+            l2_head = 0
+            # Thermr sections get TAB1 C1=temperature (Fortran tpend convention)
+            if imt in thermr_mts
+                qm = tempr
+            end
         else
             sec = _get_legacy_section(result, imt)
             sec === nothing && continue
             sec_e, sec_xs, qm, qi = sec
+            # Reconr sections: L2 from original ENDF MF3 HEAD record
+            # Redundant MTs (1, 4, 103-107): L2=0, QI=0 (Fortran recout)
+            # Exception: MT=1 gets L2=99 (Fortran recout dummy MT1)
+            # Fortran recout: ALL redundant/computed reactions get L2=99 (hardcoded scr(4)=99)
+            is_redundant = imt == 1 || imt == 4
+            if !is_redundant && imt in (103,104,105,106,107)
+                lo, hi = Dict(103=>(600,649),104=>(650,699),
+                        105=>(700,749),106=>(750,799),107=>(800,849))[imt]
+                is_redundant = any(s -> lo <= Int(s.mt) <= hi, result.mf3_sections)
+            end
+            if is_redundant
+                l2_head = 99
+            else
+                # Non-redundant: L2 from ENDF MF3 HEAD (level number for MT=51-68)
+                for sec in result.mf3_sections
+                    if Int(sec.mt) == imt
+                        l2_head = Int(sec.L2)
+                        lr_tab = Int(sec.LR)
+                        break
+                    end
+                end
+            end
         end
-
-        # HEAD: L2 depends on module that produced this section
-        # reconr: L2=99, broadr: L2=1, thermr: L2=0
-        l2_head = haskey(extra_mf3, imt) ? 0 :
-                  haskey(override_mf3, imt) ? 1 : 99
         _write_cont_line(io, za, awr, 0, l2_head, 0, 0, Int(actual_mat), 3, imt, ns)
-        # TAB1: QM, QI from MF3 section
+        # TAB1: QM, QI, L1=0, LR from MF3 section
         np = length(sec_e)
-        _write_cont_line(io, qm, qi, 0, 0, 1, np, Int(actual_mat), 3, imt, ns)
+        _write_cont_line(io, qm, qi, 0, lr_tab, 1, np, Int(actual_mat), 3, imt, ns)
         # Interpolation
         @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n", np, 2, "", Int(actual_mat), 3, imt, ns[])
         ns[] += 1
@@ -317,7 +356,8 @@ end
 """Write MF1/MT451 with full directory covering MF3+MF6+MF12+MF13."""
 function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
                           section_lines::Dict{Tuple{Int,Int}, Int}, ns::Ref{Int};
-                          descriptions::Vector{String}=String[])
+                          descriptions::Vector{String}=String[],
+                          thermr_mts::Set{Int}=Set{Int}())
     za = mf2.ZA; awr = mf2.AWR
     ns[] = 1
 
@@ -340,7 +380,7 @@ function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
     # Directory entries (6 integers per line: MF, MT, NC, MOD per entry)
     # Self count: 3 header + NWD text + NXC directory entries + 1 SEND = 4 + NWD + NXC
     entries = Tuple{Int,Int,Int,Int}[]
-    push!(entries, (1, 451, 3 + nwd + nxc, 0))  # self
+    push!(entries, (1, 451, nwd + nxc, 0))  # self: NC = NWD + NXC (Fortran convention)
     push!(entries, (2, 151, 4, 0))  # MF2
 
     for ((mf, mt), nc) in sort(collect(section_lines))
@@ -720,9 +760,14 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
     _write_cont_line(io, mf2.ZA, mf2.AWR, 0, 0, nis, 0, Int(mat), 2, 151, ns)
 
     for iso in mf2.isotopes
-        _write_cont_line(io, iso.ZAI, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
+        # Fortran recout uses ZA (not ZAI) for the isotope CONT record
+        _write_cont_line(io, mf2.ZA, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
         el = length(iso.ranges) > 0 ? iso.ranges[1].EL : 1.0e-5
-        eh = length(iso.ranges) > 0 ? iso.ranges[end].EH : 2.0e7
+        # Fortran recout uses eresh (full range including URR) for EH
+        eh = 2.0e7  # default for no-resonance materials
+        if length(iso.ranges) > 0
+            eh = maximum(r.EH for r in iso.ranges)
+        end
         _write_cont_line(io, el, eh, 0, 0, 0, 0, Int(mat), 2, 151, ns)
         spi = 1.0; ap = 0.0
         if length(iso.ranges) > 0
@@ -867,7 +912,7 @@ function _get_legacy_section(result, mt::Int)
             sec_xs = sec_xs[first_nz-1:end]
         end
         isempty(sec_e) && return nothing
-        return sec_e, sec_xs, 0.0, qi_4
+        return sec_e, sec_xs, 0.0, 0.0  # Fortran recout writes QI=0 for redundant MT=4
     elseif mt in (103, 104, 105, 106, 107) && begin
             # Only handle as redundant sum when partials exist
             _lo, _hi = Dict(103=>(600,649), 104=>(650,699),

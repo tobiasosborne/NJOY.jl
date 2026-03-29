@@ -25,11 +25,14 @@ struct MF3Section
     tab::TabulatedFunction
     mf::Int32
     awr::Float64   # AWR from section HEAD record (for per-section threshold)
+    L2::Int32      # Level number (LFS) from HEAD record
+    LR::Int32      # Breakup reaction flag from TAB1 record
 end
 
 # Backward-compatible constructors
-MF3Section(mt, QM, QI, tab) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(3), 0.0)
-MF3Section(mt, QM, QI, tab, mf) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(mf), 0.0)
+MF3Section(mt, QM, QI, tab) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(3), 0.0, Int32(0), Int32(0))
+MF3Section(mt, QM, QI, tab, mf) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(mf), 0.0, Int32(0), Int32(0))
+MF3Section(mt, QM, QI, tab, mf, awr) = MF3Section(Int32(mt), Float64(QM), Float64(QI), tab, Int32(mf), Float64(awr), Int32(0), Int32(0))
 
 """
     ENDFMaterial
@@ -91,7 +94,7 @@ function read_mf3_sections(io::IO, mat::Integer)
                 head = read_cont(io)
                 tab1 = read_tab1(io)
                 tf = TabulatedFunction(tab1)
-                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf, Int32(3), head.C2))
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf, Int32(3), head.C2, Int32(head.L2), Int32(tab1.L2)))
                 # Skip to SEND
                 _skip_to_send(io)
             catch e

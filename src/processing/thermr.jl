@@ -435,7 +435,14 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
                     found || (push!(tsl,tsq); push!(ffl,wt))
     end; end; end; end
     p = sortperm(tsl)
-    BraggData(tsl[p], ffl[p], econ, scon, length(tsl))
+    tsl_sorted = tsl[p]; ffl_sorted = ffl[p]
+    # Fortran sigcoh lines 1134-1137: add sentinel point at ulim
+    # with form factor copied from the last sorted edge
+    if !isempty(ffl_sorted)
+        push!(tsl_sorted, ulim)
+        push!(ffl_sorted, ffl_sorted[end])
+    end
+    BraggData(tsl_sorted, ffl_sorted, econ, scon, length(tsl_sorted))
 end
 
 # ---- Thermal output grid (matching Fortran coh adaptive merge) ----
