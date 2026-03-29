@@ -173,13 +173,16 @@ exactly satisfies detailed balance. Matches NJOY2016 sig()@200.
 function free_gas_kernel(E::Real, E_prime::Real, mu::Real, A::Real, T::Real;
                          sigma_b::Real=1.0)
     kT = PhysicsConstants.bk * T
+    rtev = 1.0 / kT  # Fortran precomputes rtev=1/tev (line 2512)
     Ef, Epf = Float64(E), Float64(E_prime)
     (Ef <= 0 || Epf <= 0 || kT <= 0) && return 0.0
     alpha = max((Ef + Epf - 2.0*Float64(mu)*sqrt(Ef*Epf)) / (A*kT), 1e-6)  # Fortran amin=1e-6 (line 2500)
-    beta = (Epf - Ef) / kT
-    arg = (alpha + beta)^2 / (4.0*alpha)
+    bb = (Epf - Ef) * rtev  # Fortran bb=(ep-e)*rtev (line 2513) — multiplication, NOT division
+    arg = (alpha + bb)^2 / (4.0*alpha)
     arg > 225.0 && return 0.0
-    sigma_b * sqrt(Epf/Ef) / (2.0*kT) * exp(-arg) / sqrt(4.0*PhysicsConstants.pi*alpha)
+    sigc = sqrt(Epf/Ef) * rtev * 0.5  # Fortran sigc=sqrt(ep/e)*rtev/2 (line 2516)
+    sig = sigc * sigma_b * exp(-arg) / sqrt(4.0*PhysicsConstants.pi*alpha)
+    sig < 1e-10 ? 0.0 : sig  # Fortran sigmin=1e-10 (line 2606)
 end
 
 """
@@ -247,9 +250,9 @@ function _terpq(x1::Real, y1::Real, x2::Real, y2::Real, x3::Real, y3::Real, x::R
     end
 end
 
-"""Biquadratic S(α,β) interpolation matching Fortran sigl (thermr.f90:2514-2566).
-Uses terpq (3-point quadratic) in alpha then beta, with log-lin extrapolation
-for α below grid and large-step linear fallback."""
+"""Biquadratic S(α,β) interpolation matching Fortran sig (thermr.f90:2514-2566).
+Uses terpq (3-point quadratic) in alpha then beta, with cliq analytical
+extrapolation for α below grid (small β), and large-step linear fallback."""
 function _interp_sab(a::Real, b::Real, data::SABData)
     sabflg = -225.0; test2 = 30.0
     al, be, sab = data.alpha, data.beta, data.sab
@@ -259,8 +262,18 @@ function _interp_sab(a::Real, b::Real, data::SABData)
     (bv > be[end] || bv < be[1]) && return sabflg
 
     # Find grid indices (Fortran loop: ia such that a < alpha(ia+1))
+    # Snap to next grid point when within FP rounding tolerance — the Fortran's
+    # b*tev/tevz roundtrip can put b epsilon above a grid point while Julia's
+    # equivalent puts it epsilon below, causing a one-index shift that changes
+    # which sabflg corner cells are checked.
     ia = clamp(searchsortedlast(al, a), 1, na - 1)
+    if ia < na - 1 && abs(a - al[ia + 1]) < 1e-10 * al[ia + 1]
+        ia += 1
+    end
     ib = clamp(searchsortedlast(be, bv), 1, nb - 1)
+    if ib < nb - 1 && abs(bv - be[ib + 1]) < 1e-10 * be[ib + 1]
+        ib += 1
+    end
     bbb = data.lasym == 1 && b < 0 ? -bv : bv
 
     # Sabflg corner check (Fortran lines 2546-2550) — skip if small α·A and small β
@@ -301,12 +314,17 @@ function sab_kernel(E::Real, E_prime::Real, mu::Real, data::SABData, T::Real;
     sb = something(sigma_b_override, data.sigma_b) * ((data.awr+1)/data.awr)^2
     pf = sqrt(Epf/Ef) / (2.0*kT) * sb
     ls = _interp_sab(at, bt, data)
-    ls > sabflg && return pf * exp(ls - beta_raw/2)
+    sigmin = 1e-10  # Fortran sig line 2498/2565/2596
+    if ls > sabflg
+        sig = pf * exp(ls - beta_raw/2)
+        return sig < sigmin ? 0.0 : sig
+    end
     # SCT fallback
     Te = data.T_eff > 0 ? data.T_eff*PhysicsConstants.bk : kT
     bs, as = abs(beta_raw), alpha_raw
     arg = (as-bs)^2*kT/(4*as*Te) + (bs+beta_raw)/2
-    arg < 225.0 ? pf*exp(-arg)/sqrt(4*PhysicsConstants.pi*as*Te/kT) : 0.0
+    sig = arg < 225.0 ? pf*exp(-arg)/sqrt(4*PhysicsConstants.pi*as*Te/kT) : 0.0
+    sig < sigmin ? 0.0 : sig
 end
 
 "Integrated incoherent inelastic XS from S(a,b) [barn]."
@@ -630,17 +648,17 @@ Matches Fortran thermr.f90 sigl (lines 2660-2872) with nlin < 0 path.
 function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
                            kernel, tev::Float64; tol::Float64=0.001,
                            awr::Float64=1.0, tev_peak::Float64=tev)
-    # Constants matching Fortran (thermr.f90:2686-2698)
+    # Constants matching Fortran (thermr.f90:2682-2694)
     imax = 20; xtol = 1e-5; ytol = 1e-3; sigmin = 1e-32
-    eps_peak = 1e-3; shade = 0.99999999
+    eps_peak = 1e-3; third = 0.333333333  # Fortran truncated third (line 2687)
     half_tol = 0.5 * tol
 
     # Scattering peak location (Fortran sigl lines 2693-2714)
-    # b uses tev_peak (=tevz for lat=1, matching line 2698: b=b*tev/tevz)
-    # x_peak uses awr*tev (matching line 2710: (s1bb-1)*az*tev)
+    # Fortran precomputes seep=1/sqrt(e*ep) and multiplies (line 2710)
     b = abs(E_prime - E) / tev_peak
     s1bb = sqrt(1 + b*b)
-    x_peak = E_prime > 0 ? 0.5*(E + E_prime - (s1bb - 1)*awr*tev) / sqrt(E*E_prime) : 0.0
+    seep = E_prime > 0 ? 1.0 / sqrt(E * E_prime) : 0.0  # Fortran line 2700
+    x_peak = E_prime > 0 ? 0.5*(E + E_prime - (s1bb - 1)*awr*tev) * seep : 0.0
     abs(x_peak) > 1 - eps_peak && (x_peak = 0.99)
     x_peak = round_sigfig(x_peak, 8, 0)
 
@@ -663,7 +681,7 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
             if i == imax
                 @goto accept
             end
-            xm = round_sigfig(0.5*(xs[i-1] + xs[i]), 8, 0)
+            xm = 0.5*(xs[i-1] + xs[i])  # Fortran sigl line 2722: NO sigfig
             ym_linear = 0.5*(ys[i-1] + ys[i])
             yt = sig_mu(xm)
             test = half_tol * abs(yt) + half_tol * ymax / 50
@@ -708,7 +726,7 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
     while j < nbin
         # Adaptive refinement (same convergence as phase 1)
         if i > 1 && i < imax
-            xm = round_sigfig(0.5*(xs[i-1] + xs[i]), 8, 0)
+            xm = 0.5*(xs[i-1] + xs[i])  # Fortran sigl line 2782: NO sigfig
             ym_linear = 0.5*(ys[i-1] + ys[i])
             yt = sig_mu(xm)
             test = half_tol * abs(yt) + half_tol * ymax / 50
@@ -730,7 +748,7 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
         if j == nbin - 1 && i == 1
             # Last bin: force to μ=+1
             xn = xs[i]; j += 1
-        elseif cum_sum + panel_area >= fract * shade && j < nbin - 1
+        elseif cum_sum + panel_area >= fract * 0.99999999 && j < nbin - 1
             # Bin boundary within this panel: find xn via quadratic
             j += 1
             xil = 1.0 / (xs[i] - xl)
@@ -747,9 +765,8 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
         else
             # Accumulate and move to next panel
             cum_sum += panel_area
-            third_val = 1.0/3.0
             gral += 0.5*(yl*xs[i] - ys[i]*xl)*(xs[i]+xl) +
-                    third_val*(ys[i]-yl)*(xs[i]^2 + xs[i]*xl + xl^2)
+                    third*(ys[i]-yl)*(xs[i]^2 + xs[i]*xl + xl^2)
             xl = xs[i]; yl = ys[i]
             i -= 1
             i > 1 && continue
@@ -759,10 +776,9 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
 
         # Compute weighted average cosine for this bin
         yn = yl + (ys[i] - yl) * (xn - xl) / (xs[i] - xl)
-        third_val = 1.0/3.0
         gral += (xn - xl) * (yl * 0.5*(xn+xl) +
                 (ys[i]-yl)/(xs[i]-xl) * (-xl*0.5*(xn+xl) +
-                third_val*(xn^2 + xn*xl + xl^2)))
+                third*(xn^2 + xn*xl + xl^2)))
         cosines[j] = gral * rfract
 
         # Reset for next bin
@@ -861,16 +877,35 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
     records = Vector{MF6ListRecord}()
 
     for ie in 1:nne
-        E = egrid[ie]
+        E = round_sigfig(egrid[ie], 8, 0)  # Fortran enow=sigfig(enow,8,0) line 1979
         esi[ie] = E
 
         # Build beta-derived E' seed points (Fortran lines 1985-2031)
+        # Fortran generates seeds in beta order: jbeta=-nbeta..-1, then 1..nbeta
+        # When ep == enow: nudge to sigfig(enow,8,-1) for downscatter,
+        # sigfig(enow,8,+1) for upscatter (with iskip=1 for that panel)
         seeds = Float64[0.0]  # E'=0 is always the first point
+        ep_down_peak = -1.0  # elastic peak lower bound (sigfig(E,8,-1))
+        ep_up_peak = -1.0    # elastic peak upper bound (sigfig(E,8,+1))
         for beta in sab.beta
             ep_down = E - beta * kT_eff
-            ep_down > 0 && push!(seeds, round_sigfig(ep_down, 8, 0))
+            if ep_down > 0
+                if abs(ep_down - E) < 1e-15 * E  # ep == enow case
+                    ep_down = round_sigfig(E, 8, -1)
+                    ep_down_peak = ep_down
+                else
+                    ep_down = round_sigfig(ep_down, 8, 0)
+                end
+                push!(seeds, ep_down)
+            end
             ep_up = E + beta * kT_eff
-            push!(seeds, round_sigfig(ep_up, 8, 0))
+            if abs(ep_up - E) < 1e-15 * E  # ep == enow case
+                ep_up = round_sigfig(E, 8, +1)
+                ep_up_peak = ep_up
+            else
+                ep_up = round_sigfig(ep_up, 8, 0)
+            end
+            push!(seeds, ep_up)
         end
         sort!(unique!(seeds))
 
@@ -899,28 +934,22 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                 j_count = 2
                 xlast = ep; ylast = sigma
                 # Overwrite previous entry (Fortran overwrites scr[j=2] position)
-                if sigma > 1e-32
-                    entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
-                                   k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
-                    if !isempty(entries)
-                        entries[end] = entry
-                    else
-                        push!(entries, entry)
-                    end
+                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
+                               k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
+                if !isempty(entries)
+                    entries[end] = entry
+                else
+                    push!(entries, entry)
                 end
                 return
             end
 
             xlast = ep; ylast = sigma
-            if sigma > 1e-32
-                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
-                               k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
-                push!(entries, entry)
-            end
+            # Store ALL entries (Fortran stores even sig=0; jnz+1 trim handles trailing zeros)
+            entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
+                           k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
+            push!(entries, entry)
         end
-
-        # Detect elastic peak seed for iskip (Fortran lines 2022-2024)
-        elastic_idx = findmin(abs.([sd[1] for sd in seed_data] .- E))[2]
 
         # Process seed points with adaptive refinement between them
         for idx in 1:length(seed_data)
@@ -930,8 +959,10 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                 ep_lo, sig_lo, cos_lo = seed_data[idx-1]
 
                 # Skip refinement for elastic peak panel (Fortran iskip)
-                is_elastic_panel = (idx == elastic_idx || idx - 1 == elastic_idx) &&
-                                   abs(ep_hi - ep_lo) < 0.5 * kT_eff
+                # Only skip the narrow [sigfig(E,8,-1), sigfig(E,8,+1)] panel
+                is_elastic_panel = ep_down_peak > 0 && ep_up_peak > 0 &&
+                    abs(ep_lo - ep_down_peak) < 1e-15 * E &&
+                    abs(ep_hi - ep_up_peak) < 1e-15 * E
                 if is_elastic_panel
                     emit_point!(ep_lo, sig_lo, cos_lo)
                 else
@@ -1056,7 +1087,7 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
     records = Vector{MF6ListRecord}()
 
     for ie in 1:nne
-        E = egrid[ie]
+        E = round_sigfig(egrid[ie], 8, 0)  # Fortran enow=sigfig(enow,8,0) line 1979
         nbeta = length(FREE_GAS_BETA)
 
         # Match Fortran calcem sequential beta processing (lines 1985-2152)
@@ -1073,18 +1104,14 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             if j_count == 3 && total_xs < tolmin_area
                 j_count = 2
                 xlast = ep; ylast = sig
-                if sig > 1e-32
-                    entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                                   k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
-                    !isempty(entries) ? (entries[end] = entry) : push!(entries, entry)
-                end
+                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
+                !isempty(entries) ? (entries[end] = entry) : push!(entries, entry)
                 return
             end
             xlast = ep; ylast = sig
-            if sig > 1e-32
-                push!(entries, ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10))
-            end
+            push!(entries, ntuple(k -> k == 1 ? ep : k == 2 ? sig :
+                           k - 2 <= nbin ? cosv[k-2] : 0.0, 10))
         end
 
         # Convergence stack subroutine (Fortran labels 330-410)
