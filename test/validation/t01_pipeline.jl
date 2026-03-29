@@ -243,7 +243,10 @@ function run_t01()
     open("/tmp/t01_tape25.pendf", "w") do io
         NJOY.write_full_pendf(io, r; mat=1306, label="pendf tape for c-nat from endf/b tape 511",
             err=0.005, tempr=296.0, override_mf3=override_mf3, extra_mf3=extra_mf3,
-            mf6_records=mf6, mf6_stubs=mf6_stubs, mf12_lines=mf12, mf13_lines=mf13)
+            mf6_records=mf6, mf6_stubs=mf6_stubs, mf12_lines=mf12, mf13_lines=mf13,
+            descriptions=["6-c-nat from tape 511",
+                          "processed by the njoy nuclear data processing system",
+                          "see original endf/b-v tape for details of evaluation"])
     end
 
     # === COMPARE ===

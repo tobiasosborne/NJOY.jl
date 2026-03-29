@@ -141,7 +141,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_records::Dict{Int, <:Any} = Dict{Int, Any}(),
                           mf6_stubs::Dict{Int, <:NamedTuple} = Dict{Int, NamedTuple}(),
                           mf12_lines::Vector{String} = String[],
-                          mf13_lines::Vector{String} = String[])
+                          mf13_lines::Vector{String} = String[],
+                          descriptions::Vector{String} = String[])
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -220,7 +221,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
     _write_tpid_line(io, label, Int(actual_mat))
 
     # MF1/MT451 with full directory
-    _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns)
+    _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns; descriptions=descriptions)
 
     # MF2/MT151
     _write_legacy_mf2(io, mf2, actual_mat, ns)
@@ -289,6 +290,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
             print(io, line)
             endswith(line, '\n') || println(io)
         end
+        _write_send(io, Int(actual_mat), 12)
         _write_fend_zero(io, Int(actual_mat))
     end
 
@@ -298,6 +300,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
             print(io, line)
             endswith(line, '\n') || println(io)
         end
+        _write_send(io, Int(actual_mat), 13)
         _write_fend_zero(io, Int(actual_mat))
     end
 
@@ -309,22 +312,31 @@ end
 
 """Write MF1/MT451 with full directory covering MF3+MF6+MF12+MF13."""
 function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
-                          section_lines::Dict{Tuple{Int,Int}, Int}, ns::Ref{Int})
+                          section_lines::Dict{Tuple{Int,Int}, Int}, ns::Ref{Int};
+                          descriptions::Vector{String}=String[])
     za = mf2.ZA; awr = mf2.AWR
     ns[] = 1
 
     # Count directory entries: MF1/MT451 + MF2/MT151 + all other sections
     nxc = 2 + length(section_lines)
-    n_mf1_lines = 3 + cld(nxc, 6) * 6  # approximate; will refine
+    nwd = length(descriptions)
 
-    # HEAD
-    _write_cont_line(io, za, awr, 2, 0, 0, 0, Int(mat), 1, 451, ns)
-    # Control: tempr, err, NWD (description cards), NXC (directory entries)
-    _write_cont_line(io, tempr, err, 0, 0, 0, nxc, Int(mat), 1, 451, ns)
+    # HEAD (Fortran tpend: L1=0, L2=0)
+    _write_cont_line(io, za, awr, 0, 0, 0, 0, Int(mat), 1, 451, ns)
+    # Blank CONT (Fortran convention)
+    _write_cont_line(io, 0.0, 0.0, 0, 0, 0, 0, Int(mat), 1, 451, ns)
+    # Control: tempr, err, 0, 0, NWD, NXC
+    _write_cont_line(io, tempr, err, 0, 0, nwd, nxc, Int(mat), 1, 451, ns)
+    # Description text lines
+    for desc in descriptions
+        @printf(io, "%-66s%4d%2d%3d%5d\n", desc, Int(mat), 1, 451, ns[])
+        ns[] += 1
+    end
 
     # Directory entries (6 integers per line: MF, MT, NC, MOD per entry)
+    # Self count: 3 header + NWD text + NXC directory entries + 1 SEND = 4 + NWD + NXC
     entries = Tuple{Int,Int,Int,Int}[]
-    push!(entries, (1, 451, 3 + cld(nxc, 6)*6, 0))  # self
+    push!(entries, (1, 451, 3 + nwd + nxc, 0))  # self
     push!(entries, (2, 151, 4, 0))  # MF2
 
     for ((mf, mt), nc) in sort(collect(section_lines))
