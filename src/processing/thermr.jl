@@ -448,102 +448,187 @@ end
 # ---- Thermal output grid (matching Fortran coh adaptive merge) ----
 
 """
-    build_thermal_grid(bragg, elastic_grid, calcem_grid, emax; tol=0.05)
+    build_thermal_grid(bragg, input_grid, emax; tol=0.05)
 
-Build the merged thermal output grid matching Fortran thermr coh (lines 790-883).
-Uses a convergence stack (depth 20) to adaptively refine around Bragg edges,
-ensuring linear interpolation of coherent elastic XS within tolerance.
-Also includes all input elastic + calcem grid points.
+Build merged thermal output grid matching Fortran thermr coh (lines 790-883).
+
+The Fortran coh uses a LIFO convergence stack (depth 20) that processes one Bragg
+edge at a time, dynamically interleaving input grid points. The input_grid should
+be the elastic PENDF grid (points from iold, i.e., the broadened grid below emax).
+
+Stack convention (matching Fortran upstk lines 924-945):
+  stk[1] = highest energy (latest Bragg edge)
+  stk[i] = lowest energy (oldest unprocessed point)
+  upstk inserts new point at i-1, shifts old i-1 to i
+  Convergence tests interval [stk[i], stk[i-1]] (lowest to next)
+  Output pops stk[i] (lowest energy first)
 """
-function build_thermal_grid(bragg::BraggData, elastic_grid::AbstractVector{Float64},
-                            calcem_grid::AbstractVector{Float64}, emax::Float64;
-                            tol::Float64=0.05)
-    eps_coh = 3e-5
-    tolmin = 1e-6
-    imax = 20  # max stack depth (Fortran coh line 762)
+function build_thermal_grid(bragg::BraggData, input_grid::AbstractVector{Float64},
+                            emax::Float64; tol::Float64=0.05)
+    eps = 3.0e-5   # Fortran coh line 763: small spacing threshold
+    tolmin = 1e-6   # Fortran coh line 765
+    imax = 20       # Fortran coh line 774: max stack depth
 
-    # Sorted input grid points below emax (these must ALL appear in output)
-    input_pts = sort(unique(vcat(
-        filter(e -> e > 0 && e <= emax, elastic_grid),
-        filter(e -> e > 0 && e <= emax, calcem_grid),
-    )))
+    # Sorted input grid below emax (elastic PENDF from iold)
+    inp = sort(filter(e -> e > 0 && e <= emax, input_grid))
 
-    # Get all Bragg edge energies below emax
-    bragg_e = sort(filter(e -> e > 0 && e <= emax, bragg_edge_energies(bragg)))
+    # Bragg edge energies: Fortran sigcoh (lines 1199-1200) returns each edge TWICE:
+    # First call returns sigfig(elim, 7, -1) (nudged down).
+    # Second call (at the nudged-down energy) returns sigfig(elim, 7, +1) (nudged up),
+    # because e > sigfig(sigfig(elim,7,-1), 7, -1) triggers the +1 path.
+    # So each physical Bragg edge produces TWO grid points: {nudge-down, nudge-up}.
+    bragg_e = Float64[]
+    for k in 1:bragg.n_edges
+        e_raw = bragg.tau_sq[k] / bragg.econ
+        e_raw > emax && continue
+        push!(bragg_e, round_sigfig(e_raw, 7, -1))
+        push!(bragg_e, round_sigfig(e_raw, 7, +1))
+    end
+    sort!(unique!(bragg_e))
+    isempty(bragg_e) && return sort(unique(vcat(inp, [emax])))
 
-    # Output grid
     result = Float64[]
+    iex = 1  # index into inp (next unread input point)
+    nlt = 5  # sliding window size (Fortran coh line 781)
+    nlt_cur = nlt  # current window size (decreases near end)
 
-    # Add input points below first Bragg edge (Fortran coh lines 100-103)
-    first_bragg = isempty(bragg_e) ? emax : bragg_e[1]
-    for e in input_pts
-        e < first_bragg && push!(result, e)
+    # Sliding window of input grid energies (Fortran x[1..nlt] array)
+    xwin = zeros(nlt)
+
+    # Phase 1 (Fortran coh lines 794-809): output all input points below first Bragg edge
+    # and prime the 5-point sliding window
+    first_bragg = bragg_e[1]
+    ix = 0  # window fill count
+    while iex <= length(inp) && inp[iex] <= first_bragg * (1 + eps)
+        xwin[1] = inp[iex]
+        ix = 1
+        push!(result, inp[iex])
+        iex += 1
+    end
+    # Fill remaining window slots (Fortran lines 804-809: label 105 loop)
+    while ix < nlt && iex <= length(inp)
+        ix += 1
+        xwin[ix] = inp[iex]
+        iex += 1
     end
 
-    # Convergence stack for adaptive refinement of Bragg XS
-    # Stack stores (energy, xs) pairs
+    # Helper: advance sliding window past output energy (Fortran label 170, lines 852-866)
+    function advance_window!(out_e)
+        while nlt_cur >= 3 && out_e > xwin[3] * (1 + eps) && iex <= length(inp)
+            for k in 1:nlt_cur-1
+                xwin[k] = xwin[k+1]
+            end
+            if iex <= length(inp)
+                xwin[nlt_cur] = inp[iex]
+                iex += 1
+            end
+            if iex > length(inp)
+                nlt_cur = max(nlt_cur - 1, 1)
+            end
+        end
+    end
+
+    # Phase 2 (Fortran coh lines 810-817): prime stack with first Bragg edge
     stk_e = zeros(imax)
     stk_xs = zeros(imax)
+    stk_e[1] = first_bragg
+    stk_xs[1] = bragg_edges(first_bragg, bragg)
+    i = 1
+    bidx = 1  # index into bragg_e
 
-    # Process intervals between consecutive "seed" points
-    # Seed points = Bragg edges + input grid points above first Bragg
-    seed_pts = sort(unique(vcat(bragg_e, filter(e -> e >= first_bragg, input_pts))))
-    push!(seed_pts, emax)  # ensure we go up to emax
+    # Phase 3 (Fortran coh lines 819-883): main loop
+    while true
+        # Label 120: get next Bragg edge
+        bidx += 1
+        if bidx > length(bragg_e)
+            break
+        end
+        e_next = bragg_e[bidx]
+        xs_next = bragg_edges(e_next, bragg)
+        # upstk: push new Bragg edge
+        i += 1
+        stk_e[i] = stk_e[i-1]
+        stk_xs[i] = stk_xs[i-1]
+        stk_e[i-1] = e_next
+        stk_xs[i-1] = xs_next
 
-    for iseed in 1:length(seed_pts)-1
-        e_lo = seed_pts[iseed]
-        e_hi = seed_pts[iseed+1]
+        # Label 125: include input grid points using sliding window (Fortran lines 825-833)
+        while true
+            # Scan window x[1..nlt_cur] for first point above stk[i]
+            found_input = false
+            for wx in 1:nlt_cur
+                if xwin[wx] > stk_e[i] * (1 + eps)
+                    # Found a window point above stack bottom
+                    if xwin[wx] < stk_e[i-1] * (1 - eps)
+                        # It's between stk[i] and stk[i-1] → insert via upstk
+                        e_in = xwin[wx]
+                        xs_in = bragg_edges(e_in, bragg)
+                        i += 1
+                        stk_e[i] = stk_e[i-1]
+                        stk_xs[i] = stk_xs[i-1]
+                        stk_e[i-1] = e_in
+                        stk_xs[i-1] = xs_in
+                        found_input = true
+                    end
+                    break  # Fortran: first match only (do 130 with go to 135)
+                end
+            end
+            found_input && continue
 
-        # Initialize stack with the two endpoints
-        xs_lo = bragg_edges(e_lo, bragg)
-        xs_hi = bragg_edges(e_hi, bragg)
-        stk_e[1] = e_hi; stk_xs[1] = xs_hi
-        stk_e[2] = e_lo; stk_xs[2] = xs_lo
-        depth = 2
-
-        while depth >= 2
-            # Check midpoint convergence
-            if depth >= imax
-                # Stack full — accept top point
-                push!(result, stk_e[depth])
-                depth -= 1
-                continue
+            # Label 140: convergence test
+            if i >= imax
+                # Stack full → accept top (lowest energy)
+                push!(result, stk_e[i]); advance_window!(stk_e[i])
+                i -= 1
+                if i > 1; continue; else break; end
             end
 
-            xm = round_sigfig(0.5 * (stk_e[depth] + stk_e[depth-1]), 7, 0)
-            if stk_e[depth] - stk_e[depth-1] < eps_coh * xm || xm <= stk_e[depth] || xm >= stk_e[depth-1]
-                # Interval too small — accept
-                push!(result, stk_e[depth])
-                depth -= 1
-                continue
+            xm = round_sigfig(0.5 * (stk_e[i-1] + stk_e[i]), 7, 0)
+            if stk_e[i-1] - stk_e[i] < eps * xm || xm <= stk_e[i] || xm >= stk_e[i-1]
+                # Spacing too small → accept
+                push!(result, stk_e[i]); advance_window!(stk_e[i])
+                i -= 1
+                if i > 1; continue; else break; end
             end
 
             xsm = bragg_edges(xm, bragg)
-            ym = 0.5 * (stk_xs[depth] + stk_xs[depth-1])
+            # Linear interpolation between stack points (Fortran terp1 with INT=2)
+            ym = stk_xs[i] + (xm - stk_e[i]) * (stk_xs[i-1] - stk_xs[i]) /
+                 (stk_e[i-1] - stk_e[i])
             test = max(tol * abs(xsm), tolmin)
 
             if abs(xsm - ym) <= test
-                # Converged — accept top point
-                push!(result, stk_e[depth])
-                depth -= 1
+                # Converged → accept top (label 160)
+                push!(result, stk_e[i]); advance_window!(stk_e[i])
+                i -= 1
+                if i > 1; continue; else break; end
             else
-                # Subdivide: push midpoint onto stack
-                depth += 1
-                stk_e[depth] = stk_e[depth-1]
-                stk_xs[depth] = stk_xs[depth-1]
-                stk_e[depth-1] = xm
-                stk_xs[depth-1] = xsm
+                # Subdivide → push midpoint (label 210)
+                i += 1
+                stk_e[i] = stk_e[i-1]
+                stk_xs[i] = stk_xs[i-1]
+                stk_e[i-1] = xm
+                stk_xs[i-1] = xsm
+                continue  # go back to label 125
             end
         end
-        # Accept the remaining point (e_lo was the start)
-        push!(result, e_lo)
+        # i == 1: stack has one point, go get next Bragg edge (label 120)
     end
-    push!(result, emax)
 
-    # Add boundary: sigfig(emax, 7, +1)
-    push!(result, round_sigfig(emax, 7, 1))
+    # Output remaining stack point
+    if i >= 1
+        push!(result, stk_e[i])
+    end
+
     sort!(unique!(result))
     return result
+end
+
+# Backward-compatible 4-arg signature (calcem_grid ignored, matching Fortran coh)
+function build_thermal_grid(bragg::BraggData, input_grid::AbstractVector{Float64},
+                            calcem_grid::AbstractVector{Float64}, emax::Float64;
+                            tol::Float64=0.05)
+    build_thermal_grid(bragg, input_grid, emax; tol=tol)
 end
 
 # ---- Incoherent elastic (iel(), thermr.f90:1244-1425) ----
