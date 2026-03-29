@@ -144,28 +144,27 @@ function run_t01()
     # === THERMR 2: S(α,β) from tape26 ===
     sab = NJOY.read_mf7_mt4("/home/tobiasosborne/Projects/NJOY.jl/njoy-reference/tests/resources/t322", 1065, 296.0)
 
-    # Read oracle grid for MT=229/230 (temporary — should come from build_thermal_grid)
-    ref_lines = readlines("/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/after_thermr_2.pendf")
-    oracle_e = Float64[]
-    in_sec = false; hdr = 0
-    for line in ref_lines
-        length(line) < 75 && continue
-        p = rpad(line, 80)
-        mf = NJOY._parse_int(p[71:72]); mt = NJOY._parse_int(p[73:75])
-        mat = NJOY._parse_int(p[67:70])
-        if mf == 3 && mt == 229 && mat > 0
-            if !in_sec; in_sec = true; hdr = 0; end
-            hdr += 1; hdr <= 3 && continue
-            for j in 1:3
-                estr = p[(j-1)*22+1:(j-1)*22+11]
-                all(c -> c == ' ', estr) && continue
-                push!(oracle_e, NJOY.parse_endf_float(estr))
-            end
-        elseif in_sec && (mf != 3 || mt != 229); break; end
-    end
+    # Build Bragg data first (needed for thermal grid)
+    bragg = NJOY.build_bragg_data(
+        a=2.4573e-8, c=6.7e-8, sigma_coh=5.50, A_mass=12.011,
+        natom=1, debye_waller=2.1997, emax=emax_thermr, lat=1)
 
-    # MT=229: Use calcem's total XS (sigl integration), interpolated to oracle grid
-    # Fortran uses terp(esi,xsi,nne,enow,nlt=2) = ORDER-2 Lagrangian (QUADRATIC)
+    # Build thermal grid using BROADENED elastic grid (Fortran coh reads from iold = broadened)
+    # NOT the reconr grid — broadr thins some points.
+    # Fortran iold also contains emax and sigfig(emax,7,+1) as boundary points
+    # (from thermr's grid preparation), needed for the 5-point sliding window.
+    broadened_grid = sort(unique(vcat(
+        Float64[e for e in b_e if e <= emax_thermr],
+        [emax_thermr, NJOY.round_sigfig(emax_thermr, 7, 1)])))
+    thermal_e = NJOY.build_thermal_grid(bragg, broadened_grid, emax_thermr; tol=0.05)
+    # Fortran tpend adds emax and sigfig(emax,7,+1) as final grid points (NP = ne+1)
+    push!(thermal_e, emax_thermr)
+    push!(thermal_e, NJOY.round_sigfig(emax_thermr, 7, 1))
+    push!(thermal_e, 2e7)  # Fortran also includes 2e7 as sentinel
+    sort!(unique!(thermal_e))
+    println("Thermal grid: $(length(thermal_e)) pts (Fortran coh: 569)")
+
+    # MT=229: Use calcem's total XS (sigl integration), interpolated to thermal grid
     println("Computing calcem for SAB...")
     esi_sab, xsi_sab, mf6_229 = NJOY.calcem(sab, 296.0, emax_thermr, 8; tol=0.05)
     # Order-5 Lagrangian interpolation matching Fortran terp(esi,xsi,nne,enow,nlt=5)
@@ -217,22 +216,18 @@ function run_t01()
         return s
     end
     mt229_xs = Float64[]
-    for e in oracle_e
+    for e in thermal_e
         if e > emax_thermr; push!(mt229_xs, 0.0)
         else
             push!(mt229_xs, terp_lagrange(esi_sab, xsi_sab, e, 5))
         end
     end
-    extra_mf3[229] = (oracle_e, mt229_xs)
+    extra_mf3[229] = (thermal_e, mt229_xs)
 
-    # MT=230: Bragg edges on oracle grid — sigma_coh=5.50 (Fortran gr4), DW=2.1997 at 296K
-    # natom=1 from T01 input card (Fortran sigcoh: scoh=gr4/natom)
-    bragg = NJOY.build_bragg_data(
-        a=2.4573e-8, c=6.7e-8, sigma_coh=5.50, A_mass=12.011,
-        natom=1, debye_waller=2.1997, emax=emax_thermr, lat=1)
+    # MT=230: Bragg edges on thermal grid — sigma_coh=5.50 (Fortran gr4), DW=2.1997 at 296K
     # Round to 7 sigfigs: Fortran sigcoh outputs 7-sigfig precision (a11 format)
-    mt230_xs = [e > emax_thermr ? 0.0 : NJOY.round_sigfig(NJOY.bragg_edges(e, bragg), 7, 0) for e in oracle_e]
-    extra_mf3[230] = (oracle_e, mt230_xs)
+    mt230_xs = [e > emax_thermr ? 0.0 : NJOY.round_sigfig(NJOY.bragg_edges(e, bragg), 7, 0) for e in thermal_e]
+    extra_mf3[230] = (thermal_e, mt230_xs)
 
     # === MF6 ===
     esi_fg, xsi_fg, mf6_221 = NJOY.calcem_free_gas(A, 296.0, 1.2, 8; sigma_b=sb, tol=0.05)
