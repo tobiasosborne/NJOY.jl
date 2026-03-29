@@ -173,25 +173,35 @@ function run_t01()
         n = length(xs)
         n == 0 && return 0.0
         il = min(il, n)
+        n == il && return _lagrange_eval(xs, ys, 1, il, arg)
         il2 = il ÷ 2
         iadd = il % 2
-        ilow = il2 + 1; ihi = n - il2 - iadd
-        # Check boundaries
+        # Increasing sequence (Fortran lines 1459-1468)
+        ilow = il2 + 1
+        ihi = n - il2 - iadd
+        iadd = 0  # Fortran line 1468: overwrite for increasing
+        iuseh = n - il + 1
+        ibeg = ilow + 1
+        iend = ihi - 1
+        last = iend - il2 + 1
+        # Boundary checks (Fortran lines 1481-1498)
         abs(arg - xs[ilow]) < 1e-10 * abs(arg) && return ys[ilow]
-        if arg <= xs[ilow]; l = 1
-        elseif abs(xs[ihi] - arg) < 1e-10 * abs(arg); return ys[ihi]
-        elseif arg >= xs[ihi]; l = n - il + 1
-        else
-            # Search for bracketing index
-            m = ilow + 1
-            for k in (ilow+1):ihi
-                abs(xs[k] - arg) < 1e-10 * abs(arg) && return ys[k]
-                if xs[k] > arg; m = k; break; end
+        arg <= xs[ilow] && return _lagrange_eval(xs, ys, 1, il, arg)
+        abs(xs[ihi] - arg) < 1e-10 * abs(arg) && return ys[ihi]
+        arg >= xs[ihi] && return _lagrange_eval(xs, ys, iuseh, il, arg)
+        # Search (Fortran lines 1500-1520)
+        l = last
+        for m in ibeg:iend
+            abs(xs[m] - arg) < 1e-10 * abs(arg) && return ys[m]
+            if xs[m] > arg
+                l = m - il2 + iadd
+                break
             end
-            l = m - il2 + iadd
         end
         l = max(1, min(l, n - il + 1))
-        # Lagrangian interpolation
+        return _lagrange_eval(xs, ys, l, il, arg)
+    end
+    function _lagrange_eval(xs, ys, l, il, arg)
         s = 0.0
         for i in 1:il
             p = 1.0; pk = 1.0
