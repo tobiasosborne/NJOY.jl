@@ -762,6 +762,9 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
     # State variables matching Fortran SAVE (lines 1895-1896)
     en = 0.0; damn = 0.0
     el = 0.0; daml = 0.0
+    # Ebar state: cn = ebar/E fraction, interpolated same as dame (lines 1985,2007)
+    cn_val = 0.0; cl_val = 0.0
+    ebar_out = zeros(Float64, ne)
 
     # MF4 energy grid = discontinuity boundaries for hgtfle
     mf4_es = mf4_data[1]
@@ -837,8 +840,12 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
             if en > el
                 f = (ee - el) / (en - el)
                 dame_out[ie] = daml + f * (damn - daml)
+                # Ebar: terp1(el,cl,en,cn,ee) → ce, then ebar = ee*ce (line 2007-2008)
+                ce = cl_val + f * (cn_val - cl_val)
+                ebar_out[ie] = ee * ce
             else
                 dame_out[ie] = damn
+                ebar_out[ie] = ee * cn_val
             end
             continue
         end
@@ -846,6 +853,7 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
         # Need new bracket point (lines 1950-1955)
         el = en
         daml = damn
+        cl_val = cn_val
         e = step * el
 
         # Find next MF4 discontinuity energy (enext from hgtfle)
@@ -866,12 +874,13 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
             e = ee  # first call: el=0
         end
 
+        # Get fl coefficients with hgtfle stale behavior (needed for both dame and ebar)
+        fl = _hgtfle_get_fl(e)
+
         # Evaluate damage at e (Fortran disbar lines 1956-2003)
         if e < enx * (1.0 - small)
             damn = 0.0
         else
-            # Get fl coefficients with hgtfle stale behavior
-            fl = _hgtfle_get_fl(e)
             if thresh > 0
                 # Inelastic: r from threshold (Fortran lines 1957-1963)
                 if thresh >= e * (1.0 - small)
@@ -885,17 +894,25 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
                 damn = _disbar_damage_fl(e, A, Z, 1.0, fl; E_d=E_d)
             end
         end
+        # Compute cn = ebar/E fraction (Fortran disbar lines 1975,1983-1985)
+        r_cn = thresh > 0 ? (thresh >= e * (1.0 - small) ? 0.0 : sqrt(1.0 - thresh / e)) : 1.0
+        b_cn = r_cn * A  # b = r * sqrt(awr/arat) = r * A for neutron
+        wbar_cn = length(fl) >= 2 ? fl[2] : 0.0
+        cn_val = (1.0 + 2.0 * b_cn * wbar_cn + b_cn * b_cn) * afact
         en = e
 
         # Interpolate to ee
         if en > el
             f = (ee - el) / (en - el)
             dame_out[ie] = daml + f * (damn - daml)
+            ce = cl_val + f * (cn_val - cl_val)
+            ebar_out[ie] = ee * ce
         else
             dame_out[ie] = damn
+            ebar_out[ie] = ee * cn_val
         end
     end
-    return dame_out
+    return dame_out, ebar_out
 end
 
 "Linear interpolation of mu_bar from MF4 (energies, values) table."
@@ -944,25 +961,29 @@ function compute_kerma(pendf::PointwiseMaterial;
     ne = length(pendf.energies)
     ed = isnothing(E_d) ? displacement_energy(Z) : E_d
 
-    # Precompute elastic damage vector matching Fortran disbar stepping scheme
-    _el_dame_vec = if Z > 0 && mf4_legendre_data !== nothing
+    # Precompute elastic damage+ebar vector matching Fortran disbar stepping scheme
+    _el_dame_vec, _el_ebar_vec = if Z > 0 && mf4_legendre_data !== nothing
         build_disbar_damage_vector(pendf.energies, awr, Float64(Z), mf4_legendre_data;
                                     E_d=ed)
     else
-        nothing
+        nothing, nothing
     end
 
-    # Precompute inelastic damage vectors — Fortran disbar uses the SAME stepping
+    # Precompute inelastic damage+ebar vectors — Fortran disbar uses the SAME stepping
     # state machine for ALL discrete MTs (51-90), not direct evaluation.
     # Each MT gets its own disbar instance with per-MT save variables.
+    # The ebar uses stepped cn interpolation matching Fortran (lines 1985,2007-2008).
     _inel_dame_vecs = Dict{Int, Vector{Float64}}()
+    _inel_ebar_vecs = Dict{Int, Vector{Float64}}()
     if Z > 0 && mf4_legendre_all !== nothing
         for mt in keys(mf4_legendre_all)
             Q = get(Q_values, mt, 0.0)
             thresh_mt = (awr + 1.0) / awr * abs(Q)
-            _inel_dame_vecs[mt] = build_disbar_damage_vector(
+            dame_v, ebar_v = build_disbar_damage_vector(
                 pendf.energies, awr, Float64(Z), mf4_legendre_all[mt];
                 E_d=ed, thresh=thresh_mt)
+            _inel_dame_vecs[mt] = dame_v
+            _inel_ebar_vecs[mt] = ebar_v
         end
     end
 
@@ -1031,13 +1052,19 @@ function compute_kerma(pendf::PointwiseMaterial;
                 # q0=0 default, q0=t (QM from MF3 HEAD) if LR≠0 and LR≠31
                 lr = get(lr_values, mt, Int32(0))
                 q0 = (lr != 0 && lr != 31) ? get(qm_values, mt, 0.0) : 0.0
-                # mu_bar from MF4/MT for this reaction (Fortran disbar wbar=fl(2))
-                wbar = if mf4_mubar_all !== nothing
-                    _interp_mubar(get(mf4_mubar_all, mt, (Float64[0.0,2e7], Float64[0.0,0.0])), E)
+                # Use stepped ebar from disbar state machine (matching Fortran cn
+                # interpolation at 1.1x bracket endpoints, lines 1985,2007-2008)
+                if haskey(_inel_ebar_vecs, mt)
+                    ebar = _inel_ebar_vecs[mt][ie]
                 else
-                    0.0
+                    # Fallback: direct evaluation for MTs without MF4 data
+                    wbar = if mf4_mubar_all !== nothing
+                        _interp_mubar(get(mf4_mubar_all, mt, (Float64[0.0,2e7], Float64[0.0,0.0])), E)
+                    else
+                        0.0
+                    end
+                    ebar = discrete_inelastic_ebar(E, Q, awr; mu_bar=wbar)
                 end
-                ebar = discrete_inelastic_ebar(E, Q, awr; mu_bar=wbar)
                 h = (E + q0 - ebar) * sigma
                 inelast[ie] += h
                 if Z > 0
