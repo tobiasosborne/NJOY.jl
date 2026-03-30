@@ -1550,7 +1550,7 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 30, as of 2026-03-30)**:
+**Expected results (Phase 32, as of 2026-03-30)**:
 ```
 tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
 MATCH: 41 / 41 sections          ← ALL sections match ✓
@@ -1562,19 +1562,20 @@ MT=103: DATA 26/26 PERFECT       hdr=3/3
 MT=230: DATA 191/191 PERFECT     hdr=3/3
 MT=  2: DATA 306/307 (99.7%)     hdr=3/3  ← 1 line ±1 ULP sigma1
 MT=221: DATA 47/49 (95.9%)       hdr=3/3  ← 2 lines emax boundary
-MT=229: DATA 29/191 (15.2%)      hdr=3/3  ← calcem XS ±1 ULP
+MT=229: DATA 30/191 (15.7%)      hdr=3/3  ← calcem XS ±1 ULP
 MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1
-MT=301: DATA 63/307 (20.5%)      hdr=3/3  ← ±1 ULP from broadened XS cascade
-MT=444: DATA 20/307 (6.5%)       hdr=3/3  ← ±1 ULP + disbar stepping residual
-Total data: 1641 / 2386 (68.8%)
+MT=301: DATA 130/307 (42.3%)     hdr=3/3  ← stepped ebar fixed, ±1 ULP remains
+MT=444: DATA 57/307 (18.6%)      hdr=3/3  ← stale-fl + reconr MF3 fixes
+Total data: 1728 / 2386 (72.4%)
 ```
 
-**Tolerance test (full-line, including sequence numbers)**:
+**Tolerance test**:
 ```
-rel_tol=1e-9: 1571 lines fail (4.8%) — includes 487 MF12/MF13 seq-num cosmetic diffs
-rel_tol=1e-7: 1570 lines fail (4.8%)
-rel_tol=1e-4:  713 lines fail (2.2%) — physics-only: 226
-rel_tol=1e-3:  585 lines fail (1.8%) — physics-only:  98
+rel_tol=1e-9: 652 lines fail (2.0%)
+rel_tol=1e-7: 652 lines fail (2.0%)
+rel_tol=1e-5: 235 lines fail (0.7%)
+rel_tol=1e-4: 148 lines fail (0.4%)
+rel_tol=1e-3:  52 lines fail (0.2%)
 ```
 
 **Physics failure breakdown at 1e-3 (98 lines)**:
@@ -1887,7 +1888,7 @@ Total data exact: 1658/2386 (69.5%) — was 1641 (68.8%)
 - `src/processing/heatr.jl` — inelastic disbar stepping in `build_disbar_damage_vector` + `compute_kerma` precompute (Traps 97-98)
 - `test/validation/t01_pipeline.jl` — path fix (old `/home/tobias/` → `/home/tobiasosborne/`)
 
-**How to verify this session's fixes:**
+**How to verify Phase 31 fixes:**
 ```bash
 rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
@@ -1896,24 +1897,133 @@ julia --project=. test/validation/t01_pipeline.jl
 # Expected: 725 at 1e-9, 191 at 1e-4, 74 at 1e-3
 ```
 
----
-
-### Remaining MT=444 analysis — what the NEXT AGENT should investigate
-
-**The 0.28% worst MT=444 error at E=10.45 MeV**: After both fixes, the elastic damage brackets match Fortran exactly. The discrete inelastic MTs (51-68) now use the stepping state machine. The remaining error comes from:
-
-1. **Evaporation damage (MT=91)**: `evaporation_damage` uses an adaptive convergence stack (Fortran `anadam` lines 2508-2598) with 4-point GL at each outgoing energy. Julia's implementation may have subtle convergence differences. At E=10.45 MeV, MT=91 contributes dame=179 (Fortran) — small compared to MT=2 (18708) and MT=51 (10689), but the relative error could be large.
-
-2. **Elastic stale fl**: The `hgtfle` zero-padding was confirmed, but the `disbar` save-variable `fl(65)` array may still retain stale values between bracket evaluations IF `hgtfle` returns a shorter `nle` than the disbar loop uses. Agent 1 confirmed `nle=nlmax=max(nlo,nhi)` from hgtfle, but the `nld` in disbar is set BEFORE calling hgtfle (line 1907: `nld=60`) and hgtfle OVERWRITES it. If `nld` was previously set to a larger value from a prior hgtfle call, the GL loop at lines 1992-2001 iterates `nld` times (using the new, possibly smaller value). Need to verify: does disbar's `nld` persist via `save` or is it local? **Line 1840**: `nld` is declared as `integer::nld` (local, NOT in the save statement). So nld is reset to 60 on each normal entry (line 1966). This means the GL loop always uses the nld returned by the current hgtfle call. The stale-fl hypothesis is definitively dead for elastic.
-
-3. **MF4 Legendre interpolation precision**: At 3 MeV, Julia's zero-padded interpolation gives dame=29427 vs Fortran's 29431 (0.013%). This is from the zero-padding difference at exact MF4 grid points where NL decreases. Small but contributes ~4 eV-barn per bracket near these transitions.
-
-**DO NOT attempt the stale-fl fix again.** It was thoroughly disproved. Focus on:
-- MT=91 evaporation damage (compare Julia vs Fortran at specific energies via gdb)
-- The 3+1 agent pattern is PROVEN EFFECTIVE — use it for every investigation
-
-**Trap 99 (INVESTIGATION)**: `nld` in Fortran disbar is a LOCAL variable (line 1840), NOT in the save statement (lines 1895-1896). It is set to 60 at line 1907/1966 before each hgtfle call, then overwritten by hgtfle. The GL loop (line 1992) iterates `nld` times using the hgtfle-returned value. There is NO stale nld. This definitively kills the stale-fl hypothesis.
+**Trap 99 (CORRECTED)**: `nld` in Fortran disbar is a LOCAL variable (line 1840), NOT in the save statement. BUT the stale-fl hypothesis for `nld` is different from the stale-fl issue in `hgtfle`'s `flo` array. See Phase 32 Trap 102 for the REAL stale-fl bug in hgtfle.
 
 **Trap 100 (CRITICAL WARNING)**: The `test/validation/t01_pipeline.jl` script has HARDCODED absolute paths. These were updated from `/home/tobias/` to `/home/tobiasosborne/` in this session. If running on a different machine, ALL 5 path references must be updated. Consider using `@__DIR__` or relative paths in a future cleanup.
 
 **Trap 101 (CRITICAL WARNING)**: When implementing the inelastic disbar state machine, the threshold condition MUST be `thresh >= e * (1.0 - small)` (matching Fortran line 1958), NOT `e < thresh * (1.0 - small)`. These are NOT equivalent near the boundary due to floating-point rounding. The wrong condition caused 2.6% errors at MT=51 threshold (E=4.98 MeV). Always read the Fortran (Rule 3) and match the exact comparison direction.
+
+---
+
+### Phase 32: HEATR deep grind — 5 bugs fixed, 725→652 at 1e-9
+
+**WARNING TO NEXT AGENT: THIS SESSION CORRECTED MULTIPLE PREVIOUS WRONG CLAIMS. READ EVERY TRAP CAREFULLY. RULE 6 IS NOT OPTIONAL.**
+
+**Previous claim "stale-fl hypothesis definitively dead" (Phase 31) was WRONG.** Phase 31 investigated whether `nld` (number of Legendre coefficients) was stale — correctly concluded it is NOT stale (local variable). But the REAL stale-fl issue is in `hgtfle`'s `flo` SAVE array: the SLIDE at label 120 (line 4333) only copies `nhi` values from `fhi` to `flo`, leaving higher-order `flo` coefficients STALE from previous brackets. This is a DIFFERENT mechanism than the `nld` stale hypothesis. Confirmed via gdb.
+
+**Previous claim "MT=301 cascades from sigma1 ULP" (Phase 31) was WRONG.** The sigma1 ULP is ~2e-6 relative, but MT=301 worst error was 0.27%. The REAL root cause was the discrete inelastic ebar computation using direct evaluation instead of Fortran's stepped cn interpolation (see Bug 4 below).
+
+**5 bugs found and fixed (all via 3+1 agent pattern + Fortran gdb diagnostics):**
+
+1. **MF2/MT=151 EH value (FIXED — Trap 102)**: Julia wrote EH from the ENDF range data (e.g. 1e5 for C-nat LRU=0). Fortran reconr recout uses `eresr`: resolved range EH for materials with LRU=1, `ehigh=2e7` for LRU=0-only. Fix: check for resolved ranges, use `ehigh=2e7` when all ranges are LRU=0. Verified across T01/T02/T08/T34/T45 oracles.
+
+2. **MF1/MT=451 directory NC values (FIXED — Traps 103-104)**: Five NC values differed. Two root causes:
+   - **MF3 thermr sections**: Fortran tpend NC formula is `3 + (ne+2)/3` (Fortran integer division) where `ne` is the coh/elastic grid count BEFORE tpend adds sentinel points. For T01 thermr2: ne=569 (from coh), NP=571 (after sentinels). `(569+2)/3 = 571/3 = 190` in Fortran → NC=193. Julia was computing `3 + cld(571, 3) = 194`. Fix: pass `thermr_coh_ne` parameter to `write_full_pendf`.
+   - **MF6 sections**: Fortran `ncds` undercounts TAB1 yield by 1 (assumes packed interp+data on 1 line, but output has 2 separate lines). Fix: subtract 1 from MF6 NC.
+   - **MF6 stubs**: Fortran `ncdse=3` (same undercount). Fix: hardcode NC=3.
+
+3. **hgtfle stale-fl in damage GL integration (FIXED — Trap 105)**: The Fortran `hgtfle` subroutine (heatr.f90 lines 4223-4411) maintains SAVE arrays `flo(65)` and `fhi(65)`. The SLIDE at label 120 (line 4333): `do i=1,nhi; flo(i)=fhi(i); enddo` only copies `nhi` values. When NL decreases at a grid boundary (e.g. NL=7→5 at E=3.0 MeV for C-12), `flo[6]` retains its stale value from the previous bracket. This stale coefficient participates in the subsequent GL integration via `nlmax = max(nlo, nhi)`. C-12 MF4/MT=2 has 4 NL decrease transitions (E=2.06, 3.0, 5.0, 6.8 MeV). Julia's `_interp_legendre` correctly zero-pads, giving fl[6]=0 instead of the stale value. Fix: implemented persistent hgtfle state via closure in `build_disbar_damage_vector`, matching the Fortran SLIDE partial-copy behavior.
+
+   **Verified via gdb**: Patched Fortran heatr.f90 disbar with `write(*,*)` at the GL integration output. At E=3.0 MeV: Fortran fl[6]=-0.00217 (stale from 2.98 MeV bracket), Julia now matches.
+
+   **Impact**: MT=444 exact matches +4 (237→233), 1e-9 failures −2.
+
+   **CRITICAL: Phase 31's claim "stale-fl hypothesis definitively dead" was about a DIFFERENT variable (nld) than what was actually stale (flo array). Rule 6 applies: be skeptical of previous analysis.**
+
+4. **Non-broadened MF3 sigma interpolation for heatr (FIXED — Trap 106)**: The Julia pipeline interpolated raw ENDF MF3 TAB1 data for non-broadened MTs (51-91, 107). The Fortran heatr reads from the PENDF (reconr output), which has threshold-adjusted energies (`thrxx = sigfig(thrx, 7, +1)`) and pseudo-threshold zeros. For MT=51 at threshold E=4.812123 MeV: raw MF3 interpolation gave sigma=2.59e-5, reconr PENDF has sigma=0.0 (threshold shift creates a zero at the adjusted threshold). Fix: use `_get_legacy_section` (reconr-processed data) for non-broadened MT cross sections.
+
+   **Found via 3+1 agent pattern**: Agent 1 patched Fortran nheat, found sigma=0 at threshold. Agent 2 ran Julia diagnostic, found sigma=2.59e-5. Agent 3 compared side-by-side.
+
+   **Impact**: MT=444 exact matches +2 (233→233), 1e-9 failures −2.
+
+5. **Discrete inelastic ebar: stepped cn interpolation (FIXED — Trap 107, MAJOR)**: Julia's `compute_kerma` computed `discrete_inelastic_ebar(E, Q, A; mu_bar)` DIRECTLY at every broadened grid energy. The Fortran `disbar` computes `cn = (1 + 2*b*wbar + b²)*afact` at 1.1x-stepped bracket endpoints (using hgtfle MF4 interpolation) and LINEARLY INTERPOLATES cn to each query energy via `terp1`. The cn fraction varies with energy through `r = sqrt(1-thresh/E)`, so direct evaluation at each energy differs from the bracket interpolation by up to 0.27%.
+
+   **Found via 3+1 agent pattern**: Agent 1 patched Fortran nheat to print per-MT heating at E=11.5 MeV. Agent 2 ran Julia diagnostic. Agent 3 read the Julia code. Comparison revealed MT=51 ebar diff of 7400 eV (0.12%), MT=53 ebar diff of 19000 eV (1.9%), all from the different ebar computation methods.
+
+   Fix: `build_disbar_damage_vector` now returns BOTH `dame_out` and `ebar_out` vectors. The cn computation uses the same hgtfle stale-fl state and bracket stepping as damage. `compute_kerma` uses `_inel_ebar_vecs[mt][ie]` for discrete inelastic MTs (51-90) instead of direct `discrete_inelastic_ebar`.
+
+   **Impact**: MT=301 worst error halved (2.71e-3 → 1.33e-3). MT=301 exact matches doubled (65 → 130 out of 307). 1e-9 failures −63. **This was the single largest fix.**
+
+**T01 results after Phase 32:**
+
+```
+Structural: 41/41 sections, 32962/32962 lines — EXACT MATCH
+rel_tol=1e-9: 652 fail (was 725 at start, was 1072 at Phase 31 start)
+rel_tol=1e-7: 652 fail
+rel_tol=1e-5: 235 fail (was 311)
+rel_tol=1e-4: 148 fail (was 191)
+rel_tol=1e-3:  52 fail (was 74)
+Total data exact: 1728/2386 (72.4%) — was 1658 (69.5%)
+```
+
+**Per-section diff breakdown (657 total diffs, down from 828):**
+
+| Section | Diffs | Worst | Change | Root cause |
+|---------|-------|-------|--------|------------|
+| MT=444 | 233 | 2.77e-3 | −4 | Stale-fl fix helped at NL transitions |
+| MT=301 | 164 | 1.33e-3 | −63 | Stepped ebar fixed the ebar computation |
+| MF3/MT=229 | 159 | 5.27e-4 | 0 | calcem XS interpolation (unchanged) |
+| MT=1 | 46 | 2.31e-6 | 0 | sigma1 ULP (IRREDUCIBLE) |
+| MF6/MT=229 | 36 | 2.11e+0 | 0 | 2 near-zero kernel + ±1 ULP cosines |
+| MF6/MT=221 | 17 | 7.71e-7 | 0 | Free gas cosine ULP |
+| MT=221 | 1 | 9.17e-6 | 0 | emax boundary |
+| MT=2 | 1 | 4.81e-7 | 0 | sigma1 ULP (IRREDUCIBLE) |
+
+**Files changed**:
+- `src/processing/pendf_writer.jl` — MF2 EH, MF1 NC directory (Traps 102-104)
+- `src/processing/heatr.jl` — hgtfle stale-fl, stepped ebar (Traps 105, 107)
+- `test/validation/t01_pipeline.jl` — reconr MF3 for heatr, thermr_coh_ne param (Trap 106)
+
+**How to verify Phase 32 fixes:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+# Expected: 41/41 sections, 32962 lines, 1728/2386 data exact
+# Then run tolerance test:
+# Expected: 652 at 1e-9, 148 at 1e-4, 52 at 1e-3
+```
+
+**Trap 102 (NEW — FIXED)**: MF2/MT=151 EH value: Fortran reconr recout uses `eresr` — resolved range EH for materials with LRU=1 resonances, `ehigh=2e7` for LRU=0-only materials. Julia was using `maximum(r.EH for r in iso.ranges)` which gives the ENDF range EH (can be < 2e7 for LRU=0). Verified: T01 (LRU=0) needs EH=2e7; T02 (LRU=1+2, resolved EH=200) needs EH=200; T08 (LRU=1, EH=70000) needs EH=70000.
+
+**Trap 103 (NEW — FIXED)**: Fortran tpend MF3 NC formula is `3 + (ne+2)/3` where `ne` is the value passed to tpend (the coh/elastic grid count BEFORE tpend adds sentinel points). For free gas (ne=NP): NC = `3 + (NP+2)/3`. For coh grid (ne=NP−2): NC = `3 + NP/3`. Fortran integer division means NC is 1 less than actual line count when NP is not divisible by 3 AND sentinels were added. This is a cosmetic bug in the Fortran tpend that must be reproduced.
+
+**Trap 104 (NEW — FIXED)**: Fortran `ncds` undercounts MF6 TAB1 yield by 1. The `tab1io` with nw=12 (NR=1, NP=2) writes 3 lines (CONT + interp + data), but ncds adds only 2 (line 1950). The output has 3 lines, but the directory NC says 2 fewer. For MF6 stubs, `ncdse=3` (same undercount: actual 4, NC says 3). Must reproduce to match.
+
+**Trap 105 (NEW — FIXED, CORRECTS Phase 31)**: The hgtfle stale-fl issue IS REAL — Phase 31 was wrong to declare it "definitively dead." The Phase 31 investigation checked whether `nld` (Legendre order count) was stale — it is NOT (local variable). But the `flo(65)` ARRAY in hgtfle IS stale: the SLIDE at label 120 only copies `nhi` values, leaving higher indices untouched. For C-12 at E=3.0 MeV (NL=7→5 transition): flo[6] retains the 2.98 MeV value (-0.00217) instead of 0. This causes 0.016% error in elastic damage at that energy. The fix uses a persistent closure state in `build_disbar_damage_vector` matching the Fortran SAVE arrays.
+
+**Trap 106 (NEW — FIXED)**: Non-broadened MT cross sections for heatr MUST use the reconr-processed data (`_get_legacy_section`), NOT raw ENDF MF3 interpolation. The reconr output has threshold-adjusted energies (`thrxx = sigfig(thrx, 7, +1)`) and pseudo-threshold zeros. At MT=51 threshold (4.812123 MeV): reconr PENDF has sigma=0, raw MF3 gives sigma=2.59e-5. The Fortran heatr reads from the PENDF.
+
+**Trap 107 (NEW — FIXED, MAJOR)**: The Fortran `disbar` computes ebar via the cn fraction at 1.1x-stepped bracket endpoints, then INTERPOLATES cn to query energies via `terp1`. Julia was computing `discrete_inelastic_ebar` DIRECTLY at every energy. The cn fraction `(1 + 2*b*wbar + b²)*afact` varies with energy through `r = sqrt(1-thresh/E)`, so direct evaluation differs from bracket interpolation by up to 0.27%. Fix: `build_disbar_damage_vector` now returns both `dame_out` and `ebar_out`, and `compute_kerma` uses the stepped ebar for discrete inelastic MTs.
+
+**Trap 108 (CRITICAL WARNING)**: Previous agents' diagnostic scripts often used APPROXIMATIONS (e.g., `wbar = 0.0  # approximate`) that DON'T match the actual pipeline computation. ALWAYS verify that diagnostic results match the pipeline output BEFORE drawing conclusions. The Phase 32 Julia agent computed h=3.623e5 for MT=53 at 11.5 MeV with wbar=0, but the actual pipeline (with MF4 mu_bar) gives a different value. This led to initially wrong ebar diff estimates.
+
+---
+
+### Remaining work — PRIORITIZED for next agent
+
+**CRITICAL RULES FOR THE NEXT AGENT:**
+1. **FOLLOW THE METHOD**: First diff → 3+1 agents → gdb diagnostic → fix → retest → repeat. IT WORKS. Every shortcut fails.
+2. **Rule 6 IS NOT OPTIONAL**: Verify EVERYTHING. This session proved Phase 31 wrong twice (stale-fl claim, sigma1 cascade claim). Previous agents' analysis has been wrong. Previous HANDOFF claims have been wrong. READ THE FORTRAN.
+3. **No quick fixes**: The hgtfle stale-fl fix took TWO attempts — the first attempt rewrote the entire state machine and REGRESSED. The successful fix changed ONLY the fl interpolation, keeping all bracket stepping untouched.
+4. **Bugs interlock**: Fixing one bug can expose another. The reconr MF3 fix revealed the ebar stepping issue. Always retest the full pipeline after each fix.
+5. **3+1 pattern**: Launch 3 RESEARCH subagents in parallel (Fortran reader, Julia reader, data comparator). Keep 1 slot for the Julia runner. NEVER run Julia in parallel (Rule 4).
+
+**Priority 1 — MT=301 remaining 164 diffs (worst 0.13%)**:
+The stepped ebar fix reduced worst from 0.27% to 0.13%. Remaining errors come from:
+- **Elastic ebar**: The Fortran disbar uses the SAME cn stepping for elastic (MT=2). Julia computes elastic heating via `elastic_heating_aniso(E, A, mu)` directly. Need to also step the elastic ebar.
+- **MT=91 evaporation ebar**: Uses `conbar` (Fortran), not `disbar`. Julia computes `evaporation_ebar` directly. May need stepping.
+- **MTs without MF4 data**: Discrete MTs 54-68, 91 fall through to direct ebar computation.
+
+**Priority 2 — MT=444 remaining 233 diffs (worst 0.28%)**:
+- **Elastic damage stepping**: Already uses the stepped state machine with stale-fl. The remaining 0.28% errors are at high energies (10+ MeV). Root cause unclear — likely FP accumulation in 64-pt GL or subtle MF4 interpolation differences.
+- **MT=91 evaporation damage**: Uses `evaporation_damage` (Fortran `anadam`). Adaptive convergence stack may have differences.
+- **Approach**: Find first diff for MT=444 above 1e-4. Patch Fortran disbar to print dame at that energy. Compare.
+
+**Priority 3 — MF3/MT=229 remaining 159 diffs (worst 0.05%)**:
+calcem XS interpolation. The 94-point calcem egrid values are interpolated to the 571-point thermal grid via order-5 Lagrangian (`terp_lagrange`). The diffs are ±1 ULP from the interpolation precision.
+
+**Priority 4 — MF6/MT=229 remaining 36 diffs (worst 211%)**:
+2 lines are near-zero kernel (sigma≈3.8e-10, physically insignificant). 4 are ±1 ULP cosines from sigl FP accumulation. 30 are at various IEs.
+
+**Priority 5 — MT=1 remaining 46 diffs (worst 2.3e-6)**:
+sigma1 broadening ULP. Same class as reconr T34 irreducible diffs. These cascade to MT=301 (~46 diffs at 2e-6) and MT=444 (~46 diffs at 2e-7). IRREDUCIBLE without matching sigma1 FP accumulation order exactly.
