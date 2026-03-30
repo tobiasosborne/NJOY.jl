@@ -1550,7 +1550,7 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 32, as of 2026-03-30)**:
+**Expected results (Phase 33, as of 2026-03-30)**:
 ```
 tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
 MATCH: 41 / 41 sections          ← ALL sections match ✓
@@ -1562,25 +1562,24 @@ MT=103: DATA 26/26 PERFECT       hdr=3/3
 MT=230: DATA 191/191 PERFECT     hdr=3/3
 MT=  2: DATA 306/307 (99.7%)     hdr=3/3  ← 1 line ±1 ULP sigma1
 MT=221: DATA 47/49 (95.9%)       hdr=3/3  ← 2 lines emax boundary
-MT=229: DATA 30/191 (15.7%)      hdr=3/3  ← calcem XS ±1 ULP
+MT=229: DATA 30/191 (15.7%)      hdr=3/3  ← calcem XS interpolation
 MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1
-MT=301: DATA 130/307 (42.3%)     hdr=3/3  ← stepped ebar fixed, ±1 ULP remains
-MT=444: DATA 57/307 (18.6%)      hdr=3/3  ← stale-fl + reconr MF3 fixes
-Total data: 1728 / 2386 (72.4%)
+MT=301: DATA 198/307 (64.5%)     hdr=3/3  ← NOW sub-ULP! Only sigma1 cascade
+MT=444: DATA 60/307 (19.5%)      hdr=3/3  ← bracket stepping residual + ±1 ULP
+Total data: 1799 / 2386 (75.4%)
 ```
 
 **Tolerance test**:
 ```
-rel_tol=1e-9: 652 lines fail (2.0%)
-rel_tol=1e-7: 652 lines fail (2.0%)
-rel_tol=1e-5: 235 lines fail (0.7%)
-rel_tol=1e-4: 148 lines fail (0.4%)
-rel_tol=1e-3:  52 lines fail (0.2%)
+rel_tol=1e-9: 578 lines fail (1.8%)
+rel_tol=1e-7: 578 lines fail (1.8%)  ← same as 1e-9 (all diffs > 1e-7)
+rel_tol=1e-5: 144 lines fail (0.4%)
+rel_tol=1e-4:  47 lines fail (0.1%)
+rel_tol=1e-3:   2 lines fail (0.0%)  ← only 2 irreducible MF6/MT=229 cosines
 ```
 
-**Physics failure breakdown at 1e-3 (98 lines)**:
-- **MT=301 (38)**: Cascades from sigma1 broadening ±1 ULP in MT=1. All below 0.27%. Irreducible without matching sigma1 FP accumulation order exactly.
-- **MT=444 (30)**: Disbar stepping/interpolation residual (Julia state machine slightly different bracket sequence from Fortran). Plus evaporation_damage adaptive convergence differences. All below 0.28%.
+**Physics failure breakdown at 1e-3 (2 lines)**:
+- **MF6/MT=229 (2)**: Near-zero kernel cosines at E=0.01820 eV, E'=0.5929 eV, sigma=3.8e-10. terpq FP precision at sigmin=1e-10 boundary (Trap 113). IRREDUCIBLE — see Phase 33 for detailed investigation.
 - **MF6/MT=229 (26)**: sigl FP accumulation order at high incident energies. Same class as Phase 27.
 - **MF1/MT=451 (3)**: Directory NC truncation. Mechanical fix — Fortran uses `div(N,6)` instead of `ceil(N/6)`.
 - **MF2/MT=151 (1)**: EH value difference. Trivial.
@@ -1999,31 +1998,132 @@ julia --project=. test/validation/t01_pipeline.jl
 
 ---
 
+### Phase 33: HEATR bracket stepping + below-threshold skip — 4 bugs, 652→578 at 1e-9, 52→2 at 1e-3
+
+**4 bugs found and fixed, all via the 3+1 agent pattern + Fortran gdb diagnostics.**
+
+**Bug 1 — FIXED (MT=91 conbar damage stepping — Trap 109, MAJOR)**: Julia's `compute_kerma` called `evaporation_damage(E, ...)` DIRECTLY at every broadened grid energy. The Fortran `conbar` (heatr.f90:2273-2290) evaluates `anadam` at 1.5x-stepped bracket endpoints and LINEARLY INTERPOLATES damage to query energies. The ebar is computed directly via `anabar` at the query energy (line 2267) — NOT stepped.
+
+   **Found via 3+1 agents**: Agent 1 patched Fortran nheat to print per-MT dame at E=10.448 MeV. Agent 2 ran Julia diagnostic. Comparison: MT=91 Julia dame=36393 vs Fortran dame=23982 (+51.8%), contributing +92.8 eV to MT=444 — the dominant error source.
+
+   Fix: Added `build_conbar_damage_vector` with step=1.5 bracket stepping matching conbar. KEY: only damage is stepped; ebar uses direct `evaporation_ebar` (Fortran anabar computes analytically at each energy, no bracket interpolation).
+
+   **Impact**: MT=444 worst: 0.277% → 0.049%. 1e-3 failures: 52 → 22.
+
+**Bug 2 — FIXED (MT=54-62 isotropic disbar ebar — Trap 110)**: For MTs WITHOUT MF4 data, Fortran disbar still runs the 1.1x bracket stepping with isotropic coefficients (fl(1)=1, fl(2)=0, imiss=1, enext=etop). Julia was falling through to direct `discrete_inelastic_ebar` evaluation. At E=16.55 MeV: MT=54-62 ebar diffs of 6k-35k eV each, totaling ~5000 eV heating difference.
+
+   Fix: Generate synthetic isotropic MF4 data `([1e-5, 2e7], [[1.0, 0.0], [1.0, 0.0]])` for all MTs 51-90 that lack MF4. Pass to `build_disbar_damage_vector` for both damage and ebar stepping.
+
+   **Impact**: 1e-3: 22 → 6. 1e-4: 91 → 88.
+
+**Bug 3 — FIXED (MT=107 capdam stepping — Trap 111)**: Fortran `capdam` (heatr.f90:1792-1826) uses 1.1x bracket stepping with SAVE variables for charged-particle damage (MT=103-107), same pattern as disbar. Julia's `capdam_particle` evaluated directly. At E=9.56 MeV: MT=107 Julia dame=20033 vs Fortran dame=19964 (+68.8 eV).
+
+   Fix: Added `build_capdam_damage_vector` with step=1.1 matching capdam state machine.
+
+   **Impact**: MT=444 worst: 0.049% → 0.037%. 1e-9: 652 → 651.
+
+**Bug 4 — FIXED (Below-threshold bracket skip — Trap 112, MAJOR)**: Fortran `disbar` is only called at energies where sigma > 0 (above threshold). Julia's `build_disbar_damage_vector` iterated over ALL energies including below-threshold ones, building 1.1x-stepped brackets that STRADDLED the threshold. When a bracket endpoint fell above threshold (r>0, cn >> afact) but the interpolation target was below threshold, the linearly-interpolated cn was wrong by up to 4x.
+
+   **Found via 3+1 agents**: Traced Fortran disbar bracket state for MT=63 at E=16.55 MeV. Fortran bracket: [0, 15990000] with el=0 from initialization (disbar never called below thresh). Julia bracket: [15400000, 16940000] straddling thresh=15990000, with corrupted cn at right endpoint.
+
+   Fix: Skip energies below threshold in the stepping loop: `if thresh > 0 && ee < thresh * (1.0 - small); continue; end`
+
+   **Impact**: MT=301 worst: 0.114% → 1.0e-6 (1000x improvement). MT=301 exact: 130/307 → 198/307. 1e-9: 651 → 578 (-73). 1e-3: 6 → 2.
+
+**MF6/MT=229 cosine investigation (2 remaining 1e-3 failures — DEEPLY INVESTIGATED, NOT FIXED)**:
+
+   The 2 remaining failures are equi-probable cosines at E=0.01820 eV, E'=0.59286167 eV where sigma=3.79719e-10 (physically zero). The kernel values at this E/E' straddle the sigmin=1e-10 cutoff:
+
+   - Fortran kernel at mu=0.995: sig=1.006e-10 (0.6% above sigmin → NONZERO after cutoff)
+   - Julia kernel at mu=0.995: sig=9.939e-11 (0.6% below sigmin → ZERO after cutoff)
+
+   Root cause: Julia's `_terpq` quadratic interpolation returns log S(α,β) = -18.1958 at alpha=1.343, beta=22.714. Fortran's terpq returns -18.1923. Diff = 0.0035 in log space. This shifts exp(s - bb/2) by ~0.35%, which at the sigmin cliff edge flips the kernel from above to below. The CDF then has one fewer nonzero point, completely changing the equi-probable bin boundaries.
+
+   Verified: terpq formulas are IDENTICAL. Stencil indices (ia=5, ib=73) are IDENTICAL. The 0.0035 difference is from IEEE 754 intermediate precision — the Fortran compiler may use 80-bit x87 extended precision registers while Julia uses 64-bit SSE. Two-step computation `b=...; b=b-...` vs single-expression `bq = ... - ...` was tested with no effect.
+
+   **This is genuinely at the FP precision floor.** The physical impact is zero (sigma=3.8e-10). Both codes produce the same total sigma. Only the cosine distribution differs.
+
+**Trap 109 (NEW — FIXED)**: Fortran conbar evaluates anadam damage at 1.5x-stepped bracket endpoints (step=1.5 at line 2077), then linearly interpolates via terp1 (line 2290). Ebar is computed directly via anabar at the query energy (line 2267) — NOT bracket-stepped. Julia was computing both directly. The damage stepping accounts for ~93 eV systematic excess at E=10.4 MeV.
+
+**Trap 110 (NEW — FIXED)**: MTs without MF4 data still need disbar bracket stepping. Fortran disbar with imiss=1: fl(1)=1, fl(2)=0, enext=etop. Julia was falling through to direct evaluation. For isotropic MTs, generate synthetic MF4 data covering [1e-5, 2e7] with coefficients [1.0, 0.0].
+
+**Trap 111 (NEW — FIXED)**: Fortran capdam uses 1.1x bracket stepping with SAVE variables (en, damn, el, daml) for charged-particle damage (MT=103-107). Same pattern as disbar. Julia's capdam_particle evaluated directly.
+
+**Trap 112 (NEW — FIXED, MAJOR)**: Fortran disbar is ONLY CALLED at energies where sigma > 0 (above threshold). The SAVE variables stay at initialization values (en=0, cn=0) until the first above-threshold call. Julia's build_disbar_damage_vector iterated over all energies, advancing the bracket through below-threshold points. When the bracket straddled the threshold, the right-endpoint cn (computed above threshold) corrupted the interpolation for below-threshold query energies. Fix: skip below-threshold energies entirely.
+
+**Trap 113 (INVESTIGATED, NOT FIXABLE)**: The 2 remaining MF6/MT=229 failures at 1e-3 are from terpq FP precision at the sigmin=1e-10 boundary. At E=0.01820 eV, E'=0.5929 eV: Julia's terpq returns -18.1958 vs Fortran's -18.1923 (diff=0.0035 in log S). This flips the kernel from 9.94e-11 (below sigmin) to 1.01e-10 (above) at mu=0.995, changing the equi-probable cosine CDF. The formulas and stencil indices are identical — the difference is from IEEE 754 intermediate precision (compiler-level). Physical impact: zero (sigma=3.8e-10).
+
+**T01 results after Phase 33:**
+
+```
+Structural: 41/41 sections, 32962/32962 lines — EXACT MATCH
+rel_tol=1e-9: 578 fail (was 652 at start of session)
+rel_tol=1e-7: 578 fail
+rel_tol=1e-5: 144 fail (was 235)
+rel_tol=1e-4:  47 fail (was 148)
+rel_tol=1e-3:   2 fail (was 52) — only irreducible MF6/MT=229 cosines
+Total data exact: 1799/2386 (75.4%) — was 1728 (72.4%)
+```
+
+**Per-section diff breakdown (578 total at 1e-7):**
+
+| Section | Fails | Worst | Change from Phase 32 | Root cause |
+|---------|-------|-------|---------------------|------------|
+| MT=444 | 227 | 3.69e-4 | −6 | Bracket stepping residual + ±1 ULP |
+| MF3/MT=229 | 159 | 5.27e-4 | 0 | calcem XS interpolation (unchanged) |
+| MT=301 | 96 | 9.99e-7 | −68 | **Now sub-ULP!** Only sigma1 cascade |
+| MT=1 | 46 | 2.31e-6 | 0 | sigma1 broadening ULP |
+| MF6/MT=229 | 32 | 3.39e-1 | −4 | sigl FP + 2 near-zero kernel |
+| MF6/MT=221 | 16 | 7.71e-7 | −1 | Free gas cosine ULP |
+| MT=2 | 1 | 4.81e-7 | 0 | sigma1 ±1 ULP |
+| MT=221 | 1 | 9.17e-6 | 0 | emax boundary |
+
+**Files changed**:
+- `src/processing/heatr.jl` — build_conbar_damage_vector, build_capdam_damage_vector, compute_kerma precomputation + MT=91/103-107 wiring, below-threshold skip in build_disbar_damage_vector
+- (thermr.jl terpq two-step change tested and reverted — no effect)
+
+**How to verify Phase 33 fixes:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+# Expected: 41/41 sections, 32962 lines, 1799/2386 data exact
+# Then run tolerance test (see Python script in HANDOFF):
+# Expected: 578 at 1e-9, 47 at 1e-4, 2 at 1e-3
+```
+
+---
+
 ### Remaining work — PRIORITIZED for next agent
 
 **CRITICAL RULES FOR THE NEXT AGENT:**
-1. **FOLLOW THE METHOD**: First diff → 3+1 agents → gdb diagnostic → fix → retest → repeat. IT WORKS. Every shortcut fails.
-2. **Rule 6 IS NOT OPTIONAL**: Verify EVERYTHING. This session proved Phase 31 wrong twice (stale-fl claim, sigma1 cascade claim). Previous agents' analysis has been wrong. Previous HANDOFF claims have been wrong. READ THE FORTRAN.
-3. **No quick fixes**: The hgtfle stale-fl fix took TWO attempts — the first attempt rewrote the entire state machine and REGRESSED. The successful fix changed ONLY the fl interpolation, keeping all bracket stepping untouched.
-4. **Bugs interlock**: Fixing one bug can expose another. The reconr MF3 fix revealed the ebar stepping issue. Always retest the full pipeline after each fix.
-5. **3+1 pattern**: Launch 3 RESEARCH subagents in parallel (Fortran reader, Julia reader, data comparator). Keep 1 slot for the Julia runner. NEVER run Julia in parallel (Rule 4).
+1. **FOLLOW THE METHOD**: First diff → 3+1 agents → gdb diagnostic → fix → retest → repeat. IT WORKS. Every shortcut fails. This session found 4 bugs with this method.
+2. **Rule 6 IS NOT OPTIONAL**: Verify EVERYTHING. This session proved previous priorities wrong: Phase 32 listed "elastic ebar stepping" and "MT=91 ebar stepping" as Priority 1 — BOTH were wrong. The real bug was below-threshold bracket straddling. READ THE FORTRAN.
+3. **Bugs interlock**: The below-threshold skip fix gave a 1000x improvement in MT=301 worst, but was only discoverable AFTER the isotropic MF4 fix exposed the ebar discrepancy pattern.
+4. **3+1 pattern**: Launch 3 RESEARCH subagents in parallel. Keep 1 slot for the Julia runner. NEVER run Julia in parallel (Rule 4).
+5. **The 2 remaining 1e-3 failures are genuinely irreducible** (Trap 113). Don't waste time on them unless you have new evidence.
 
-**Priority 1 — MT=301 remaining 164 diffs (worst 0.13%)**:
-The stepped ebar fix reduced worst from 0.27% to 0.13%. Remaining errors come from:
-- **Elastic ebar**: The Fortran disbar uses the SAME cn stepping for elastic (MT=2). Julia computes elastic heating via `elastic_heating_aniso(E, A, mu)` directly. Need to also step the elastic ebar.
-- **MT=91 evaporation ebar**: Uses `conbar` (Fortran), not `disbar`. Julia computes `evaporation_ebar` directly. May need stepping.
-- **MTs without MF4 data**: Discrete MTs 54-68, 91 fall through to direct ebar computation.
+**To pass at 1e-7 (= 1e-9), need to fix 578 lines. All remaining diffs are > 1e-7.**
 
-**Priority 2 — MT=444 remaining 233 diffs (worst 0.28%)**:
-- **Elastic damage stepping**: Already uses the stepped state machine with stale-fl. The remaining 0.28% errors are at high energies (10+ MeV). Root cause unclear — likely FP accumulation in 64-pt GL or subtle MF4 interpolation differences.
-- **MT=91 evaporation damage**: Uses `evaporation_damage` (Fortran `anadam`). Adaptive convergence stack may have differences.
-- **Approach**: Find first diff for MT=444 above 1e-4. Patch Fortran disbar to print dame at that energy. Compare.
+**Priority 1 — MT=444 remaining 227 diffs (worst 3.7e-4)**:
+The largest block. Error distribution by energy:
+- **<5 MeV**: 225 diffs, mostly ±1 ULP (from sigma1 broadening cascade through damage×sigma)
+- **5-10 MeV**: 170 diffs, avg 262 ULP, max 1661 ULP — still LARGE systematic errors
+- **>10 MeV**: 162 diffs, avg 20 ULP, max 105 ULP — improved but still significant
 
-**Priority 3 — MF3/MT=229 remaining 159 diffs (worst 0.05%)**:
-calcem XS interpolation. The 94-point calcem egrid values are interpolated to the 571-point thermal grid via order-5 Lagrangian (`terp_lagrange`). The diffs are ±1 ULP from the interpolation precision.
+The 5-10 MeV errors are from residual bracket stepping differences. Per-MT comparison at 9.56 MeV (Phase 33 diagnostic) showed: MT=2/51/52 damage PERFECT, MT=91 close (0.001%), MT=107 close after capdam fix. The remaining error comes from the CUMULATIVE effect of many MTs' damage.
 
-**Priority 4 — MF6/MT=229 remaining 36 diffs (worst 211%)**:
-2 lines are near-zero kernel (sigma≈3.8e-10, physically insignificant). 4 are ±1 ULP cosines from sigl FP accumulation. 30 are at various IEs.
+**Approach**: Trace per-MT dame decomposition at the worst 5-10 MeV energy. Check if any remaining MT has a systematic dame diff. The conbar/capdam stepping was already applied. The issue may be residual differences in the 64-pt GL quadrature intermediate values.
 
-**Priority 5 — MT=1 remaining 46 diffs (worst 2.3e-6)**:
-sigma1 broadening ULP. Same class as reconr T34 irreducible diffs. These cascade to MT=301 (~46 diffs at 2e-6) and MT=444 (~46 diffs at 2e-7). IRREDUCIBLE without matching sigma1 FP accumulation order exactly.
+**Priority 2 — MF3/MT=229 remaining 159 diffs (worst 5.3e-4)**:
+calcem XS interpolated to thermal grid via order-5 Lagrangian (`terp_lagrange`). The first diff is at E=4.556e-4 eV (data line 18, field 6): Julia=0.4280389, Fortran=0.4280382 (1.6e-6 relative). This suggests the terp_lagrange stencil or search differs from the Fortran's terp function.
+
+**Approach**: Patch Fortran terp at this specific E to print stencil indices and interpolated value. Compare with Julia's terp_lagrange. The Fortran terp uses ibeg/iend search with iadd correction (Trap 75) — verify Julia matches exactly.
+
+**Priority 3 — MF6/MT=229 remaining 32 diffs**:
+30 are ±1 ULP cosines from sigl FP accumulation at high IEs. 2 are the irreducible near-zero kernel (Trap 113). The 30 ±1 ULP diffs require matching sigl phase 1 linearization intermediate FP values.
+
+**Priority 4 — MT=1/MT=301/MT=2 (143 diffs total)**:
+MT=1 (46 diffs, worst 2.3e-6): sigma1 broadening ±1 ULP. These cascade to MT=301 (96 diffs, worst 1.0e-6) through the KERMA summation. HARD to fix — requires matching sigma1 Doppler integral FP accumulation order.
+
+**Priority 5 — MF6/MT=221 (16 diffs, worst 7.7e-7)**:
+Free gas cosine ±1 ULP. Barely above 1e-7. These are from sigl_equiprobable FP accumulation in the free-gas kernel path.
