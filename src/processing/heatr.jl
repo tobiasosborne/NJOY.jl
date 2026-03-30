@@ -835,6 +835,15 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
 
     for ie in 1:ne
         ee = energies[ie]
+        # Fortran disbar is only called at energies where sigma > 0.
+        # For inelastic MTs (thresh > 0), below-threshold energies have sigma=0,
+        # so disbar is never called and the bracket state stays at initialization.
+        # Without this skip, the stepping builds brackets that straddle the threshold,
+        # corrupting ebar values near threshold via interpolation.
+        if thresh > 0 && ee < thresh * (1.0 - small)
+            # dame and ebar stay 0 (initialized to zeros)
+            continue
+        end
         # If ee within current bracket, just interpolate (line 1949)
         if ee <= en * (1.0 + small) && en > 0
             if en > el
