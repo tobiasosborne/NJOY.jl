@@ -245,6 +245,7 @@ function run_t01()
         Float64[e for e in b_e if e <= emax_thermr],
         [emax_thermr, NJOY.round_sigfig(emax_thermr, 7, 1)])))
     thermal_e = NJOY.build_thermal_grid(bragg, broadened_grid, emax_thermr; tol=0.05)
+    coh_ne = length(thermal_e)  # coh grid count before sentinel addition (Fortran ne param)
     # Fortran tpend adds emax and sigfig(emax,7,+1) as final grid points (NP = ne+1)
     push!(thermal_e, emax_thermr)
     push!(thermal_e, NJOY.round_sigfig(emax_thermr, 7, 1))
@@ -341,6 +342,7 @@ function run_t01()
             mf6_records=mf6, mf6_stubs=mf6_stubs, mf12_lines=mf12, mf13_lines=mf13,
             mf6_xsi=mf6_xsi, mf6_emax=mf6_emax,
             thermr_mts=Set([221, 229, 230]),
+            thermr_coh_ne=coh_ne,
             descriptions=["6-c-nat from tape 511",
                           "processed by the njoy nuclear data processing system",
                           "see original endf/b-v tape for details of evaluation"])

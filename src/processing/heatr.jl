@@ -765,7 +765,70 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
 
     # MF4 energy grid = discontinuity boundaries for hgtfle
     mf4_es = mf4_data[1]
+    mf4_cs = mf4_data[2]
     mf4_idx = 1  # current position in MF4 grid
+
+    # Hgtfle persistent state (Fortran SAVE at lines 4241-4242).
+    # The SLIDE at label 120 only copies nhi values from fhi→flo,
+    # leaving higher-order flo coefficients STALE from previous brackets.
+    max_nld = length(mf4_cs) > 0 ? maximum(length(c) for c in mf4_cs) : 1
+    hgt_flo = zeros(Float64, max_nld)
+    hgt_fhi = zeros(Float64, max_nld)
+    hgt_nlo = 0; hgt_nhi = 0
+    hgt_elo = 0.0; hgt_ehi = 0.0
+    hgt_pos = 0  # 0 = not yet initialized
+
+    # Advance hgtfle state to bracket containing energy e, return fl with stale behavior
+    function _hgtfle_get_fl(e)
+        # Initialize on first call (matching hgtfle e=0 init, lines 4248-4318)
+        if hgt_pos == 0 && length(mf4_es) >= 2
+            c1 = mf4_cs[1]; hgt_nlo = length(c1)
+            for i in 1:hgt_nlo; hgt_flo[i] = c1[i]; end
+            hgt_elo = mf4_es[1]
+            c2 = mf4_cs[2]; hgt_nhi = length(c2)
+            for i in 1:hgt_nhi; hgt_fhi[i] = c2[i]; end
+            for i in hgt_nhi+1:max_nld; hgt_fhi[i] = 0.0; end
+            hgt_ehi = mf4_es[2]
+            hgt_pos = 2
+        end
+
+        # Advance brackets: if e >= ehi, SLIDE forward (label 110→120→130)
+        while e >= hgt_ehi * (1.0 - small) && hgt_pos < length(mf4_es)
+            # SLIDE (label 120, lines 4333-4337): PARTIAL copy — only nhi values!
+            for i in 1:hgt_nhi
+                hgt_flo[i] = hgt_fhi[i]
+            end
+            # flo[nhi+1:end] retains STALE values from previous brackets
+            hgt_nlo = hgt_nhi
+            hgt_elo = hgt_ehi
+            # Read next high bracket (lines 4350-4361)
+            hgt_pos += 1
+            cn = mf4_cs[hgt_pos]
+            hgt_nhi = length(cn)
+            for i in 1:hgt_nhi; hgt_fhi[i] = cn[i]; end
+            for i in hgt_nhi+1:max_nld; hgt_fhi[i] = 0.0; end
+            hgt_ehi = mf4_es[hgt_pos]
+        end
+
+        # Interpolate (label 130, lines 4368-4386)
+        nlmax = max(hgt_nlo, hgt_nhi)
+        fl = Vector{Float64}(undef, nlmax)
+        if e < hgt_elo * (1.0 - small)
+            # Below first point: isotropic (label 140)
+            fl[1] = 1.0
+            for i in 2:nlmax; fl[i] = 0.0; end
+            return fl
+        end
+        if hgt_ehi > hgt_elo
+            ff = (e - hgt_elo) / (hgt_ehi - hgt_elo)
+            for i in 1:nlmax
+                fl[i] = hgt_flo[i] + ff * (hgt_fhi[i] - hgt_flo[i])
+            end
+        else
+            for i in 1:nlmax; fl[i] = hgt_flo[i]; end
+        end
+        return fl
+    end
 
     for ie in 1:ne
         ee = energies[ie]
@@ -807,18 +870,19 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
         if e < enx * (1.0 - small)
             damn = 0.0
         else
+            # Get fl coefficients with hgtfle stale behavior
+            fl = _hgtfle_get_fl(e)
             if thresh > 0
                 # Inelastic: r from threshold (Fortran lines 1957-1963)
-                # thresh >= e*(1-small) → r=0 → dame=0; else r=sqrt(1-thresh/e)
                 if thresh >= e * (1.0 - small)
                     r = 0.0
                 else
                     r = sqrt(1.0 - thresh / e)
                 end
-                fl = _interp_legendre(mf4_data, e)
                 damn = _disbar_damage_fl(e, A, Z, r, fl; E_d=E_d)
             else
-                damn = _disbar_dame_eval(e, A, Z, mf4_data, lp; E_d=E_d)
+                # Elastic: g=1, use same GL integration as _disbar_damage_fl with r=1
+                damn = _disbar_damage_fl(e, A, Z, 1.0, fl; E_d=E_d)
             end
         end
         en = e

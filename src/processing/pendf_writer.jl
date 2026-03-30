@@ -145,7 +145,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           descriptions::Vector{String} = String[],
                           mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
                           mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
-                          thermr_mts::Set{Int} = Set{Int}())
+                          thermr_mts::Set{Int} = Set{Int}(),
+                          thermr_coh_ne::Int = -1)
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -166,6 +167,9 @@ function write_full_pendf(io::IO, result::NamedTuple;
     section_lines = Dict{Tuple{Int,Int}, Int}()  # (MF,MT) → line count
 
     # Pre-compute MF3 line counts
+    # Fortran tpend NC formula: nc = 3 + (ne_param+2)/3 where ne_param is the
+    # grid count BEFORE tpend adds sentinel points. For free-gas thermr,
+    # ne_param = NP. For coh-grid thermr, ne_param = NP - 2 (coh sentinels).
     for (mt, _) in reactions
         imt = Int(mt)
         if haskey(override_mf3, imt)
@@ -179,26 +183,35 @@ function write_full_pendf(io::IO, result::NamedTuple;
             sec === nothing && continue
             np = length(sec[1])
         end
-        section_lines[(3, imt)] = 3 + cld(np, 3)
+        if imt in thermr_mts && thermr_coh_ne >= 0
+            # Use Fortran tpend formula: nc = 3 + (ne+2)/3
+            # For coh-grid sections (NP > coh_ne), ne = coh_ne
+            # For free-gas sections (NP < coh_ne), ne = NP
+            ne_param = np > thermr_coh_ne ? thermr_coh_ne : np
+            section_lines[(3, imt)] = 3 + div(ne_param + 2, 3)
+        else
+            section_lines[(3, imt)] = 3 + cld(np, 3)
+        end
     end
 
-    # MF6 stub line counts (coherent elastic: HEAD + TAB1 = 4 lines, no SEND in NC)
+    # MF6 stub line counts: Fortran ncdse=3 (undercounts TAB1 by 1 vs actual 4)
     for (mt, _) in mf6_stubs
-        section_lines[(6, mt)] = 4  # HEAD(1) + TAB1_header(1) + interp(1) + data(1)
+        section_lines[(6, mt)] = 3
     end
 
-    # MF6 line counts (HEAD + TAB1 + TAB2 + LIST records per MT)
+    # MF6 line counts: Fortran ncds undercounts TAB1 yield by 1
+    # (counts packed interp+data as 1 line, but output has 2 separate lines)
     for (mt, records) in mf6_records
         ne = length(records)
-        # HEAD(1) + TAB1(3 lines: cont+interp+data) + TAB2(2 lines: cont+interp)
+        # HEAD(1) + TAB1(3 lines) + TAB2(2 lines)
         n_lines = 1 + 3 + 2
         for rec in records
             n_ep = length(rec.entries)
             nw = n_ep * 10
             n_lines += 1 + cld(nw, 6)  # LIST header + data lines
         end
-        # Note: SEND not counted in NC (Fortran convention)
-        section_lines[(6, mt)] = n_lines
+        # Subtract 1: Fortran ncds counts TAB1 as 2 lines (packed), actual is 3
+        section_lines[(6, mt)] = n_lines - 1
     end
 
     # MF12/MF13 line counts
@@ -763,10 +776,15 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
         # Fortran recout uses ZA (not ZAI) for the isotope CONT record
         _write_cont_line(io, mf2.ZA, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
         el = length(iso.ranges) > 0 ? iso.ranges[1].EL : 1.0e-5
-        # Fortran recout uses eresh (full range including URR) for EH
-        eh = 2.0e7  # default for no-resonance materials
+        # Fortran recout uses eresr for EH: resolved range EH if LRU=1 exists,
+        # otherwise ehigh=2e7 for LRU=0-only materials
+        eh = 2.0e7  # ehigh: default for no-resonance materials
         if length(iso.ranges) > 0
-            eh = maximum(r.EH for r in iso.ranges)
+            resolved_ehs = [r.EH for r in iso.ranges if r.LRU == 1]
+            if !isempty(resolved_ehs)
+                eh = maximum(resolved_ehs)
+            end
+            # If only LRU=0 ranges, keep eh = 2.0e7 (Fortran eresr = ehigh)
         end
         _write_cont_line(io, el, eh, 0, 0, 0, 0, Int(mat), 2, 151, ns)
         spi = 1.0; ap = 0.0
