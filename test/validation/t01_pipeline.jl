@@ -1,7 +1,7 @@
 using NJOY
 
 function run_t01()
-    r = reconr("/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_reconr/tape20"; mat=1306, err=0.005)
+    r = reconr("/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"; mat=1306, err=0.005)
     A = Float64(r.mf2.AWR)
     alpha = A / (NJOY.PhysicsConstants.bk * 296.0)
     thnmax = 4.81207e6
@@ -37,7 +37,7 @@ function run_t01()
 
     # Read MF12/MT=102 gamma data from ENDF file (C-nat: 3 gammas)
     # Fortran heatr reads these for gheat photon recoil computation
-    endf_file = "/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_reconr/tape20"
+    endf_file = "/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"
     gamma_102 = Tuple{Float64,Float64}[]
     begin
         io = open(endf_file)
@@ -104,6 +104,22 @@ function run_t01()
     # Read MF4/MT=2 angular data for elastic mu_bar correction (Fortran disbar)
     mu_bar = NJOY.read_mf4_mubar(endf_file, 1306)
     println("MF4/MT=2: $(length(mu_bar[1])) energies, mu_bar range [$(minimum(mu_bar[2])), $(maximum(mu_bar[2]))]")
+    # Read full Legendre coefficients for angular damage integration
+    mf4_leg = NJOY.read_mf4_legendre(endf_file, 1306)
+    println("MF4/MT=2 Legendre: $(length(mf4_leg[1])) energies, max NL=$(maximum(length.(mf4_leg[2])))")
+
+    # Read full MF4 Legendre for all discrete inelastic MTs
+    # Used for both ebar (via fl[2]=mu_bar) and damage angular integration
+    mf4_leg_all = Dict{Int, Tuple{Vector{Float64}, Vector{Vector{Float64}}}}()
+    mf4_mubar_dict = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+    for mt_inel in 51:91
+        leg = NJOY.read_mf4_legendre(endf_file, 1306; mt=mt_inel)
+        if length(leg[1]) >= 2 && !(length(leg[1]) == 2 && leg[1][1] == 0.0)
+            mf4_leg_all[mt_inel] = leg
+            mf4_mubar_dict[mt_inel] = (leg[1], Float64[length(c) >= 2 ? c[2] : 0.0 for c in leg[2]])
+        end
+    end
+    println("MF4 Legendre for inelastic: $(length(mf4_leg_all)) MTs found")
 
     # Read MF13 photon production sections for gheat gamma subtraction
     mf13_io = open(endf_file)
@@ -124,10 +140,14 @@ function run_t01()
     heatr_secs = [sec for sec in r.mf3_sections if !(Int(sec.mt) in skip_mts)]
     heatr_mts = Int32[sec.mt for sec in heatr_secs]
     heatr_qs = Dict{Int,Float64}()
+    heatr_qm = Dict{Int,Float64}()
+    heatr_lr = Dict{Int,Int32}()
     xs_cols = Matrix{Float64}(undef, length(b_e), length(heatr_secs))
     for (j, sec) in enumerate(heatr_secs)
         mt = Int(sec.mt)
         heatr_qs[mt] = Float64(sec.QI)
+        heatr_qm[mt] = Float64(sec.QM)
+        heatr_lr[mt] = sec.LR
         if mt == 2
             # Use broadened elastic (column 1 of b_xs)
             xs_cols[:, j] .= b_xs[:, 1]
@@ -146,8 +166,34 @@ function run_t01()
 
     pm_broad = PointwiseMaterial(Int32(1306), b_e, xs_cols, heatr_mts)
     gd = Dict{Int, Vector{Tuple{Float64,Float64}}}(102 => gamma_102)
+    # Read MF5/MT=91 evaporation parameters for conbar (u=threshold, theta=temperature)
+    # C-12 MF5/MT=91: LF=9, u=7.887e6, theta=3.0e5 (constant)
+    mf5_u = 0.0; mf5_theta = 0.0
+    begin
+        mf5_io = open(endf_file)
+        if NJOY.find_section(mf5_io, 5, 91; target_mat=1306)
+            head5 = NJOY.read_cont(mf5_io)  # HEAD: ZA, AWR, 0, 0, NK, 0
+            tab1_p = NJOY.read_tab1(mf5_io)  # fractional probability TAB1
+            mf5_u = Float64(tab1_p.C1)       # u = threshold from TAB1 C1
+            lf5 = Int(tab1_p.L2)              # LF = distribution law
+            println("MF5/MT=91: LF=$lf5, u=$(mf5_u)")
+            if lf5 == 9
+                tab1_theta = NJOY.read_tab1(mf5_io)  # theta(E) TAB1
+                # For constant theta: just take the first y value
+                mf5_theta = tab1_theta.y[1]
+                println("  theta = $mf5_theta eV ($(length(tab1_theta.y)) points)")
+            end
+        end
+        close(mf5_io)
+    end
+    conbar_p = mf5_theta > 0 ? (mf5_u, mf5_theta) : nothing
+
     kr = compute_kerma(pm_broad; awr=A, Z=6, gamma_data=gd, mu_bar_data=mu_bar,
-                       mf13_gamma=mf13_gamma, Q_values=heatr_qs)
+                       mf4_legendre_data=mf4_leg, conbar_params=conbar_p,
+                       mf4_mubar_all=isempty(mf4_mubar_dict) ? nothing : mf4_mubar_dict,
+                       mf4_legendre_all=isempty(mf4_leg_all) ? nothing : mf4_leg_all,
+                       mf13_gamma=mf13_gamma,
+                       Q_values=heatr_qs, qm_values=heatr_qm, lr_values=heatr_lr)
     extra_mf3 = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(
         301 => (b_e, kr.total_kerma), 444 => (b_e, kr.damage_energy))
 
@@ -184,7 +230,7 @@ function run_t01()
     println("MT=221: $(length(mt221_e)) pts ($(length(mt221_e)-2) below cutoff)")
 
     # === THERMR 2: S(α,β) from tape26 ===
-    sab = NJOY.read_mf7_mt4("/home/tobiasosborne/Projects/NJOY.jl/njoy-reference/tests/resources/t322", 1065, 296.0)
+    sab = NJOY.read_mf7_mt4("/home/tobias/Projects/NJOY.jl/njoy-reference/tests/resources/t322", 1065, 296.0)
 
     # Build Bragg data first (needed for thermal grid)
     bragg = NJOY.build_bragg_data(
@@ -281,7 +327,7 @@ function run_t01()
 
     # === MF12/MF13 ===
     mf12 = String[]; mf13 = String[]
-    for line in readlines("/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/after_reconr.pendf")
+    for line in readlines("/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/after_reconr.pendf")
         length(line) < 75 && continue
         p = rpad(line, 80); mf = NJOY._parse_int(p[71:72]); mt = NJOY._parse_int(p[73:75])
         mf == 12 && mt > 0 && push!(mf12, line)
@@ -301,7 +347,7 @@ function run_t01()
     end
 
     # === COMPARE ===
-    ref = "/home/tobiasosborne/Projects/NJOY.jl/njoy-reference/tests/01/referenceTape25"
+    ref = "/home/tobias/Projects/NJOY.jl/njoy-reference/tests/01/referenceTape25"
     println("\ntape25: $(countlines("/tmp/t01_tape25.pendf")) (ref: $(countlines(ref)))")
 
     function list_sections(fn)

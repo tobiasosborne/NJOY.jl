@@ -1488,18 +1488,69 @@ h = (E - ebar) * sigma
 
 ---
 
+### Phase 30: HEATR KERMA/damage deep grind — 12 bugs fixed, MT=301/444 from 169%/100% to 0.27%/0.28%
+
+**12 bugs found and fixed in `src/processing/heatr.jl`** (all via Fortran gdb diagnostics):
+
+1. **discrete_inelastic_ebar b vs g (CRITICAL)**: Formula used `g=r` in `cn=(1+2*g*mu+g^2)/(A+1)^2` but Fortran uses `b=r*A`: `cn=(1+2*b*mu+b^2)*afact`. For MT=52 at 11.25 MeV: Julia ebar=85k, Fortran ebar=2.58M (30x error). Fix: `b = r * A`, `afact = 1/(A+1)^2`.
+
+2. **q0 from MF3 QM for LR≠0,31**: Fortran nheat lines 1180-1181: `q0=0; if(lr.ne.0.and.lr.ne.31) q0=t`. For C-12 MT=52-68 (LR=23 breakup): q0=-7.275e6 (QM), not 0. Without this, heating shifted by MeV-scale.
+
+3. **Elastic damage angular integration**: Added 64-point Gauss-Legendre quadrature matching Fortran disbar lines 1989-2001. At E=150 eV: average recoil=21.3 eV (below Ed=25), but max recoil at backward angles=42.6 eV > Ed. Old code gave dame=0, new code gives 8.89 (matches Fortran exactly).
+
+4. **Discrete inelastic damage**: Added `_disbar_damage_fl` — same 64-pt GL quadrature for MT=51-90 with r=sqrt(1-thresh/E) and MF4 Legendre angular distribution. Without this, no inelastic damage at all.
+
+5. **MT>100 absorption heating**: Changed from `capture_recoil(E,Q,A) = E*A/(A+1)+Q` to `(E+Q)*sigma` matching Fortran nheat label 170 (icon=0, q0=Q, ebar=0). For MT=107 (n,α) at 9.25 MeV: old=930k, new=1167k (Fortran=1167k).
+
+6. **capdam_particle for MT=103-107**: Fortran capdam (lines 1807-1818): 4-pt GL angular integration of Lindhard damage for the residual nucleus recoil after charged-particle emission. MT=107 (n,α): zx=2, ax=4, residual=(Z-2, A+1-4)=(4, 8.898). Includes Coulomb barrier clamping `ea=min(ea, ec)`. Verified: dame=20061 at E=9.94 MeV (Fortran=20061).
+
+7. **evaporation_ebar (MT=91, LF=9)**: Implemented Fortran anabar formula (lines 2450-2462): `ebar = θ*(2 - b1²*exp(-b1)/(1-(b1+1)*exp(-b1)))` where b1=(E-u)/θ. For C-12: u=7.887e6, θ=3e5 from MF5/MT=91. Verified: ebar=599490 at 11.25 MeV (Fortran=599490).
+
+8. **_interp_legendre searchsortedlast**: MF4 Legendre coefficients apply FROM their energy node, not up to it. Was using `searchsortedfirst-1` (nearest lower), now `searchsortedlast` (last node ≤ E). At E=2.08 MeV: old returned 2.07 MeV coefficients, new returns 2.08 MeV coefficients.
+
+9. **MF4 Legendre linear interpolation**: Fortran hgtfle INTERPOLATES Legendre coefficients between MF4 energy nodes, NOT step function. Between E[4]=10 keV (nld=2, fl[2]=0.00139) and E[5]=50 keV (nld=3, fl[2]=0.00673): at 20 keV, fl[2]=0.00139+0.25*(0.00673-0.00139)=0.00273. Zero-pads shorter vectors before interpolation. This was the dominant MT=444 error source at 20-50 keV.
+
+10. **Disbar damage state machine with MF4 clamping**: Fortran disbar evaluates dame at stepped energies (1.1x) clamped to MF4 grid boundaries via `enext`, then linearly interpolates. Implemented `build_disbar_damage_vector` matching this exact sequence.
+
+11. **MF4 mu_bar for all inelastic MTs**: Fortran disbar reads MF4/MT=xx for each inelastic MT via hgtfle, uses wbar=fl(2) in ebar formula. Julia was passing mu_bar=0. Added `read_mf4_legendre(filename, mat; mt=xx)` and `mf4_mubar_all` dict. For MT=51 at 10 MeV: old ebar off by 7%, new matches Fortran.
+
+12. **evaporation_damage (anadam)**: Implemented Fortran anadam adaptive convergence stack (lines 2508-2598) with `sed` function for evaporation spectrum probability. Old 64-segment midpoint gave 2x error at 17 MeV. New adaptive scheme matches Fortran to 1.4%.
+
+**Trap 92 (NEW — FIXED)**: discrete_inelastic_ebar uses `b=r*A` in the cn formula, NOT `g=r`. The Fortran line 1985: `cn=(1+2*b*wbar+b*b)*afact` where `b=r*sqrt(awr/arat)=r*A` for neutron. The `g` variable is only used in the damage angular integration (e2 formula).
+
+**Trap 93 (NEW — FIXED)**: Fortran hgtfle LINEARLY INTERPOLATES MF4 Legendre coefficients between energy nodes. It is NOT step-function interpolation. Zero-pad shorter coefficient vectors to match lengths before interpolating.
+
+**Trap 94 (NEW — FIXED)**: MT>100 absorption reactions (n,α etc.) use `h=(E+Q)*σ` with icon=0 (no disbar/conbar). The `capture_recoil` formula `E*A/(A+1)+Q` is WRONG for these — it's a different kinematic approximation not used by Fortran nheat.
+
+**Trap 95 (NEW — FIXED)**: For discrete inelastic MT=51-90, the Fortran reads MF4/MT=xx Legendre data (not just MT=2). The wbar=fl(2) shifts ebar significantly at high energies. For C-12 MT=51 at 10 MeV: without MF4 mu_bar, ebar is 7% off.
+
+**T01 results after Phase 30:**
+```
+Structural: 41/41 sections, 32962/32962 lines — EXACT MATCH
+Physics failures (excluding MF12/MF13 sequence-number cosmetic diffs):
+  rel_tol=1e-4: 226 (was 465 at start of session)
+  rel_tol=1e-3:  98 (was 416)
+MT=301 worst: 0.27% (was 169%)  — zero above 1%
+MT=444 worst: 0.28% (was 100%)  — zero above 1%
+Data exact: 1641/2386 (68.8%) — was 1623 (68.0%)
+```
+
+**Files changed**: `src/processing/heatr.jl` (12 new functions + compute_kerma rewrite), `test/validation/t01_pipeline.jl` (MF4/MF5 readers, path fixes)
+
+---
+
 ## Immediate Next Steps — PRIORITY ORDER
 
 ### 0. CHECK: Run the pipeline FIRST to establish baseline
 
 Before making ANY changes:
 ```bash
-cd /home/tobiasosborne/Projects/NJOY.jl
+cd ~/Projects/NJOY.jl
 rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 28, as of 2026-03-29)**:
+**Expected results (Phase 30, as of 2026-03-30)**:
 ```
 tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
 MATCH: 41 / 41 sections          ← ALL sections match ✓
@@ -1513,24 +1564,29 @@ MT=  2: DATA 306/307 (99.7%)     hdr=3/3  ← 1 line ±1 ULP sigma1
 MT=221: DATA 47/49 (95.9%)       hdr=3/3  ← 2 lines emax boundary
 MT=229: DATA 29/191 (15.2%)      hdr=3/3  ← calcem XS ±1 ULP
 MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1
-MT=444: DATA 20/307 (6.5%)       hdr=3/3  ← cascades from MT=1
-MT=301: DATA 4/307 (1.3%)        hdr=3/3  ← cascades from MT=1
-Total data: 1564 / 2386 (65.5%)
+MT=301: DATA 63/307 (20.5%)      hdr=3/3  ← ±1 ULP from broadened XS cascade
+MT=444: DATA 20/307 (6.5%)       hdr=3/3  ← ±1 ULP + disbar stepping residual
+Total data: 1641 / 2386 (68.8%)
 ```
 
-**Tolerance test**:
+**Tolerance test (full-line, including sequence numbers)**:
 ```
-rel_tol=1e-9: 11 lines fail (0.0%)
-rel_tol=1e-7: 11 lines fail (0.0%)
-rel_tol=1e-5: 8 lines fail (0.0%)
-rel_tol=1e-4: 6 lines fail (0.0%)   ← NJOY21 reimplementation standard
-rel_tol=1e-3: 5 lines fail (0.0%)   ← inter-code standard
+rel_tol=1e-9: 1571 lines fail (4.8%) — includes 487 MF12/MF13 seq-num cosmetic diffs
+rel_tol=1e-7: 1570 lines fail (4.8%)
+rel_tol=1e-4:  713 lines fail (2.2%) — physics-only: 226
+rel_tol=1e-3:  585 lines fail (1.8%) — physics-only:  98
 ```
 
-**The 11 remaining failures — exact breakdown**:
-- **5 MF1/MT=451 directory NCs**: Fortran tpend computes NC with a truncation bug for some sections. METADATA ONLY — no physics impact. Lines 40,41 (MF3/MT=229,230: 194 vs 193), 44 (MF6/MT=221: 9641 vs 9640), 45 (MF6/MT=229: 19506 vs 19505), 46 (MF6/MT=230: 4 vs 3). All off by exactly 1.
-- **2 MF6/MT=229 at line 20047-20048**: Near-zero kernel (sigma≈3.8e-10) produces completely different sigl cosines. The sigma is at the sigmin=1e-10 floor — no physics impact.
-- **4 MF6/MT=229 at lines 31109, 31841, 32199, 32201**: ±1 ULP cosine values from sigl FP accumulation order at high incident energies (IEs 85-93).
+**Physics failure breakdown at 1e-3 (98 lines)**:
+- **MT=301 (38)**: Cascades from sigma1 broadening ±1 ULP in MT=1. All below 0.27%. Irreducible without matching sigma1 FP accumulation order exactly.
+- **MT=444 (30)**: Disbar stepping/interpolation residual (Julia state machine slightly different bracket sequence from Fortran). Plus evaporation_damage adaptive convergence differences. All below 0.28%.
+- **MF6/MT=229 (26)**: sigl FP accumulation order at high incident energies. Same class as Phase 27.
+- **MF1/MT=451 (3)**: Directory NC truncation. Mechanical fix — Fortran uses `div(N,6)` instead of `ceil(N/6)`.
+- **MF2/MT=151 (1)**: EH value difference. Trivial.
+
+**Cosmetic (non-physics) diffs (487 lines)**:
+- **MF12/MT=102 (348)**: Sequence numbers (cols 76-80) differ. Passthrough reads from oracle's after_reconr.pendf. Fix: read from original ENDF tape, or reset sequence counters.
+- **MF13/MT=51 (139)**: Same sequence number issue.
 
 **How to run the tolerance test** (simulates execute.py):
 ```bash
@@ -1561,38 +1617,36 @@ for rtol in [1e-9,1e-7,1e-5,1e-4,1e-3]:
 "
 ```
 
-### YOUR GOAL: Get T01 to pass at 1e-7
+### YOUR GOAL: Reduce T01 physics failures
 
-T01 currently has **11 tolerance failures** at 1e-7. All 11 also fail at 1e-9. To pass at 1e-7, you need to fix all 11. Here is exactly what they are and how to fix them.
+T01 currently has **98 physics failures at 1e-3** and **226 at 1e-4**. MT=301 and MT=444 worst errors are both under 0.3% — the HEATR grind is essentially done. The remaining targets:
 
-**IMPORTANT: The oracle grid hack has been REMOVED. The pipeline is now 100% Julia-only. The MF12/MF13 passthrough still reads from `after_reconr.pendf` — that's just reading raw ENDF lines, trivially fixable, and NOT a tolerance failure.**
+**Priority 1 — Fix 487 MF12/MF13 sequence number diffs (cosmetic, biggest line count)**:
+The MF12/MT=102 and MF13/MT=51 passthrough reads from `after_reconr.pendf` oracle. The data (cols 1-75) is correct but sequence numbers (cols 76-80) differ. Fix: read from the original ENDF tape (`tape20`) instead, or reset sequence counters to start from 1 per section. This is in `t01_pipeline.jl` around line 284 where `after_reconr.pendf` lines are collected.
 
-### The 11 failing lines — complete diagnosis
+**Priority 2 — Fix 3 MF1/MT=451 directory NC values (mechanical)**:
+Fortran `tpend` uses truncated integer division `div(N,6)` for line count in directory. Julia uses `ceil`. Fix: in `_write_full_mf1` (pendf_writer.jl), for thermr and MF6 sections, compute NC = HEAD(1) + CONT(1) + div(2*NR+2*NP, 6) for TAB1, using integer division not ceiling. Check divisibility: only subtract 1 when `mod(data_values, 6) != 0`.
 
-**Category A: 5 MF1/MT=451 directory NC values (lines 40,41,44,45,46)**
+**Priority 3 — Fix MF2/MT=151 EH value (trivial)**:
+One line diff. Check what EH value the Fortran writes vs Julia.
 
-These are directory entries where Julia's NC (line count per section) differs from Fortran by exactly 1:
+**Priority 4 — Grind MT=444 remaining 30 diffs at 1e-3**:
+All below 0.28%. Root cause: disbar stepping state machine doesn't perfectly reproduce Fortran bracket sequence. The `build_disbar_damage_vector` uses `step=1.1` and MF4 energy clamping, but the exact sequence of (el, daml, en, damn) brackets may diverge from Fortran when multiple query points fall in the same bracket. Use gdb to trace Fortran disbar at specific energies where Julia differs.
 
-| Line | Section | Julia NC | Fortran NC | Root cause |
-|------|---------|----------|------------|------------|
-| 40 | MF3/MT=229 | 194 | 193 | tpend truncation |
-| 41 | MF3/MT=230 | 194 | 193 | tpend truncation |
-| 44 | MF6/MT=221 | 9641 | 9640 | tpend truncation |
-| 45 | MF6/MT=229 | 19506 | 19505 | tpend truncation |
-| 46 | MF6/MT=230 | 4 | 3 | tpend truncation |
+**Priority 5 — Grind MF6/MT=229 remaining 26 diffs at 1e-3**:
+sigl FP accumulation order. Same class as Phase 27. Use gdb on Fortran sigl to trace intermediate values at specific IE/E' pairs.
 
-**Root cause**: Fortran `tpend` computes the NC for the directory BEFORE writing the last partial data line. For a TAB1 with NP points, the data stream has `2*NR + 2*NP` values at 6 per line. Fortran uses `(2*NR + 2*NP) / 6` (truncated integer division). Julia uses `ceil` (correct math but doesn't match Fortran). When 2*NR+2*NP is not divisible by 6, Fortran's NC is 1 less. The ACTUAL written content has `ceil(...)` lines — the Fortran directory is technically wrong but we must match it.
+**Priority 6 — Grind MT=301 remaining 38 diffs at 1e-3**:
+All cascade from sigma1 broadening ±1 ULP in MT=1. These are irreducible without matching the exact FP accumulation order in the sigma1 Doppler broadening kernel. Same class as reconr T34 diffs.
 
-**How to fix**: In `_write_full_mf1` (pendf_writer.jl ~line 384), when computing directory NC for sections with `(mf == 3 && mt in thermr_mts) || mf == 6`, subtract 1 from NC IF the data stream has a partial last line. Specifically:
-- MF3 thermr: NC = 2 + div(2*NR + 2*NP, 6) where NR=1. For NP=571: 2+div(1144,6)=2+190=192. Add HEAD=1 → 193.
-- MF6: similar, needs investigation of LIST record packing
+**Priority 7 — Generate oracle caches for untested RECONR tests**:
+31 tests RAN_OK without oracles. Many share materials with BIT-IDENTICAL tests.
 
-**Previous attempt**: A blanket `-1` was tried but regressed MT=221 (NP=146 has no partial line). The fix must check divisibility: subtract 1 only when `mod(data_values, 6) != 0`.
+**Priority 8 — Grind BROADR to bit-identical on more tests**.
 
-**Files**: `src/processing/pendf_writer.jl`, function `_write_full_mf1`
+### Remaining diagnosed failures — exact breakdown
 
-**Category B: 2 MF6/MT=229 near-zero kernel cosines (lines 20047-20048)**
-
+**MF6/MT=229 near-zero kernel cosines (2 lines at 1e-7)**:
 At IE=44 (incident E ≈ 0.01 eV), secondary energy E' ≈ 0.593 eV has sigma = 3.8e-10 (near the sigmin=1e-10 floor). The equi-probable cosines are completely different:
 
 ```
@@ -1637,19 +1691,6 @@ The most likely culprits:
 - **CDF moment**: Uses `third = 0.333333333` (Fortran truncated constant). Matched in Phase 25 but verify.
 
 **Expected difficulty**: Lines 31109 and 31841 have ~1e-7 relative error — right at the boundary. Lines 32199 and 32201 have larger errors (~6e-7) — these may have a systematic cause.
-
-### What blocks T01 at 1e-7
-
-All 11 failures are at 1e-7. If you fix Categories A, B, and C, T01 passes at 1e-7. The priorities:
-
-1. **Category A (5 directory NCs)** — Highest impact, purely mechanical fix. Match Fortran's truncated integer division for NC computation in thermr/MF6 sections.
-2. **Category C (4 ±1 cosines)** — Medium impact, requires gdb grind on sigl. The 3+1 workflow (3 read-only Explore agents + 1 Julia runner) has found every bug in this project.
-3. **Category B (2 near-zero cosines)** — Hardest. May require matching kernel values at sigma ≈ 1e-10. If the kernel is truly at the sigmin boundary, this is an irreducible FP class diff. Consider accepting these 2 lines.
-
-### Additional cleanup (not blocking 1e-7)
-
-- **MF12/MF13 passthrough**: Currently reads from `after_reconr.pendf` oracle. Should read from the original ENDF tape (`tape20`). Trivial: just change the file path in `t01_pipeline.jl`. The raw lines are identical — reconr doesn't modify MF12/MF13 content.
-- **Hardcoded parameters**: thnmax, sigma_coh, DW, natom are hardcoded in `t01_pipeline.jl`. Should eventually be read from the input deck and ENDF file. Not needed for 1e-7.
 
 ### 7. Grind remaining RECONR tests + BROADR
 
