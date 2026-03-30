@@ -155,10 +155,35 @@ function run_t01()
             # Use broadened capture (column 2 of b_xs)
             xs_cols[:, j] .= b_xs[:, 2]
         else
-            # Non-broadened: interpolate from reconr MF3, zero below threshold
-            thresh = sec.tab.x[1]
-            for i in eachindex(b_e)
-                xs_cols[i, j] = b_e[i] < thresh ? 0.0 : NJOY.interpolate(sec.tab, b_e[i])
+            # Non-broadened: use reconr-processed data (matching Fortran PENDF)
+            # The Fortran heatr reads from the PENDF (reconr output), which has
+            # threshold-adjusted energies and pseudo-threshold zeros. Raw MF3
+            # interpolation gives different values near thresholds.
+            legacy = NJOY._get_legacy_section(r, mt)
+            if legacy !== nothing
+                sec_e, sec_xs = legacy[1], legacy[2]
+                for i in eachindex(b_e)
+                    E = b_e[i]
+                    if E <= sec_e[1]
+                        xs_cols[i, j] = 0.0
+                    elseif E >= sec_e[end]
+                        xs_cols[i, j] = sec_xs[end]
+                    else
+                        idx = searchsortedfirst(sec_e, E)
+                        if idx <= 1
+                            xs_cols[i, j] = sec_xs[1]
+                        else
+                            f = (E - sec_e[idx-1]) / (sec_e[idx] - sec_e[idx-1])
+                            xs_cols[i, j] = sec_xs[idx-1] + f * (sec_xs[idx] - sec_xs[idx-1])
+                        end
+                    end
+                end
+            else
+                # Fallback: raw MF3 interpolation
+                thresh = sec.tab.x[1]
+                for i in eachindex(b_e)
+                    xs_cols[i, j] = b_e[i] < thresh ? 0.0 : NJOY.interpolate(sec.tab, b_e[i])
+                end
             end
         end
     end
