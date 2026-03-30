@@ -976,6 +976,52 @@ function build_conbar_damage_vector(energies::AbstractVector{<:Real},
     return dame_out, ebar_out
 end
 
+"""
+    build_capdam_damage_vector(energies, Q, A, Z, mt; E_d, step) -> dame_out
+
+Precompute charged-particle damage vector using capdam-style bracket stepping.
+Matches Fortran capdam (heatr.f90:1792-1826): evaluates GL damage at 1.1x-stepped
+bracket endpoints and linearly interpolates to each query energy.
+"""
+function build_capdam_damage_vector(energies::AbstractVector{<:Real},
+                                    Q::Real, A::Real, Z::Real, mt::Integer;
+                                    E_d::Real=25.0, step::Real=1.1)
+    ne = length(energies)
+    dame_out = zeros(Float64, ne)
+    small = 1e-10
+
+    # Capdam SAVE state (heatr.f90:1763)
+    en = 0.0; damn = 0.0
+    el = 0.0; daml = 0.0
+
+    for ie in 1:ne
+        ee = energies[ie]
+
+        # Check if we need a new bracket (Fortran capdam lines 1795-1821)
+        if ee >= en * (1.0 - small)
+            el = en; daml = damn
+            e = step * el
+            if e < ee * (1.0 - small)
+                e = (1.0 - small) * ee
+            end
+            if el == 0.0
+                e = ee  # first call
+            end
+            damn = capdam_particle(e, Q, A, Z, mt; E_d=E_d)
+            en = e
+        end
+
+        # Linear interpolation (Fortran capdam line 1825: terp1)
+        if en > el
+            f = (ee - el) / (en - el)
+            dame_out[ie] = daml + f * (damn - daml)
+        else
+            dame_out[ie] = damn
+        end
+    end
+    return dame_out
+end
+
 "Linear interpolation of mu_bar from MF4 (energies, values) table."
 function _interp_mubar(data::Tuple{Vector{Float64},Vector{Float64}}, E::Real)
     es, ms = data
@@ -1077,6 +1123,18 @@ function compute_kerma(pendf::PointwiseMaterial;
         dame_v
     else
         nothing
+    end
+
+    # Precompute capdam damage vectors for MT=103-107 (charged-particle)
+    # Fortran capdam uses bracket stepping with step=1.1 (same pattern as disbar).
+    _capdam_dame_vecs = Dict{Int, Vector{Float64}}()
+    if Z > 0
+        for (icol, mt) in enumerate(pendf.mt_list)
+            (mt < 103 || mt > 107) && continue
+            Q = get(Q_values, mt, 0.0)
+            _capdam_dame_vecs[mt] = build_capdam_damage_vector(
+                pendf.energies, Q, awr, Float64(Z), mt; E_d=ed)
+        end
     end
 
     total   = zeros(Float64, ne)
@@ -1204,7 +1262,11 @@ function compute_kerma(pendf::PointwiseMaterial;
                 h = (E + Q) * sigma
                 cap[ie] += h
                 if Z > 0 && mt >= 103 && mt <= 107
-                    damage[ie] += capdam_particle(E, Q, awr, Float64(Z), mt; E_d=ed) * sigma
+                    if haskey(_capdam_dame_vecs, mt)
+                        damage[ie] += _capdam_dame_vecs[mt][ie] * sigma
+                    else
+                        damage[ie] += capdam_particle(E, Q, awr, Float64(Z), mt; E_d=ed) * sigma
+                    end
                 end
             end
             total[ie] += h
