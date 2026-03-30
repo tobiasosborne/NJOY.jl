@@ -915,6 +915,67 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
     return dame_out, ebar_out
 end
 
+"""
+    build_conbar_damage_vector(energies, u, theta, A, Z; E_d, step) -> (dame_out, ebar_out)
+
+Precompute evaporation damage and ebar vectors using conbar-style bracket stepping.
+Matches Fortran conbar (heatr.f90:2273-2290): evaluates anadam/anabar at 1.5x-stepped
+bracket endpoints and linearly interpolates to each query energy.
+"""
+function build_conbar_damage_vector(energies::AbstractVector{<:Real},
+                                    u::Real, theta::Real,
+                                    A::Real, Z::Real;
+                                    E_d::Real=25.0, step::Real=1.5)
+    ne = length(energies)
+    dame_out = zeros(Float64, ne)
+    ebar_out = zeros(Float64, ne)
+    small = 1e-10
+    etp = 2e7  # etop
+
+    # Conbar SAVE state (heatr.f90:2068-2071)
+    e1 = 0.0;  d1 = 0.0;  eb1 = 0.0
+    e2 = 0.0;  d2 = 0.0;  eb2 = 0.0
+
+    for ie in 1:ne
+        ee = energies[ie]
+        ee <= u && continue
+
+        # Check if we need a new bracket (Fortran conbar lines 2273-2289)
+        if ee >= e2 * (1.0 - small)
+            done = false
+            while !done
+                d1 = d2;  eb1 = eb2;  e1 = e2
+                e2_new = step * e1
+                if e2_new > etp * (1.0 + small)
+                    e2_new = etp
+                end
+                if e1 == 0.0
+                    e2_new = ee  # first call: jump to requested energy
+                end
+                e2 = e2_new
+                d2 = evaporation_damage(e2, u, theta, A, Z; E_d=E_d)
+                eb2 = evaporation_ebar(e2, u, theta)
+                if abs(e2 - etp) < small * etp
+                    done = true
+                elseif e1 != 0.0 && ee <= e2 * (1.0 + small)
+                    done = true
+                end
+            end
+        end
+
+        # Linear interpolation (Fortran conbar line 2290: terp1)
+        if e2 > e1
+            f = (ee - e1) / (e2 - e1)
+            dame_out[ie] = d1 + f * (d2 - d1)
+            ebar_out[ie] = eb1 + f * (eb2 - eb1)
+        else
+            dame_out[ie] = d2
+            ebar_out[ie] = eb2
+        end
+    end
+    return dame_out, ebar_out
+end
+
 "Linear interpolation of mu_bar from MF4 (energies, values) table."
 function _interp_mubar(data::Tuple{Vector{Float64},Vector{Float64}}, E::Real)
     es, ms = data
@@ -973,18 +1034,49 @@ function compute_kerma(pendf::PointwiseMaterial;
     # state machine for ALL discrete MTs (51-90), not direct evaluation.
     # Each MT gets its own disbar instance with per-MT save variables.
     # The ebar uses stepped cn interpolation matching Fortran (lines 1985,2007-2008).
+    # For MTs WITHOUT MF4 data: Fortran disbar still steps with isotropic coefficients
+    # (fl(1)=1, fl(2)=0, imiss=1, enext=etop). Generate synthetic isotropic MF4 data.
     _inel_dame_vecs = Dict{Int, Vector{Float64}}()
     _inel_ebar_vecs = Dict{Int, Vector{Float64}}()
-    if Z > 0 && mf4_legendre_all !== nothing
-        for mt in keys(mf4_legendre_all)
-            Q = get(Q_values, mt, 0.0)
-            thresh_mt = (awr + 1.0) / awr * abs(Q)
+    # Synthetic isotropic MF4: 2 energies spanning full range, coefficients [1.0, 0.0]
+    _iso_mf4 = (Float64[1e-5, 2e7], Vector{Float64}[[1.0, 0.0], [1.0, 0.0]])
+    for (icol, mt) in enumerate(pendf.mt_list)
+        (mt < 51 || mt > 90) && continue
+        Q = get(Q_values, mt, 0.0)
+        abs(Q) < 1e-20 && continue  # skip if no Q (not a real reaction)
+        thresh_mt = (awr + 1.0) / awr * abs(Q)
+        # Use actual MF4 data if available, otherwise isotropic
+        mf4_data = if mf4_legendre_all !== nothing && haskey(mf4_legendre_all, mt)
+            mf4_legendre_all[mt]
+        else
+            _iso_mf4
+        end
+        if Z > 0
             dame_v, ebar_v = build_disbar_damage_vector(
-                pendf.energies, awr, Float64(Z), mf4_legendre_all[mt];
+                pendf.energies, awr, Float64(Z), mf4_data;
                 E_d=ed, thresh=thresh_mt)
             _inel_dame_vecs[mt] = dame_v
             _inel_ebar_vecs[mt] = ebar_v
+        else
+            # No damage, but still need ebar from stepping
+            _, ebar_v = build_disbar_damage_vector(
+                pendf.energies, awr, 0.0, mf4_data;
+                E_d=ed, thresh=thresh_mt)
+            _inel_ebar_vecs[mt] = ebar_v
         end
+    end
+
+    # Precompute conbar damage vector for MT=91 (evaporation)
+    # Fortran conbar uses bracket stepping with step=1.5 for damage (anadam),
+    # then linearly interpolates to query energies (lines 2273-2290).
+    # Ebar is computed directly via anabar at each query energy (line 2267).
+    _conbar_dame_vec = if Z > 0 && conbar_params !== nothing
+        u_con, theta_con = conbar_params
+        dame_v, _ = build_conbar_damage_vector(pendf.energies, u_con, theta_con,
+                                               awr, Float64(Z); E_d=ed)
+        dame_v
+    else
+        nothing
     end
 
     total   = zeros(Float64, ne)
@@ -1082,7 +1174,8 @@ function compute_kerma(pendf::PointwiseMaterial;
                 end
             elseif mt == 91
                 # Fortran nheat lines 1183,1196-1202: icon=2, conbar for continuum
-                # conbar reads MF5 outgoing spectrum → ebar via anabar/tabbar
+                # conbar line 2267: anabar computes ebar DIRECTLY at query energy
+                # conbar lines 2273-2290: anadam damage uses 1.5x bracket stepping
                 lr = get(lr_values, mt, Int32(0))
                 q0 = (lr != 0 && lr != 31) ? get(qm_values, mt, Q) : Q
                 if conbar_params !== nothing
@@ -1090,8 +1183,12 @@ function compute_kerma(pendf::PointwiseMaterial;
                     ebar = evaporation_ebar(E, u_con, theta_con)
                     h = (E + q0 - ebar) * sigma
                     if Z > 0
-                        damage[ie] += evaporation_damage(E, u_con, theta_con,
-                                                          awr, Float64(Z); E_d=ed) * sigma
+                        if _conbar_dame_vec !== nothing
+                            damage[ie] += _conbar_dame_vec[ie] * sigma
+                        else
+                            damage[ie] += evaporation_damage(E, u_con, theta_con,
+                                                              awr, Float64(Z); E_d=ed) * sigma
+                        end
                     end
                 else
                     h = (E + Q) * sigma  # fallback without MF5 data
