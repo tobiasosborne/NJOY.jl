@@ -319,7 +319,20 @@ function sab_kernel(E::Real, E_prime::Real, mu::Real, data::SABData, T::Real;
         sig = pf * exp(ls - beta_raw/2)
         return sig < sigmin ? 0.0 : sig
     end
-    # SCT fallback
+    # Fortran sig: when a*az < test2 AND b < test2, the sabflg corner check is
+    # skipped and terpq runs directly. If terpq returns sabflg (-225), the
+    # Fortran evaluates exp(s - bb/2) ≈ exp(-215) ≈ 0 (below sigmin).
+    # It does NOT fall through to SCT. Only when the sabflg corner check
+    # explicitly fires (a*az >= test2 or b >= test2) does the Fortran use SCT.
+    # Match this: if the skip condition was true, use terpq result (≈0), not SCT.
+    test2_sab = 30.0
+    bt_check = data.lasym == 0 ? abs(beta_raw)*kT/0.0253 : (data.lat==1 ? beta_raw*kT/0.0253 : beta_raw)
+    if at * data.awr < test2_sab && abs(bt_check) < test2_sab
+        # terpq path: sabflg means exp(sabflg - bb/2) ≈ 0
+        sig = pf * exp(ls - beta_raw/2)
+        return sig < sigmin ? 0.0 : sig
+    end
+    # SCT fallback — only when sabflg corner check explicitly sent us here
     Te = data.T_eff > 0 ? data.T_eff*PhysicsConstants.bk : kT
     bs, as = abs(beta_raw), alpha_raw
     arg = (as-bs)^2*kT/(4*as*Te) + (bs+beta_raw)/2

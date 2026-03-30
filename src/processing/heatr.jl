@@ -738,17 +738,18 @@ function _disbar_dame_eval(e::Real, A::Real, Z::Real,
 end
 
 """
-    build_disbar_damage_vector(energies, A, Z, mf4_data; E_d, step) -> Vector{Float64}
+    build_disbar_damage_vector(energies, A, Z, mf4_data; E_d, step, thresh) -> Vector{Float64}
 
-Compute elastic damage at each energy in `energies`, matching the Fortran
-disbar stepping/interpolation state machine (heatr.f90 lines 1948-2013).
-Energies MUST be sorted. The Fortran evaluates at stepped points (1.1x apart),
-then linearly interpolates to the actual query energy.
+Compute damage at each energy, matching Fortran disbar stepping state machine
+(heatr.f90 lines 1948-2013). For elastic (thresh=0): r=1. For inelastic (thresh>0):
+r=sqrt(1-thresh/E) above threshold, r=0 below. Evaluates at 1.1x-stepped bracket
+points clamped to MF4 grid boundaries, linearly interpolates between brackets.
 """
 function build_disbar_damage_vector(energies::AbstractVector{<:Real},
                                      A::Real, Z::Real,
                                      mf4_data::Tuple{Vector{Float64},Vector{Vector{Float64}}};
-                                     E_d::Real=25.0, step::Real=1.1)
+                                     E_d::Real=25.0, step::Real=1.1,
+                                     thresh::Real=0.0)
     lp = lindhard_params(Z, A, Z, A)
     afact = 1.0 / (A + 1.0)^2
     arat = 1.0 / A
@@ -802,11 +803,23 @@ function build_disbar_damage_vector(energies::AbstractVector{<:Real},
             e = ee  # first call: el=0
         end
 
-        # Evaluate damage at e
+        # Evaluate damage at e (Fortran disbar lines 1956-2003)
         if e < enx * (1.0 - small)
             damn = 0.0
         else
-            damn = _disbar_dame_eval(e, A, Z, mf4_data, lp; E_d=E_d)
+            if thresh > 0
+                # Inelastic: r from threshold (Fortran lines 1957-1963)
+                # thresh >= e*(1-small) → r=0 → dame=0; else r=sqrt(1-thresh/e)
+                if thresh >= e * (1.0 - small)
+                    r = 0.0
+                else
+                    r = sqrt(1.0 - thresh / e)
+                end
+                fl = _interp_legendre(mf4_data, e)
+                damn = _disbar_damage_fl(e, A, Z, r, fl; E_d=E_d)
+            else
+                damn = _disbar_dame_eval(e, A, Z, mf4_data, lp; E_d=E_d)
+            end
         end
         en = e
 
@@ -873,6 +886,20 @@ function compute_kerma(pendf::PointwiseMaterial;
                                     E_d=ed)
     else
         nothing
+    end
+
+    # Precompute inelastic damage vectors — Fortran disbar uses the SAME stepping
+    # state machine for ALL discrete MTs (51-90), not direct evaluation.
+    # Each MT gets its own disbar instance with per-MT save variables.
+    _inel_dame_vecs = Dict{Int, Vector{Float64}}()
+    if Z > 0 && mf4_legendre_all !== nothing
+        for mt in keys(mf4_legendre_all)
+            Q = get(Q_values, mt, 0.0)
+            thresh_mt = (awr + 1.0) / awr * abs(Q)
+            _inel_dame_vecs[mt] = build_disbar_damage_vector(
+                pendf.energies, awr, Float64(Z), mf4_legendre_all[mt];
+                E_d=ed, thresh=thresh_mt)
+        end
     end
 
     total   = zeros(Float64, ne)
@@ -950,14 +977,14 @@ function compute_kerma(pendf::PointwiseMaterial;
                 h = (E + q0 - ebar) * sigma
                 inelast[ie] += h
                 if Z > 0
-                    # Fortran disbar lines 1989-2001: 64-pt Gauss-Legendre damage
-                    thresh_mt = (awr + 1.0) / awr * abs(Q)
-                    if E > thresh_mt
-                        r = sqrt(1.0 - thresh_mt / E)
-                        if mf4_legendre_all !== nothing && haskey(mf4_legendre_all, mt)
-                            fl_inel = _interp_legendre(mf4_legendre_all[mt], E)
-                            damage[ie] += _disbar_damage_fl(E, awr, Float64(Z), r, fl_inel; E_d=ed) * sigma
-                        else
+                    # Fortran disbar: use precomputed stepping state machine
+                    if haskey(_inel_dame_vecs, mt)
+                        damage[ie] += _inel_dame_vecs[mt][ie] * sigma
+                    else
+                        # Fallback: direct evaluation (no MF4 data for this MT)
+                        thresh_mt = (awr + 1.0) / awr * abs(Q)
+                        if E > thresh_mt
+                            r = sqrt(1.0 - thresh_mt / E)
                             damage[ie] += _disbar_damage(E, awr, Float64(Z), r; E_d=ed) * sigma
                         end
                     end

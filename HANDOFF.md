@@ -1782,3 +1782,138 @@ cd build && cmake --build . --target njoy
 | `src/processing/pendf_writer.jl` | PENDF output | `write_full_pendf`, `_write_mf6_section`, `_write_mf6_coherent_stub` |
 | `src/processing/reconr.jl` | Resonance reconstruction | `reconr`, `reconstruct` |
 | `test/validation/t01_pipeline.jl` | T01 test script | Full pipeline + comparison |
+
+---
+
+### Phase 31: SAB kernel sabflg fix + inelastic disbar stepping — 1072→725 failures at 1e-9
+
+**WARNING TO NEXT AGENT: READ THIS ENTIRE SECTION AND ALL TRAPS BEFORE WRITING ANY CODE.**
+
+**2 bugs fixed, 2 dead-end investigations documented. Rule 6 saved hours.**
+
+**Bug 1 — FIXED (SAB kernel sabflg/SCT path mismatch in sab_kernel, thermr.jl)**:
+
+**Root cause**: When `_interp_sab` returned sabflg (-225), `sab_kernel` unconditionally fell through to the SCT (Short Collision Time) approximation. But in the Fortran `sig` function (thermr.f90:2514-2612), there are TWO paths that lead to sabflg:
+
+1. **sabflg corner check** (lines 2556-2559): If ANY of the 4 corner cells `sab[ia,ib]`, `sab[ia+1,ib]`, `sab[ia,ib+1]`, `sab[ia+1,ib+1]` is ≤ sabflg → jump to label 170 (SCT). This ONLY fires when `a*az >= test2 (30) OR b >= test2 (30)` (line 2555).
+
+2. **terpq returns sabflg** (line 2569): When `a*az < 30 AND b < 30`, the corner check is SKIPPED (go to label 155). Terpq runs, but may return sabflg if the SAB table values at those positions are all -225. The Fortran then computes `exp(sabflg - bb/2) ≈ exp(-215) ≈ 0`, which is below sigmin (1e-10) → sig=0.
+
+Julia's `sab_kernel` treated BOTH cases the same → SCT fallback. But for case 2, SCT gives ~1e-5 barn (nonzero) instead of ~0. This caused Julia's `sigl_equiprobable` to integrate a nonzero kernel tail at mu > -0.453 where the Fortran correctly returns 0, producing 3.6% sigma overestimates at high-beta secondary energies.
+
+**How it was found**: 3+1 agent pattern. Patched Fortran `sig` function with `write(*,*)` at both the terpq return (line 2574) and the SCT return (line 2611). Compared side-by-side with Julia's `sab_kernel` at E=0.56 eV, E'=0.049 eV (beta=20.2). The Fortran SCT values MATCHED Julia exactly (2.235e-4 at mu=-1). But the Fortran sigl total sigma was 4.247e-5 while Julia got 4.402e-5 (3.6% higher). The extra came from Julia's nonzero kernel at mu > -0.453 where `a*az < 30` causes the Fortran to take the terpq path (returning 0) while Julia took SCT (returning nonzero).
+
+**Fix**: In `sab_kernel` (thermr.jl line 322), added a check: when `_interp_sab` returns sabflg AND `at*awr < 30 && bt < 30` (the skip condition was true), use the terpq result (`exp(sabflg - bb/2) → 0`) instead of the SCT fallback.
+
+**Impact**: MF6/MT=229 diffs: **511 → 50** (90% reduction). Total 1e-9 failures: **1072 → 742** (31% reduction).
+
+**Trap 96 (NEW — FIXED)**: The Fortran `sig` function has TWO paths to sabflg: (1) corner check → SCT, (2) terpq → sabflg value. These give DIFFERENT results. Julia must distinguish them. The key: when `a*az < 30 AND b < 30`, the sabflg came from terpq, NOT from the corner check. Use `exp(sabflg - bb/2)` (≈0), NOT SCT. The condition `a*az = alpha_lat * AWR` crosses 30 at a specific mu value, creating a sharp kernel discontinuity that both Julia and Fortran must match exactly.
+
+---
+
+**Bug 2 — FIXED (inelastic disbar stepping state machine in heatr.jl)**:
+
+**Root cause**: Julia's `compute_kerma` computed discrete inelastic damage (MT=51-90) by calling `_disbar_damage_fl` directly at EVERY query energy. The Fortran's `disbar` subroutine (heatr.f90:1829-2013) uses a **stepping state machine** with `save` variables: it evaluates the 64-point GL quadrature at 1.1x-stepped bracket points (clamped to MF4 grid boundaries via `enext` from `hgtfle`), then LINEARLY INTERPOLATES to the query energy. This applies to ALL discrete MTs, not just elastic — the Fortran initializes disbar (`e=0` call) once per MT, then calls it for each energy with state persisting.
+
+**How it was found**: 3+1 agent pattern. Agent 1 deeply read Fortran disbar, confirmed the stepping state machine applies to ALL MTs (disbar is called at line 1190 for all `icon=1` reactions). Agent 2 read `hgtfle`, confirmed it properly zero-pads (disproving the stale-fl hypothesis). Agent 3 confirmed Julia only uses the state machine for elastic. Direct comparison showed Julia elastic damage MATCHED Fortran exactly at E=10.448 MeV (both have bracket [10.0, 10.5] with identical dame values), while the TOTAL MT=444 differed by 93.8 eV-barn (0.28%), proving the error comes from inelastic MTs.
+
+**Fix**: Generalized `build_disbar_damage_vector` with a `thresh` parameter for inelastic MTs. For `thresh > 0`: `r = 0` when `thresh >= e*(1-small)`, `r = sqrt(1-thresh/e)` above threshold (matching Fortran lines 1957-1963). In `compute_kerma`, precompute damage vectors for all discrete MTs with MF4 data using this state machine, stored in `_inel_dame_vecs`. The per-energy loop uses precomputed values (`_inel_dame_vecs[mt][ie] * sigma`) instead of direct evaluation.
+
+**Impact**: MT=444 exact matches: **36 → 52** (+16). 1e-9 failures: **742 → 725** (-17). No regression at any tolerance.
+
+**Trap 97 (NEW — FIXED)**: Fortran disbar uses the SAME stepping state machine (1.1x bracket + hgtfle enext clamping + linear interpolation) for ALL discrete MTs, not just elastic. Each MT gets its own disbar instance (initialized at e=0 per MT, save variables persist per-MT). Julia must precompute damage vectors for MT=51-90 the same way as MT=2.
+
+**Trap 98 (NEW — FIXED)**: The threshold guard for inelastic r must match Fortran EXACTLY: `thresh >= e*(1-small)` → `r=0` (lines 1958-1959). Using `e < thresh*(1-small)` has different boundary behavior and causes 2.6% errors near threshold. Also: when `r=0`, the recoil energy `e2 = e*(1+g^2)*afact/arat = 0` for all mu, so `dame = 0` naturally — no separate threshold skip needed.
+
+---
+
+**Dead-end investigation 1 — Fortran hgtfle stale fl coefficients (WRONG HYPOTHESIS)**:
+
+Investigated whether Fortran `hgtfle` retains stale Legendre coefficients from previous bracket evaluations when NL decreases. Diagnostic showed fl[6]=-0.002168 at E=3.0 MeV (which has NL=4), matching the E=2.98 MeV value (NL=6). Hypothesis: hgtfle doesn't zero-pad shorter records.
+
+**DISPROVED by Agent 2**: hgtfle (heatr.f90 lines 4218-4406) at label 130 (lines 4363-4381) explicitly does:
+```fortran
+nlmax=max(nlo,nhi)
+do i=1,nle
+   if (i.le.nlmax) then
+      call terp1(elo,flo(i),ehi,fhi(i),e,fle(i),innt)
+   else
+      fle(i)=0  ! ZERO-PAD above nlmax
+   endif
+enddo
+nle=nlmax
+```
+
+**Rule 6 confirmed**: The stale fl values seen in the diagnostic came from the fl(65) array in disbar itself (save variable), NOT from hgtfle's output. The hgtfle function properly zero-pads. The stale values in disbar's fl array are overwritten by hgtfle's output. The diagnostic printed BEFORE hgtfle was called, showing the pre-call state.
+
+Implementing the stale-fl hypothesis introduced marginal regressions (+10 at 1e-4, +12 at 1e-3) and was reverted.
+
+**Dead-end investigation 2 — Direct inelastic disbar without threshold (WRONG THRESHOLD)**:
+
+First attempt at the inelastic state machine used `e < thresh * (1.0 - small)` as the threshold guard. This caused 2.6% errors at E=4.98 MeV (near MT=51 threshold at 4.81 MeV). The bracket [el, en] straddled the threshold, and the wrong guard allowed nonzero damage at el < thresh. Fixed by using the Fortran's exact condition: `thresh >= e * (1.0 - small)`.
+
+---
+
+**T01 results after Phase 31:**
+
+```
+Structural: 41/41 sections, 32962/32962 lines — EXACT MATCH
+rel_tol=1e-9: 725 fail (was 1072 at start of session)
+rel_tol=1e-7: 725 fail (was 1072)
+rel_tol=1e-4: 191 fail (was 226)
+rel_tol=1e-3:  74 fail (was 98)
+Total data exact: 1658/2386 (69.5%) — was 1641 (68.8%)
+```
+
+**Per-section diff breakdown (828 total line diffs, down from 1290):**
+
+| Section | Diffs | Class | Fixability |
+|---------|-------|-------|------------|
+| MT=444 | 271 | Damage energy | 0.28% worst. Remaining: evaporation (MT=91) adaptive convergence + elastic stale-fl (minor) |
+| MT=301 | 242 | KERMA | 0.27% worst. Cascades from MT=1 sigma1 ULP |
+| MF3/MT=229 | 161 | calcem XS | 0.002% worst. terp_lagrange interpolation |
+| MT=1 | 67 | sigma1 ULP | IRREDUCIBLE. Broadening FP accumulation order |
+| MF6/MT=229 | 50 | sigl FP | Mostly ±1 ULP at high IEs |
+| MF6/MT=221 | 28 | Free gas FP | ±1 ULP |
+| MF1/MT=451 | 5 | Directory NC | Mechanical fix: `div(N,6)` vs `ceil(N/6)` |
+| MT=221 | 2 | emax boundary | Minor |
+| MT=2 | 1 | sigma1 ULP | IRREDUCIBLE |
+| MF2/MT=151 | 1 | EH value | Trivial |
+
+**Session improvement: -347 tolerance failures at 1e-9 (32% reduction), -24 at 1e-3 (24% reduction).**
+
+**Files changed**:
+- `src/processing/thermr.jl` — sabflg/SCT path fix in `sab_kernel` (Trap 96)
+- `src/processing/heatr.jl` — inelastic disbar stepping in `build_disbar_damage_vector` + `compute_kerma` precompute (Traps 97-98)
+- `test/validation/t01_pipeline.jl` — path fix (old `/home/tobias/` → `/home/tobiasosborne/`)
+
+**How to verify this session's fixes:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+# Expected: 41/41 sections, 32962 lines, 1658/2386 data exact
+# Then run tolerance test (see Python script in HANDOFF section above)
+# Expected: 725 at 1e-9, 191 at 1e-4, 74 at 1e-3
+```
+
+---
+
+### Remaining MT=444 analysis — what the NEXT AGENT should investigate
+
+**The 0.28% worst MT=444 error at E=10.45 MeV**: After both fixes, the elastic damage brackets match Fortran exactly. The discrete inelastic MTs (51-68) now use the stepping state machine. The remaining error comes from:
+
+1. **Evaporation damage (MT=91)**: `evaporation_damage` uses an adaptive convergence stack (Fortran `anadam` lines 2508-2598) with 4-point GL at each outgoing energy. Julia's implementation may have subtle convergence differences. At E=10.45 MeV, MT=91 contributes dame=179 (Fortran) — small compared to MT=2 (18708) and MT=51 (10689), but the relative error could be large.
+
+2. **Elastic stale fl**: The `hgtfle` zero-padding was confirmed, but the `disbar` save-variable `fl(65)` array may still retain stale values between bracket evaluations IF `hgtfle` returns a shorter `nle` than the disbar loop uses. Agent 1 confirmed `nle=nlmax=max(nlo,nhi)` from hgtfle, but the `nld` in disbar is set BEFORE calling hgtfle (line 1907: `nld=60`) and hgtfle OVERWRITES it. If `nld` was previously set to a larger value from a prior hgtfle call, the GL loop at lines 1992-2001 iterates `nld` times (using the new, possibly smaller value). Need to verify: does disbar's `nld` persist via `save` or is it local? **Line 1840**: `nld` is declared as `integer::nld` (local, NOT in the save statement). So nld is reset to 60 on each normal entry (line 1966). This means the GL loop always uses the nld returned by the current hgtfle call. The stale-fl hypothesis is definitively dead for elastic.
+
+3. **MF4 Legendre interpolation precision**: At 3 MeV, Julia's zero-padded interpolation gives dame=29427 vs Fortran's 29431 (0.013%). This is from the zero-padding difference at exact MF4 grid points where NL decreases. Small but contributes ~4 eV-barn per bracket near these transitions.
+
+**DO NOT attempt the stale-fl fix again.** It was thoroughly disproved. Focus on:
+- MT=91 evaporation damage (compare Julia vs Fortran at specific energies via gdb)
+- The 3+1 agent pattern is PROVEN EFFECTIVE — use it for every investigation
+
+**Trap 99 (INVESTIGATION)**: `nld` in Fortran disbar is a LOCAL variable (line 1840), NOT in the save statement (lines 1895-1896). It is set to 60 at line 1907/1966 before each hgtfle call, then overwritten by hgtfle. The GL loop (line 1992) iterates `nld` times using the hgtfle-returned value. There is NO stale nld. This definitively kills the stale-fl hypothesis.
+
+**Trap 100 (CRITICAL WARNING)**: The `test/validation/t01_pipeline.jl` script has HARDCODED absolute paths. These were updated from `/home/tobias/` to `/home/tobiasosborne/` in this session. If running on a different machine, ALL 5 path references must be updated. Consider using `@__DIR__` or relative paths in a future cleanup.
+
+**Trap 101 (CRITICAL WARNING)**: When implementing the inelastic disbar state machine, the threshold condition MUST be `thresh >= e * (1.0 - small)` (matching Fortran line 1958), NOT `e < thresh * (1.0 - small)`. These are NOT equivalent near the boundary due to floating-point rounding. The wrong condition caused 2.6% errors at MT=51 threshold (E=4.98 MeV). Always read the Fortran (Rule 3) and match the exact comparison direction.

@@ -1,7 +1,7 @@
 using NJOY
 
 function run_t01()
-    r = reconr("/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"; mat=1306, err=0.005)
+    r = reconr("/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"; mat=1306, err=0.005)
     A = Float64(r.mf2.AWR)
     alpha = A / (NJOY.PhysicsConstants.bk * 296.0)
     thnmax = 4.81207e6
@@ -37,7 +37,7 @@ function run_t01()
 
     # Read MF12/MT=102 gamma data from ENDF file (C-nat: 3 gammas)
     # Fortran heatr reads these for gheat photon recoil computation
-    endf_file = "/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"
+    endf_file = "/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/run_broadr/tape20"
     gamma_102 = Tuple{Float64,Float64}[]
     begin
         io = open(endf_file)
@@ -230,7 +230,7 @@ function run_t01()
     println("MT=221: $(length(mt221_e)) pts ($(length(mt221_e)-2) below cutoff)")
 
     # === THERMR 2: S(α,β) from tape26 ===
-    sab = NJOY.read_mf7_mt4("/home/tobias/Projects/NJOY.jl/njoy-reference/tests/resources/t322", 1065, 296.0)
+    sab = NJOY.read_mf7_mt4("/home/tobiasosborne/Projects/NJOY.jl/njoy-reference/tests/resources/t322", 1065, 296.0)
 
     # Build Bragg data first (needed for thermal grid)
     bragg = NJOY.build_bragg_data(
@@ -327,7 +327,7 @@ function run_t01()
 
     # === MF12/MF13 ===
     mf12 = String[]; mf13 = String[]
-    for line in readlines("/home/tobias/Projects/NJOY.jl/test/validation/oracle_cache/test01/after_reconr.pendf")
+    for line in readlines("/home/tobiasosborne/Projects/NJOY.jl/test/validation/oracle_cache/test01/after_reconr.pendf")
         length(line) < 75 && continue
         p = rpad(line, 80); mf = NJOY._parse_int(p[71:72]); mt = NJOY._parse_int(p[73:75])
         mf == 12 && mt > 0 && push!(mf12, line)
@@ -347,7 +347,7 @@ function run_t01()
     end
 
     # === COMPARE ===
-    ref = "/home/tobias/Projects/NJOY.jl/njoy-reference/tests/01/referenceTape25"
+    ref = "/home/tobiasosborne/Projects/NJOY.jl/njoy-reference/tests/01/referenceTape25"
     println("\ntape25: $(countlines("/tmp/t01_tape25.pendf")) (ref: $(countlines(ref)))")
 
     function list_sections(fn)
