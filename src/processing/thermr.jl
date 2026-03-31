@@ -860,8 +860,10 @@ function sigl_equiprobable(E::Float64, E_prime::Float64, nbin::Int,
             j += 1
             xil = 1.0 / (xs[i] - xl)
             f_slope = (ys[i] - yl) * xil
-            if yl < sigmin || abs((fract - cum_sum) * f_slope / yl^2) <= ytol
-                xn = xl + (fract - cum_sum) / max(yl, sigmin)
+            # Fortran sigl label 170-175: linear only when yl >= sigmin AND |test| <= ytol
+            # When yl < sigmin (e.g. yl=0 at zero-kernel edge) → MUST use quadratic
+            if yl >= sigmin && abs((fract - cum_sum) * f_slope / yl^2) <= ytol
+                xn = xl + (fract - cum_sum) / yl
             else
                 rf = 1.0 / f_slope
                 disc = (yl * rf)^2 + 2 * (fract - cum_sum) * rf

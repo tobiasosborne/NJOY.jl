@@ -329,12 +329,59 @@ function run_t01()
         end
         return s
     end
-    mt229_xs = Float64[]
-    for e in thermal_e
-        if e > emax_thermr; push!(mt229_xs, 0.0)
-        else
-            push!(mt229_xs, terp_lagrange(esi_sab, xsi_sab, e, 5))
+    # Two-step interpolation matching Fortran: calcem(94pts) → broadened grid (~145pts) → thermal(571pts)
+    # Step 1: Fortran calcem label 610 interpolates xsi onto the broadened elastic grid via terp
+    # The broadened grid = input PENDF energies (from first thermr) below emax
+    intermediate_e = sort(unique(Float64[e for e in b_e if e <= emax_thermr * (1 + 1e-10)]))
+    # Add emax boundary points that Fortran startb includes
+    push!(intermediate_e, emax_thermr)
+    push!(intermediate_e, NJOY.round_sigfig(emax_thermr, 7, 1))
+    sort!(unique!(intermediate_e))
+    intermediate_xsi = Float64[]
+    for e in intermediate_e
+        push!(intermediate_xsi, terp_lagrange(esi_sab, xsi_sab, e, 5))
+    end
+    # Fortran calcem label 610: if (ie.eq.ne) xs=0 — last point XS is forced to 0
+    intermediate_xsi[end] = 0.0
+    # Step 2: Fortran coh uses streaming 5-point window with order=nlt-1
+    # (coh line 783: nlt1=nlt-1; lines 864-865: nlt--,nlt1-- when iex==ne)
+    # The window slides through the intermediate grid; near the end, nlt/nlt1 decrease.
+    # Matching this exactly requires a streaming window, not a global terp_lagrange.
+    function coh_interp_streaming(inter_e, inter_xsi, query_e)
+        ne_inter = length(inter_e)
+        nlt = min(5, ne_inter)
+        nlt1 = nlt - 1
+        # Prime window with first nlt points
+        xw = zeros(nlt); zw = zeros(nlt)
+        iex = nlt  # last index read from inter_e
+        for k in 1:nlt
+            xw[k] = inter_e[k]; zw[k] = inter_e[k] <= 0 ? 0.0 : inter_xsi[k]
         end
+        if iex == ne_inter; nlt -= 1; nlt1 -= 1; end
+        small = 3e-5
+        result = Float64[]
+        for e in query_e
+            if e > emax_thermr; push!(result, 0.0); continue; end
+            # Advance window: Fortran coh label 170
+            while nlt >= 3 && e > xw[3] * (1 + small) && iex < ne_inter
+                for k in 1:nlt; k < nlt && (xw[k] = xw[k+1]; zw[k] = zw[k+1]); end
+                iex += 1
+                xw[nlt] = inter_e[iex]; zw[nlt] = inter_xsi[iex]
+                if iex == ne_inter; nlt -= 1; nlt1 -= 1; end
+            end
+            # Interpolate: terp(xw, zw, nlt, e, nlt1)
+            push!(result, terp_lagrange(xw[1:max(nlt,1)], zw[1:max(nlt,1)], e, max(nlt1,1)))
+        end
+        return result
+    end
+    # The query energies must be in increasing order for the streaming window
+    sorted_thermal_idx = sortperm(thermal_e)
+    sorted_thermal = thermal_e[sorted_thermal_idx]
+    mt229_sorted = coh_interp_streaming(intermediate_e, intermediate_xsi, sorted_thermal)
+    # Unsort back to thermal_e order
+    mt229_xs = similar(mt229_sorted)
+    for (i, idx) in enumerate(sorted_thermal_idx)
+        mt229_xs[idx] = mt229_sorted[i]
     end
     extra_mf3[229] = (thermal_e, mt229_xs)
 
