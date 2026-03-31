@@ -2253,3 +2253,59 @@ Equi-probable cosine values differ by ±1 ULP at high incident energies. The sig
 31 tests RAN_OK without oracles. Many share materials with BIT-IDENTICAL tests.
 
 **Priority 5 — Grind BROADR to bit-identical on more tests**.
+
+---
+
+### Phase 35: T02 broadr pipeline test script (PARTIAL — NOT A PROPER PORT)
+
+**What was done**: Created `test/validation/t02_pipeline.jl` — a manually-wired test script that runs reconr→broadr(3 temperatures) for T02 (Pu-238, MAT=1050) and compares against the `after_broadr.pendf` oracle.
+
+**T02 pipeline results**:
+- RECONR: 17/17 MTs BIT-IDENTICAL, 3567 pts exact
+- BROADR grids match Fortran exactly: 2925/2592/2418 pts at 300K/900K/2100K
+- MT=2 (elastic): PERFECT at all 3 temperatures
+- 13 non-broadened MTs: ALL PERFECT at all 3 temperatures (39/39)
+- MT=18 (fission): 99.3-99.6% (±1 ULP at URR boundary ~70-82 eV)
+- MT=102 (capture): 98.4-99.6% (same class)
+- MT=1 (total): 78-81% (sigma1 FP accumulation cascade — same class as T01)
+- Byte-identical: 12,552/13,133 data lines (95.6%)
+- Tolerance: 0 failures at 1e-5, 581 at 1e-9
+
+**T02 broadr parameters** (from Fortran output, verified):
+- thnmax = 200.0 eV (resolved resonance range upper limit)
+- nreac = 3: broadened partials are MT=2 (elastic), MT=18 (fission), MT=102 (capture)
+- Sequential broadening: 0K→300K (T_eff=300, alpha=9135), 300K→900K (T_eff=600, alpha=4568), 900K→2100K (T_eff=1200, alpha=2284)
+- Total (MT=1) broadened separately via sigma1_at on same grid (Trap 53)
+- All broadened XS rounded to 7 sigfigs via round_sigfig(x,7,0) before format_endf_float
+
+**Trap 120 (NEW — FIXED)**: Fortran broadr rounds all broadened cross section values to 7 sigfigs via sigfig(x,7,0) at broadr.f90 line 980 before writing through a11. This creates trailing zeros in the 9-sigfig fixed format, causing a11 to fall back to 7-sigfig scientific notation. Without this rounding, Julia produces 9-sigfig fixed format (e.g., `31584.1069`) while Fortran produces 7-sigfig scientific (`3.158411+4`). Non-broadened MTs pass through from reconr with original 9-sigfig precision unaffected.
+
+**Files created**:
+- `test/validation/t02_pipeline.jl` — T02 pipeline test script
+
+**CRITICAL WARNING — THIS IS NOT A PROPER PORT**:
+
+The T02 pipeline script (like T01's) is a **manually-wired test harness**, NOT a faithful port of Fortran NJOY. Problems:
+
+1. **Hardcoded parameters**: thnmax=200.0, nreac=3, broadened MTs=[2,18,102] are all hardcoded from Fortran diagnostic output. A proper broadr() must auto-compute these from the ENDF/PENDF tapes.
+
+2. **No input deck parsing**: The script doesn't read an NJOY input deck. It hardcodes mat=1050, err=0.005, temps=[300,900,2100].
+
+3. **No PENDF file output**: The script compares data values against the oracle but doesn't produce a complete multi-temperature PENDF file.
+
+4. **No moder execution**: The Fortran T02 chain starts with `moder 20 -21/` (ASCII→binary). The script skips this entirely.
+
+5. **Comparison is against oracle, not reference tape**: The official T02 test compares against `referenceTape28` (unresr output) and `referenceTape29` (groupr output). This script only compares the broadr stage against `after_broadr.pendf`.
+
+6. **Helper functions in test script**: `_format_tab1_data`, `_parse_broadr_oracle`, `_compare_mf3` live in the test script, not the library.
+
+**What's needed for a true T02 port**: A proper broadr() top-level function, proper moder handling, input deck parsing, and full pipeline execution (reconr→broadr→unresr→groupr) producing referenceTape28 and referenceTape29. The kernel algorithms (broadn_grid, sigma1_at) are proven correct — the gap is module-level orchestration.
+
+**The project owner has stated the requirement clearly: NJOY.jl must be a 100% faithful drop-in Julia replacement for ALL 23 Fortran NJOY modules, passing ALL 84 reference tests. No module is out of scope. Every module in the input deck must execute. The current test scripts with hardcoded parameters are not acceptable as a final deliverable — they are validation tools only.**
+
+**How to run T02 pipeline**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t02_pipeline.jl
+# Expected: 17/17 reconr PERFECT, 95.6% broadr data match, 0 failures at 1e-5
+```
