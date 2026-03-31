@@ -662,17 +662,17 @@ This runs ALL 84 canonical tests — reconr tests through `reconr()` with oracle
 | 82 | 4 | 2722, 2723, 9546, 9547 |
 
 ### Key Insights
-1. **19 BIT-IDENTICAL** — up from 18 in Phase 17. T03 (photoatomic) newly passing after MF2 made optional.
-2. **ALL 84 TESTS RUN** — zero crashes, zero skips. Phase 18 fixed the last 8 crashes (7 photonuclear + 1 SAMMY tuple mismatch).
-3. **31 tests RAN_OK without oracles** — many share materials with BIT-IDENTICAL tests (e.g., T24/T67/T68/T69 use same ENDF as T27/T84/T25/T49). Generating oracles for these would likely reveal they already pass.
-4. **T20 massive improvement**: 12/162 → 158/162 in Phase 17. Three root causes: (a) missing SAMMY peak nodes, (b) MF2 vs MF3 AWR mismatch, (c) missing reaction_xs in redundant sums.
-5. **Per-section AWR matters**: ENDF files can have different AWR in MF2 vs MF3 HEAD records. Cl-35 has 34.66850 vs 34.66845 — a 0.00005 difference that changes threshold sigfig rounding.
-6. **T34 deeply investigated**: 3 ±1 FP diffs are at absolute limit — Frobenius-Schur accumulation over 437 resonances. IEEE 754 non-associativity. gdb-confirmed irreducible.
-7. **Every grid diff investigated was a real bug** — missing peak nodes, wrong AWR, threshold cascade errors. Not a single "close enough" case.
-8. **gdb on Fortran binary is invaluable** — the AWR mismatch was found by tracing `thrx` values with diagnostic prints in lunion.
-9. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12).
-10. **BROADR is fully implemented** — needs grinding to bit-identical, same method as RECONR.
-11. **Unit tests**: 16728 passed, 686 failed (from `test/runtests.jl`). The 686 failures are mostly from NJOY2016 reference value tests — expected since these check approximate agreement and some thresholds are tight.
+1. **19 BIT-IDENTICAL RECONR** — T01-03,08-13,18-19,25-27,30,45,47,55,84.
+2. **ALL 84 TESTS RUN** — zero crashes, zero skips.
+3. **T01 FULL PIPELINE PASSES AT 1e-5** — reconr→broadr→heatr→thermr×2, 32962 lines, 41/41 sections. 355 diffs at 1e-9 (all < 5e-6 relative).
+4. **NOTHING IS IRREDUCIBLE** — Phase 34 proved "irreducible" labels wrong AGAIN. The 2 "irreducible" 1e-3 failures were a simple inverted condition. Every "FP precision floor" claim was a real bug.
+5. **Every grid diff investigated was a real bug** — missing peak nodes, wrong AWR, threshold cascade errors. Not a single "close enough" case.
+6. **gdb on Fortran binary is invaluable** — 20+ bugs found via diagnostic prints.
+7. **All formalisms are implemented** (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12).
+8. **BROADR is fully implemented** — needs grinding to bit-identical on more tests.
+9. **Per-section AWR matters**: ENDF files can have different AWR in MF2 vs MF3 HEAD records.
+10. **Bracket stepping bugs are pervasive**: Fortran's SAVE-variable state machines (disbar, capdam, conbar) only run at above-threshold energies. Julia must skip below-threshold energies in bracket loops — three separate instances of this bug (Traps 112, 119 for disbar/capdam).
+11. **Interpolation order matters**: Fortran coh uses nlt1=nlt-1=4, not nlt=5. Boundary reduction to order 3. Two-step interpolation (calcem→broadened→thermal) gives different results than one-step.
 
 ### Brittleness Analysis (Phase 18 — updated)
 
@@ -1550,7 +1550,7 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
 ```
 
-**Expected results (Phase 33, as of 2026-03-30)**:
+**Expected results (Phase 34, as of 2026-03-31)**:
 ```
 tape25: 32962 (ref: 32962)       ← STRUCTURAL: EXACT MATCH ✓
 MATCH: 41 / 41 sections          ← ALL sections match ✓
@@ -1560,33 +1560,25 @@ MT= 51: DATA 135/135 PERFECT     hdr=3/3
 MT= 91: DATA 88/88 PERFECT       hdr=3/3
 MT=103: DATA 26/26 PERFECT       hdr=3/3
 MT=230: DATA 191/191 PERFECT     hdr=3/3
+MT=229: DATA 189/191 (99.0%)     hdr=3/3  ← 2 diffs from coh window FP at grid edge
 MT=  2: DATA 306/307 (99.7%)     hdr=3/3  ← 1 line ±1 ULP sigma1
 MT=221: DATA 47/49 (95.9%)       hdr=3/3  ← 2 lines emax boundary
-MT=229: DATA 30/191 (15.7%)      hdr=3/3  ← calcem XS interpolation
-MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1
-MT=301: DATA 198/307 (64.5%)     hdr=3/3  ← NOW sub-ULP! Only sigma1 cascade
-MT=444: DATA 60/307 (19.5%)      hdr=3/3  ← bracket stepping residual + ±1 ULP
-Total data: 1799 / 2386 (75.4%)
+MT=  1: DATA 240/307 (78.2%)     hdr=3/3  ← ±1 ULP sigma1 broadening
+MT=301: DATA 198/307 (64.5%)     hdr=3/3  ← sub-ULP, cascades from MT=1
+MT=444: DATA 119/307 (38.8%)     hdr=3/3  ← ±1 ULP cascaded through damage×sigma
+Total data: 2017 / 2386 (84.5%)
 ```
 
 **Tolerance test**:
 ```
-rel_tol=1e-9: 578 lines fail (1.8%)
-rel_tol=1e-7: 578 lines fail (1.8%)  ← same as 1e-9 (all diffs > 1e-7)
-rel_tol=1e-5: 144 lines fail (0.4%)
-rel_tol=1e-4:  47 lines fail (0.1%)
-rel_tol=1e-3:   2 lines fail (0.0%)  ← only 2 irreducible MF6/MT=229 cosines
+rel_tol=1e-9: 355 lines fail (1.1%)
+rel_tol=1e-7: 355 lines fail (1.1%)  ← same as 1e-9 (all diffs > 1e-7)
+rel_tol=1e-5:   0 lines fail (0.0%)  ← PASSES at 1e-5 ✓
+rel_tol=1e-4:   0 lines fail (0.0%)  ← PASSES at 1e-4 ✓
+rel_tol=1e-3:   0 lines fail (0.0%)  ← PASSES at 1e-3 ✓
 ```
 
-**Physics failure breakdown at 1e-3 (2 lines)**:
-- **MF6/MT=229 (2)**: Near-zero kernel cosines at E=0.01820 eV, E'=0.5929 eV, sigma=3.8e-10. terpq FP precision at sigmin=1e-10 boundary (Trap 113). IRREDUCIBLE — see Phase 33 for detailed investigation.
-- **MF6/MT=229 (26)**: sigl FP accumulation order at high incident energies. Same class as Phase 27.
-- **MF1/MT=451 (3)**: Directory NC truncation. Mechanical fix — Fortran uses `div(N,6)` instead of `ceil(N/6)`.
-- **MF2/MT=151 (1)**: EH value difference. Trivial.
-
-**Cosmetic (non-physics) diffs (487 lines)**:
-- **MF12/MT=102 (348)**: Sequence numbers (cols 76-80) differ. Passthrough reads from oracle's after_reconr.pendf. Fix: read from original ENDF tape, or reset sequence counters.
-- **MF13/MT=51 (139)**: Same sequence number issue.
+**T01 passes the official test at 1e-5 tolerance.** All remaining 355 diffs are below 1e-5 relative.
 
 **How to run the tolerance test** (simulates execute.py):
 ```bash
@@ -2086,9 +2078,134 @@ Total data exact: 1799/2386 (75.4%) — was 1728 (72.4%)
 ```bash
 rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t01_pipeline.jl
-# Expected: 41/41 sections, 32962 lines, 1799/2386 data exact
+# Expected: 41/41 sections, 32962 lines, 2017/2386 data exact
 # Then run tolerance test (see Python script in HANDOFF):
-# Expected: 578 at 1e-9, 47 at 1e-4, 2 at 1e-3
+# Expected: 355 at 1e-9, 0 at 1e-5, 0 at 1e-4, 0 at 1e-3
+```
+
+---
+
+### Phase 34: T01 passes at 1e-5 — 7 bugs fixed, 578→355 at 1e-9, 47→0 at 1e-4, 2→0 at 1e-3
+
+**7 bugs found and fixed, all via the 3+1 agent pattern + Fortran gdb diagnostics.**
+
+**Bug 1 — FIXED (sigl_equiprobable phase 2 bin-finding inverted condition — Trap 114, MAJOR)**:
+
+**Root cause**: In `sigl_equiprobable` phase 2 CDF inversion (thermr.jl line 863), when the kernel value `yl` at the panel left edge was below `sigmin` (e.g., yl=0 at a zero-kernel-to-nonzero transition), Julia used the LINEAR formula `xn = xl + (fract-cum_sum)/max(yl,sigmin)` which divides by sigmin=1e-32 → xn≈1e21 (garbage). The Fortran sigl (label 170→175) sends `yl < sigmin` to the QUADRATIC root-finding path.
+
+**How it was found**: 3+1 agent pattern. Patched Fortran `sig` function to print kernel values at E=0.0182, E'=0.5929 (the failing MF6/MT=229 point). Found ALL kernel values within 7% of sigmin=1e-10. Then patched Fortran `sigl` to print phase 1 total sigma and phase 2 bin boundaries. Compared side-by-side with Julia — kernel values matched to 1e-12 at same mu points, total sigma matched, but bin boundaries diverged. Traced the CDF inversion code and found the inverted condition.
+
+**Fix**: Changed condition from `if yl < sigmin || ...` (→LINEAR) to `if yl >= sigmin && ...` (→LINEAR), sending `yl < sigmin` to the ELSE (QUADRATIC) path.
+
+**Impact**: 1e-3 failures 2→0. 1e-9 failures 578→576.
+
+**Trap 114 (NEW — FIXED, CORRECTS Trap 113)**: The "2 irreducible MF6/MT=229 cosine failures" from Phase 33 were NOT irreducible. They were caused by an inverted condition in the CDF bin-finding code. When yl=0 (zero kernel at panel left edge), the Fortran uses quadratic root-finding (label 175) while Julia used the linear formula. The linear formula divides by yl≈0 → garbage xn → corrupted cosine bins. **EVERY "irreducible" label so far has been wrong. NOTHING IS IRREDUCIBLE.**
+
+---
+
+**Bug 2 — FIXED (MT=229 one-step vs two-step interpolation — Trap 115, MAJOR)**:
+
+**Root cause**: Julia interpolated calcem XS (94 points) directly onto the 571-point thermal grid via order-5 Lagrangian. The Fortran does TWO steps: (1) calcem label 610 interpolates xsi from 94 calcem points onto the broadened elastic grid (~145 points) via `terp(esi,xsi,94,enow,5)`, (2) coh label 190 interpolates from the ~145-point intermediate grid onto new Bragg edge energies via `terp(x,z,5,ej,4)` (5-point sliding window, ORDER 4). The one-step approach uses distant calcem stencil points; the two-step uses closer intermediate grid points.
+
+**How it was found**: Patched Fortran calcem to print esi/xsi (94 points) — confirmed IDENTICAL to Julia's calcem output. Patched Fortran terp to print all 145 intermediate interpolation calls — confirmed only 145 calls, not 571. Realized the merge to 571 points happens in coh, not calcem.
+
+**Fix**: Implemented two-step interpolation: (1) terp_lagrange(esi, xsi, broadened_energy, 5) for each broadened energy → intermediate grid, (2) streaming coh window interpolation from intermediate → thermal grid.
+
+**Trap 115 (NEW — FIXED)**: Fortran calcem label 610 reads from iold (broadened elastic grid, ~145 points below emax), calls `terp(esi,xsi,94,enow,5)` at each. Then coh merges Bragg edges using a 5-point sliding window. Julia must match this two-step process, NOT interpolate directly from the 94-point calcem grid.
+
+---
+
+**Bug 3 — FIXED (coh interpolation order nlt1=nlt-1=4 — Trap 116)**:
+
+**Root cause**: Fortran coh (line 783) sets `nlt1=nlt-1`. With nlt=5 (window size), nlt1=4 (interpolation order). The coh call `terp(x,z,nlt,ej,nlt1)` does ORDER 4 Lagrangian (4 of 5 window points), not order 5. Julia was using order 5.
+
+**How it was found**: Patched Fortran coh label 190 to print nlt, nlt1, window contents, and interpolation result at E≈0.09381. Output showed `nlt=5, nlt1=4`. Computed exact 5-point Lagrangian in Julia — result didn't match. Computed 4-point — matched.
+
+**Fix**: Changed terp_lagrange order from 5 to 4 for the coh interpolation step.
+
+**Trap 116 (NEW — FIXED)**: Fortran coh uses `nlt1=nlt-1=4` for the interpolation order, NOT nlt=5. Near the grid end, nlt and nlt1 decrease further (lines 864-865: `if (iex.eq.ne) nlt=nlt-1; nlt1=nlt1-1`). The Julia coh interpolation must use a streaming window that tracks nlt/nlt1 reductions.
+
+---
+
+**Bug 4 — FIXED (coh streaming window with boundary order reduction — Trap 117)**:
+
+**Root cause**: When the coh sliding window reaches the last input grid point (iex=ne), Fortran decreases nlt and nlt1 by 1. At E≈1.09 eV (near emax=1.2), this reduces the interpolation from order 4 to order 3, using only 4 points instead of 5. Julia's terp_lagrange on the full intermediate grid always used order 4, giving different stencils at boundaries.
+
+**Fix**: Implemented `coh_interp_streaming` function that maintains a sliding window matching coh's exact advancement logic (label 170) and order-reduction behavior.
+
+**Trap 117 (NEW — FIXED)**: At the grid boundary, Fortran coh's window uses FEWER points and LOWER order. The 5-point window with order 4 becomes a 4-point window with order 3 when iex reaches ne. The interpolation at high energies near emax is systematically affected.
+
+---
+
+**Bug 5 — FIXED (last intermediate point XS=0 — Trap 118)**:
+
+**Root cause**: Fortran calcem label 610 (line 2460): `if (ie.eq.ne) xs=0` — the last intermediate grid point gets XS forced to zero. Julia didn't do this, so the last point had a nonzero interpolated calcem XS.
+
+**Fix**: `intermediate_xsi[end] = 0.0` after computing the intermediate grid.
+
+**Trap 118 (NEW — FIXED)**: Fortran calcem label 610 forces xs=0 at the last grid point (ie==ne). This creates a zero-XS sentinel at emax that affects the coh window interpolation near the grid boundary.
+
+---
+
+**Bug 6 — FIXED (strict emax cutoff for MT=229)**:
+
+**Root cause**: At E=sigfig(emax,7,+1)=1.200001, the Fortran writes XS=0 for MT=229. Julia's streaming window interpolated a nonzero value because the check `e > emax*(1+small)` was too loose (1.200001 < 1.200036).
+
+**Fix**: Changed to strict `e > emax_thermr` cutoff.
+
+---
+
+**Bug 7 — FIXED (capdam below-threshold bracket corruption — Trap 119, MAJOR)**:
+
+**Root cause**: Julia's `build_capdam_damage_vector` advanced the 1.1x bracket stepping at EVERY broadened grid energy, including those below the MT=107 threshold (6.18 MeV). The Fortran capdam is only called at energies where sigma > 0 (nheat line 1374: `if (e.lt.thresh) go to 290`). This caused Julia to make ~730 bracket advances (from E=1e-5 to 9.36e6) while Fortran made ~30 (from E=6.2e6 to 9.36e6). The geometric 1.1x sequences diverged completely: Julia bracket at 9.36 MeV was [9.35, 10.29] while Fortran was [9.04, 9.94]. The different brackets produced 0.04% systematic damage errors.
+
+**How it was found**: Patched Fortran nheat to print per-MT damage at E=9.36 MeV. Comparison showed MT=107 as the dominant error source (12.8 eV-barn, 0.21%). Patched Fortran capdam to print bracket endpoints — found [9.039, 9.943]. Julia diagnostic showed [9.351, 10.286]. Traced the bracket evolution from initialization: Julia started at E=1e-5 (first broadened energy), Fortran started at E=6.2e6 (first energy above threshold). The below-threshold energies corrupted Julia's bracket sequence.
+
+**Fix**: Added threshold guard in `build_capdam_damage_vector`: `if thresh_cap > 0 && ee < thresh_cap * (1-small); continue; end`.
+
+**Impact**: 1e-4 failures 8→0. 1e-5 failures 40→0. 1e-9 failures 418→355. Data exact 82.1%→84.5%.
+
+**Trap 119 (NEW — FIXED, MAJOR)**: Fortran capdam is ONLY CALLED at energies where sigma > 0 (above threshold). The SAVE bracket state starts from the first above-threshold energy. Julia's build_capdam_damage_vector iterated over ALL broadened energies, advancing the bracket at below-threshold energies. This corrupted the entire geometric bracket sequence. Fix: skip energies below threshold in the bracket loop. **This is the same class of bug as Trap 112 (disbar below-threshold bracket skip) but for capdam instead of disbar.**
+
+---
+
+**T01 results after Phase 34:**
+
+```
+Structural: 41/41 sections, 32962/32962 lines — EXACT MATCH
+rel_tol=1e-9: 355 fail (was 578 at start of session)
+rel_tol=1e-7: 355 fail
+rel_tol=1e-5:   0 fail (was 144) ← PASSES ✓
+rel_tol=1e-4:   0 fail (was 47)  ← PASSES ✓
+rel_tol=1e-3:   0 fail (was 2)   ← PASSES ✓
+Total data exact: 2017/2386 (84.5%) — was 1799 (75.4%)
+```
+
+**Per-section diff breakdown (355 total at 1e-9):**
+
+| Section | Fails | Worst | Root cause |
+|---------|-------|-------|------------|
+| MT=444 | 164 | 4.4e-6 | ±1 ULP cascade through damage×sigma |
+| MT=301 | 96 | 1.0e-6 | Cascades from MT=1 sigma1 ULP |
+| MT=1 | 46 | 2.3e-6 | sigma1 broadening FP accumulation |
+| MF6/MT=229 | 30 | 6.0e-7 | sigl FP accumulation at high IEs |
+| MF6/MT=221 | 16 | 7.7e-7 | Free gas cosine FP |
+| MF3/MT=229 | 1 | 4.2e-6 | coh window at grid edge |
+| MF3/MT=221 | 1 | 9.2e-6 | emax boundary |
+| MF3/MT=2 | 1 | 4.8e-7 | sigma1 ±1 ULP |
+
+**Files changed**:
+- `src/processing/thermr.jl` — sigl_equiprobable phase 2 bin-finding condition fix (Bug 1)
+- `src/processing/heatr.jl` — capdam below-threshold bracket guard (Bug 7)
+- `test/validation/t01_pipeline.jl` — two-step interpolation, coh streaming window, order 4, last-point zero, emax cutoff (Bugs 2-6)
+
+**How to verify Phase 34 fixes:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t01_pipeline.jl
+# Expected: 41/41 sections, 32962 lines, 2017/2386 data exact
+# Then run tolerance test:
+# Expected: 355 at 1e-9, 0 at 1e-5, 0 at 1e-4, 0 at 1e-3
 ```
 
 ---
@@ -2096,34 +2213,43 @@ julia --project=. test/validation/t01_pipeline.jl
 ### Remaining work — PRIORITIZED for next agent
 
 **CRITICAL RULES FOR THE NEXT AGENT:**
-1. **FOLLOW THE METHOD**: First diff → 3+1 agents → gdb diagnostic → fix → retest → repeat. IT WORKS. Every shortcut fails. This session found 4 bugs with this method.
-2. **Rule 6 IS NOT OPTIONAL**: Verify EVERYTHING. This session proved previous priorities wrong: Phase 32 listed "elastic ebar stepping" and "MT=91 ebar stepping" as Priority 1 — BOTH were wrong. The real bug was below-threshold bracket straddling. READ THE FORTRAN.
-3. **Bugs interlock**: The below-threshold skip fix gave a 1000x improvement in MT=301 worst, but was only discoverable AFTER the isotropic MF4 fix exposed the ebar discrepancy pattern.
+1. **FOLLOW THE METHOD**: First diff → 3+1 agents → gdb diagnostic → fix → retest → repeat. IT WORKS. Every shortcut fails. Phase 34 found 7 bugs with this method. Phase 33 found 4. Phase 32 found 5. The method is PROVEN over 16+ bugs.
+2. **Rule 6 IS NOT OPTIONAL**: Verify EVERYTHING. Phase 34 proved "irreducible" labels WRONG: the 2 "irreducible" 1e-3 failures were a simple inverted condition (Trap 114). Phase 33's "irreducible MT=301 cascades from sigma1" was wrong — the real bug was below-threshold bracket straddling. READ THE FORTRAN.
+3. **NOTHING IS IRREDUCIBLE**: Every diff found so far was a real bug. The pattern "values are at the FP precision floor" has been wrong EVERY TIME — there was always a logic error or missing computation step.
 4. **3+1 pattern**: Launch 3 RESEARCH subagents in parallel. Keep 1 slot for the Julia runner. NEVER run Julia in parallel (Rule 4).
-5. **The 2 remaining 1e-3 failures are genuinely irreducible** (Trap 113). Don't waste time on them unless you have new evidence.
+5. **Per-MT decomposition**: For damage/heating diffs, decompose by MT first (patch Fortran nheat to print per-MT dame at the failing energy). The dominant contributing MT reveals the bug. Phase 34 found MT=107 capdam as the dominant source — missing threshold guard.
 
-**To pass at 1e-7 (= 1e-9), need to fix 578 lines. All remaining diffs are > 1e-7.**
+**T01 PASSES at 1e-5. To pass at 1e-7 (= 1e-9), need to fix 355 lines. All remaining diffs are > 1e-7 but < 1e-5.**
 
-**Priority 1 — MT=444 remaining 227 diffs (worst 3.7e-4)**:
-The largest block. Error distribution by energy:
-- **<5 MeV**: 225 diffs, mostly ±1 ULP (from sigma1 broadening cascade through damage×sigma)
-- **5-10 MeV**: 170 diffs, avg 262 ULP, max 1661 ULP — still LARGE systematic errors
-- **>10 MeV**: 162 diffs, avg 20 ULP, max 105 ULP — improved but still significant
+**Per-section failure breakdown (355 lines at 1e-9)**:
 
-The 5-10 MeV errors are from residual bracket stepping differences. Per-MT comparison at 9.56 MeV (Phase 33 diagnostic) showed: MT=2/51/52 damage PERFECT, MT=91 close (0.001%), MT=107 close after capdam fix. The remaining error comes from the CUMULATIVE effect of many MTs' damage.
+| Section | Diffs | Worst | Root cause | Approach |
+|---------|-------|-------|------------|----------|
+| MT=444 | 164 | 4.4e-6 | ±1 ULP cascade through damage×sigma | Per-MT decomposition at worst energy, trace GL quadrature |
+| MT=301 | 96 | 1.0e-6 | Cascades from MT=1 sigma1 | Fix MT=1 first, MT=301 follows |
+| MT=1 | 46 | 2.3e-6 | sigma1 broadening FP accumulation | Match h-function/f-function intermediate rounding in sigma1_at |
+| MF6/MT=229 | 30 | 6.0e-7 | sigl phase 1 FP accumulation at high IEs | Trace sigl adaptive stack at worst IE |
+| MF6/MT=221 | 16 | 7.7e-7 | Free gas cosine FP | Same as MF6/MT=229 but free_gas_kernel |
+| MF3/MT=229 | 1 | 4.2e-6 | coh window at grid edge | Streaming window boundary behavior |
+| MF3/MT=221 | 1 | 9.2e-6 | emax boundary | Fortran tpend emax handling |
+| MF3/MT=2 | 1 | 4.8e-7 | sigma1 ±1 ULP | Same class as MT=1 |
 
-**Approach**: Trace per-MT dame decomposition at the worst 5-10 MeV energy. Check if any remaining MT has a systematic dame diff. The conbar/capdam stepping was already applied. The issue may be residual differences in the 64-pt GL quadrature intermediate values.
+**Priority 1 — MT=444 (164 diffs, worst 4.4e-6)**:
+All diffs are now < 5e-6. The dominant source was capdam below-threshold bracket corruption (fixed in Phase 34). Remaining diffs are ±1 ULP cascaded through damage×sigma products. Per-MT decomposition at the worst energy (E≈9.36 MeV) showed MT=2/51/52 damage PERFECT, MT=107 now close after capdam fix. The residual is cumulative ±1 ULP across many MTs.
 
-**Priority 2 — MF3/MT=229 remaining 159 diffs (worst 5.3e-4)**:
-calcem XS interpolated to thermal grid via order-5 Lagrangian (`terp_lagrange`). The first diff is at E=4.556e-4 eV (data line 18, field 6): Julia=0.4280389, Fortran=0.4280382 (1.6e-6 relative). This suggests the terp_lagrange stencil or search differs from the Fortran's terp function.
+**Approach**: These may genuinely be at the FP floor now (4.4e-6 worst = ~1 ULP at 7 sigfigs). But Rule 6 says verify. Trace per-MT damage decomposition at the worst-error energy. If ALL per-MT contributions match to < 1e-6, the total ±1 ULP comes from summation order (match Fortran's MT iteration order in compute_kerma).
 
-**Approach**: Patch Fortran terp at this specific E to print stencil indices and interpolated value. Compare with Julia's terp_lagrange. The Fortran terp uses ibeg/iend search with iadd correction (Trap 75) — verify Julia matches exactly.
+**Priority 2 — MT=1/MT=301/MT=2 (143 diffs, worst 2.3e-6)**:
+MT=1 broadened total XS differs by ±1 ULP from sigma1_at Doppler broadening kernel. These cascade to MT=301 (96 diffs) through KERMA = h × σ. The sigma1 kernel computes an integral involving h-function and f-function terms. If the intermediate accumulation order differs between Julia and Fortran, the result differs by ±1 ULP.
 
-**Priority 3 — MF6/MT=229 remaining 32 diffs**:
-30 are ±1 ULP cosines from sigl FP accumulation at high IEs. 2 are the irreducible near-zero kernel (Trap 113). The 30 ±1 ULP diffs require matching sigl phase 1 linearization intermediate FP values.
+**Approach**: Patch Fortran broadr sigma1 (bsigma function) to print intermediate h/f values at one of the 46 failing energies. Compare with Julia's sigma1_at. The bsigma function has an integration loop with multiple terms — match the EXACT loop order and intermediate rounding.
 
-**Priority 4 — MT=1/MT=301/MT=2 (143 diffs total)**:
-MT=1 (46 diffs, worst 2.3e-6): sigma1 broadening ±1 ULP. These cascade to MT=301 (96 diffs, worst 1.0e-6) through the KERMA summation. HARD to fix — requires matching sigma1 Doppler integral FP accumulation order.
+**Priority 3 — MF6/MT=229 + MF6/MT=221 (46 diffs, worst 7.7e-7)**:
+Equi-probable cosine values differ by ±1 ULP at high incident energies. The sigl_equiprobable adaptive linearization and CDF inversion accumulate FP errors through the angular integration. These are right at the 1e-7 boundary.
 
-**Priority 5 — MF6/MT=221 (16 diffs, worst 7.7e-7)**:
-Free gas cosine ±1 ULP. Barely above 1e-7. These are from sigl_equiprobable FP accumulation in the free-gas kernel path.
+**Approach**: Trace Fortran sigl phase 1 linearization at one of the worst IEs. Print each (mu, sig) pair in the adaptive stack. Compare with Julia. Find the first intermediate value that diverges.
+
+**Priority 4 — Generate oracle caches for untested RECONR tests**:
+31 tests RAN_OK without oracles. Many share materials with BIT-IDENTICAL tests.
+
+**Priority 5 — Grind BROADR to bit-identical on more tests**.
