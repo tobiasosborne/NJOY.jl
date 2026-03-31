@@ -1003,8 +1003,17 @@ function build_capdam_damage_vector(energies::AbstractVector{<:Real},
     en = 0.0; damn = 0.0
     el = 0.0; daml = 0.0
 
+    # Compute threshold for this MT (Fortran nheat line 1374: skip e < thresh)
+    thresh_cap = mt == 102 ? 0.0 : ((A + 1.0) / A) * abs(Q)
+
     for ie in 1:ne
         ee = energies[ie]
+
+        # Fortran capdam is only called at energies where sigma > 0 (above threshold)
+        # Skip below-threshold energies — don't advance bracket (matching Fortran nheat line 1374)
+        if thresh_cap > 0 && ee < thresh_cap * (1.0 - small)
+            continue
+        end
 
         # Check if we need a new bracket (Fortran capdam lines 1795-1821)
         if ee >= en * (1.0 - small)
