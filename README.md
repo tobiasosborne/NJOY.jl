@@ -1,166 +1,158 @@
 # NJOY.jl
 
-A Julia reimplementation of the [NJOY2016](https://github.com/njoy/NJOY2016)
-nuclear data processing system.  NJOY.jl reads evaluated nuclear data in
-ENDF-6 format, reconstructs resonance cross sections, Doppler-broadens them,
-and produces pointwise (PENDF) and ACE-format libraries suitable for Monte
-Carlo transport codes such as MCNP.
+A Julia port of [NJOY2016](https://github.com/njoy/NJOY2016), the standard
+nuclear data processing system used worldwide for reactor physics, criticality
+safety, and radiation transport. The original is ~120,000 lines of Fortran 90;
+this port is ~15,000 lines of idiomatic Julia.
 
-## Key features
+**Status**: Active development toward bit-identical output on all 84 NJOY
+reference tests. RECONR is the most mature module (19 tests bit-identical).
+The full T01 pipeline (reconr+broadr+heatr+thermr) passes at 1e-5 tolerance.
 
-- **Complete ENDF-6 I/O** -- reads and writes CONT, LIST, TAB1, TAB2 records
-  with full interpolation law support (histogram through Coulomb penetrability).
-- **Resonance reconstruction** -- Single-Level Breit-Wigner (SLBW),
-  Multi-Level Breit-Wigner (MLBW), and Reich-Moore (RM) formalisms with
-  energy-dependent scattering radii.
-- **Doppler broadening** -- exact SIGMA1 kernel with adaptive grid refinement,
-  matching NJOY2016's BROADR output.
-- **Heating and damage** -- KERMA coefficients, Lindhard damage energy
-  partition, and sum-rule verification (HEATR).
-- **Thermal scattering** -- free-gas and S(alpha,beta) models, coherent
-  elastic Bragg edges, incoherent elastic (THERMR).
-- **Unresolved resonance self-shielding** -- Bondarenko method (UNRESR) and
-  probability-table generation via Monte Carlo ladder sampling (PURR).
-- **Multigroup averaging** -- exact piecewise panel integration with pluggable
-  weight functions and Bondarenko self-shielding (GROUPR).
-- **Covariance processing** -- MF33 reading, NI-type block expansion,
-  multigroup collapse, sandwich rule, sensitivity Jacobians (ERRORR).
-- **ACE output** -- Type 1 (ASCII) ACE files for MCNP with full NXS/JXS/XSS
-  layout, matching NJOY2016 `aceout()` format exactly (ACER).
-- **Tape management** -- directory scanning, material extraction, tape merging,
-  and structured round-trip I/O (MODER).
-- **Differentiable** -- all core functions are pure (no mutation, no global
-  state), parameterized on element type, and compatible with ForwardDiff.jl
-  automatic differentiation.
-- **Composable** -- the processing chain is built from ordinary Julia
-  functions and closures; no card-image input decks, no tape numbers.
-- **Compact** -- approximately 9,100 lines of Julia replace roughly 120,000
-  lines of Fortran (about 13:1 reduction).
+## Test Results
 
-## Installation
+### RECONR (resonance reconstruction) -- 19/84 BIT-IDENTICAL
 
-NJOY.jl is not yet registered. Install it directly from the repository:
+All 84 tests run without crashes. 19 produce byte-identical MF3 output:
 
-```julia
-using Pkg
-Pkg.develop(path="/path/to/NJOY.jl/NJOY.jl")
+| Status | Tests | Notes |
+|--------|-------|-------|
+| **BIT-IDENTICAL** (19) | T01-03, T08-13, T18-19, T25-27, T30, T45, T47, T55, T84 | All formalisms: LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12 |
+| Near-perfect (9) | T04, T07, T15-17, T20, T34, T46, T49 | 89-99% MTs perfect; remaining diffs are +/-1 ULP FP precision |
+| Partial (2) | T21, T65 | Grid density or URR boundary diffs |
+| Feature gap (5) | T56-58, T60, T64 | Photonuclear MF23 partially implemented; dosimetry MF10-only not yet |
+| RAN_OK (31) | T24, T28-29, T31-32, T35-44, T63, T66-70, T72-75, T78-79, T81-83, T85 | Run without oracle comparison |
+| Non-RECONR (18) | T05-06, T14, T22-23, T33, T48, T50-54, T59, T61-62, T71, T76, T80 | Exercised through their respective modules |
+
+### Full Pipeline -- T01 passes at 1e-5
+
+T01 (C-nat, reconr+broadr+heatr+thermr x2) produces 32,962 lines matching the
+Fortran reference. All 41 sections structurally match. 355 value diffs at 1e-9,
+0 at 1e-5. Run via:
+
+```bash
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01")'
 ```
 
-Requires Julia 1.10 or later. Dependencies (installed automatically):
+### T02 Broadr -- 3-temperature sequential broadening
 
-| Package            | Purpose                              |
-|--------------------|--------------------------------------|
-| SpecialFunctions   | `erfc`, `erfcx` for Faddeeva/Doppler |
-| StaticArrays       | Fixed-size matrices in Reich-Moore    |
-| LinearAlgebra      | Eigenvalue checks in ERRORR          |
+T02 (Pu-238, reconr+broadr at 300/900/2100K) grids match oracle exactly
+(2925/2592/2418 points). 0 failures at 1e-5 on MF3 data. Run via:
 
-## Quick start
+```bash
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work_dir="/tmp/t02")'
+```
+
+### T03 Photoatomic -- MF=23 support
+
+T03 (photoatomic H + U, multi-material reconr) produces MF=23 output with
+99.5% byte-identical data (2102/2112 lines). 2 failures at 1e-5 from grid
+construction path difference. Run via:
+
+```bash
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/03/input"; work_dir="/tmp/t03")'
+```
+
+## Architecture
+
+### Orchestration layer (`src/orchestration/`)
+
+`run_njoy(input_path)` parses any Fortran NJOY input deck and dispatches
+modules sequentially. Modules communicate exclusively via tape files (no
+shared mutable state), matching the Fortran architecture exactly.
 
 ```julia
 using NJOY
-
-# 1. Reconstruct pointwise cross sections from an ENDF file
-pendf = reconstruct("n-092_U_238.endf"; err=0.001)
-
-# 2. Doppler-broaden to 300 K
-pendf_300K = doppler_broaden(pendf, 300.0; awr=236.0, tol=0.001)
-
-# 3. Write a PENDF tape
-open("u238.pendf", "w") do io
-    write_pendf(io, pendf_300K)
-end
-
-# 4. Produce an ACE file for MCNP
-ace = build_ace(pendf_300K; suffix="80c", temperature=300.0)
-open("92238.80c", "w") do io
-    write_ace(io, ace)
-end
+tapes = run_njoy("path/to/input"; work_dir="/tmp/work")
 ```
 
-## Module overview
+### Module status
 
-| Module   | Description                                                  |
-|----------|--------------------------------------------------------------|
-| ENDF I/O | Parse and write ENDF-6 CONT, LIST, TAB1, TAB2 records       |
-| Interp   | ENDF interpolation laws (lin-lin through Coulomb) and integration |
-| MF2      | Read File 2 resonance parameters (SLBW, MLBW, RM, URR)      |
-| RECONR   | Adaptive resonance cross section reconstruction              |
-| BROADR   | Doppler broadening via SIGMA1 kernel                         |
-| HEATR    | KERMA coefficients, Lindhard damage energy                   |
-| THERMR   | Free-gas and S(alpha,beta) thermal scattering                |
-| UNRESR   | Bondarenko self-shielding for unresolved resonances          |
-| PURR     | Probability table generation by Monte Carlo ladder sampling  |
-| GROUPR   | Multigroup cross section averaging with pluggable weights    |
-| MODER    | ENDF tape management (directory, extract, merge)             |
-| ERRORR   | Covariance processing (MF33 expand, collapse, sandwich rule) |
-| ACER     | ACE format output for MCNP (Type 1 ASCII)                   |
+| Module | Status | Julia files |
+|--------|--------|-------------|
+| **reconr** | Production -- 19 tests bit-identical | `src/processing/reconr.jl`, `reconr_grid.jl`, `reconr_evaluator.jl` |
+| **broadr** | Production -- multi-temp, sigma1 kernel correct | `src/processing/broadr.jl`, `sigma1.jl` |
+| **heatr** | Production -- KERMA + damage with MF4/MF12/MF13 | `src/processing/heatr.jl` |
+| **thermr** | Production -- free gas + S(a,b) + Bragg edges | `src/processing/thermr.jl` |
+| **moder** | Working -- tape copy/register | `src/orchestration/modules/moder.jl` |
+| **unresr** | Algorithm implemented, not wired into pipeline | `src/processing/unresr.jl` |
+| **groupr** | Algorithm implemented, not wired into pipeline | `src/processing/groupr.jl` |
+| **acer** | ACE format reader/writer implemented | `src/formats/ace.jl` |
+| **errorr** | Covariance processing implemented | `src/processing/errorr.jl` |
+| **leapr** | S(a,b) generation implemented | `src/processing/leapr.jl` |
+| **ccccr** | CCCC binary format writer implemented | `src/formats/ccccr.jl` |
+| **gaspr, purr, dtfr, matxsr, plotr, viewr, mixr, powr, wimsr, covr, resxsr** | Stub/not yet implemented | -- |
 
-## Comparison with NJOY2016
+### Resonance formalisms
 
-| Aspect               | NJOY2016 (Fortran)           | NJOY.jl (Julia)                  |
-|----------------------|------------------------------|----------------------------------|
-| Lines of code        | ~120,000                     | ~9,100                           |
-| Input format         | Card-image input deck        | Function keyword arguments       |
-| Global state         | Extensive (common blocks)    | None (pure functions + closures) |
-| Tape I/O             | Sequential-access unit numbers | Ordinary `IO` streams           |
-| Type safety          | Implicit typing              | Parametric types + dispatch      |
-| AD compatibility     | Not possible                 | ForwardDiff-compatible           |
-| Interpolation        | Procedural (`terp1`)         | Dispatch on `InterpolationLaw`   |
-| Resonance formalisms | `if/else` on LRF             | Multiple dispatch on formalism type |
-| Adaptive grid        | Tightly coupled to RECONR    | Generic higher-order function    |
+| Formalism | Status | Tests |
+|-----------|--------|-------|
+| LRU=0 (no resonances) | Bit-identical | T01, T84, T25, T45 |
+| SLBW (LRF=1) | Bit-identical | T02, T10-11, T18-19 |
+| MLBW (LRF=2) | Implemented, not separately tested | -- |
+| Reich-Moore (LRF=3) | Bit-identical | T08, T12-13, T27, T47, T55 |
+| SAMMY/RML (LRF=7) | 98% (4 MTs with +/-1 FP) | T20 |
+| URR mode 11 (LRU=2, LRF<=1) | Bit-identical | T02, T10-11 |
+| URR mode 12 (LRU=2, LRF=2) | 89% (3 MTs +/-1 at URR boundary) | T04, T07 |
 
-## Testing
+## Installation
 
-Run the test suite from the package directory:
+Requires Julia 1.10+. Not registered; install from source:
 
 ```julia
 using Pkg
-Pkg.test("NJOY")
+Pkg.develop(path="/path/to/NJOY.jl")
 ```
 
-Or from the command line:
+The Fortran NJOY2016 reference binary (for oracle generation and gdb
+diagnostics) is in `njoy-reference/build/njoy`. Rebuild with:
 
 ```bash
-cd NJOY.jl
-julia --project -e 'using Pkg; Pkg.test()'
+cd njoy-reference/build && cmake --build . --target njoy
 ```
 
-The test suite covers:
+## Key files
 
-- **Physics constants** -- exact match against NJOY2016 CODATA 2014 values
-- **ENDF I/O** -- float parsing/formatting round-trips, record read/write
-- **Interpolation** -- all six ENDF interpolation laws, panel integrals
-- **Penetrability** -- P_l, S_l, phi_l for l = 0..4 against analytic formulas
-- **Faddeeva function** -- exact evaluation vs. SpecialFunctions.jl reference
-- **Cross sections** -- SLBW, MLBW, Reich-Moore at selected energies
-- **RECONR pipeline** -- full reconstruction of test ENDF files
-- **BROADR** -- Doppler broadening with tolerance checks
-- **HEATR** -- elastic/capture/fission heating, Lindhard damage, sum rule
-- **THERMR** -- free-gas cross sections, Bragg edges, S(alpha,beta)
-- **UNRESR/PURR** -- Bondarenko integrals, probability tables
-- **GROUPR** -- group integration, weighted averaging, self-shielding
-- **MODER** -- tape directory, material extraction, merge
-- **ERRORR** -- covariance block expansion, multigroup collapse, symmetry/PSD
-- **ACER** -- ACE table construction, ZAID formatting, Type 1 output
+| File | Purpose |
+|------|---------|
+| `HANDOFF.md` | Detailed session history, traps, and grind state for agents |
+| `src/orchestration/pipeline.jl` | `run_njoy()` entry point |
+| `src/processing/reconr.jl` | Top-level RECONR pipeline |
+| `src/processing/broadr.jl` | Doppler broadening (broadn_grid + sigma1) |
+| `src/processing/heatr.jl` | KERMA and damage energy |
+| `src/processing/thermr.jl` | Thermal scattering (calcem + sigl + Bragg) |
+| `src/processing/pendf_writer.jl` | PENDF output (write_full_pendf, write_broadr_pendf) |
+| `test/validation/t01_pipeline.jl` | Hand-wired T01 full pipeline test |
+| `test/validation/t02_pipeline.jl` | Hand-wired T02 broadr test |
+| `test/validation/sweep_all.jl` | All 84 tests in one run |
 
-## Contributing
+## Running tests
 
-1. Fork the repository and create a feature branch.
-2. Write tests for any new functionality in `test/runtests.jl`.
-3. Ensure `Pkg.test("NJOY")` passes before submitting a pull request.
-4. Follow the existing code style: one function per concept, docstrings on
-   all exported functions, no global mutable state.
+```bash
+# Full 84-test sweep (reconr + module stubs)
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/sweep_all.jl
+
+# Single test via orchestration
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01")'
+
+# Hand-wired pipeline tests
+julia --project=. test/validation/t01_pipeline.jl
+julia --project=. test/validation/t02_pipeline.jl
+```
+
+**Important**: Always clear the precompilation cache before running tests:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+```
 
 ## License
 
-MIT License. See the LICENSE file for details.
+GPL-3.0. See LICENSE file.
 
 ## References
 
-1. R.E. MacFarlane, D.W. Muir, R.M. Boicourt, A.C. Kahler III, *The NJOY
-   Nuclear Data Processing System, Version 2016*, LA-UR-17-20093, Los Alamos
-   National Laboratory (2016).
-2. A. Trkov, M. Herman, D.A. Brown (Eds.), *ENDF-6 Formats Manual*,
-   BNL-90365-2009 Rev. 2, Brookhaven National Laboratory (2018).
-3. M.B. Chadwick et al., *ENDF/B-VIII.0: The 8th Major Release of the Nuclear
-   Reaction Data Library*, Nuclear Data Sheets **148**, 189-240 (2018).
+1. R.E. MacFarlane et al., *The NJOY Nuclear Data Processing System, Version
+   2016*, LA-UR-17-20093, Los Alamos National Laboratory (2016).
+2. A. Trkov et al. (Eds.), *ENDF-6 Formats Manual*, BNL-90365-2009 Rev. 2,
+   Brookhaven National Laboratory (2018).
