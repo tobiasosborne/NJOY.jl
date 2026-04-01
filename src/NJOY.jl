@@ -22,6 +22,7 @@ include("constants.jl")
 include("endf/types.jl")
 include("endf/io.jl")
 include("endf/interpolation.jl")
+include("endf/readers.jl")
 
 # Resonance formalisms
 include("resonances/types.jl")
@@ -112,6 +113,18 @@ include("formats/powr.jl")
 # Visualization (replaces plotr/viewr -- zero-dependency plot specs + renderers)
 include("visualization/plotting.jl")
 include("visualization/backends.jl")
+
+# Orchestration layer -- module-level dispatch matching Fortran main.f90
+include("orchestration/types.jl")
+include("orchestration/input_parser.jl")
+include("orchestration/auto_params.jl")
+include("orchestration/pendf_io.jl")
+include("orchestration/modules/moder.jl")
+include("orchestration/modules/reconr.jl")
+include("orchestration/modules/broadr.jl")
+include("orchestration/modules/heatr.jl")
+include("orchestration/modules/thermr.jl")
+include("orchestration/pipeline.jl")
 
 # Public API -- constants
 export PhysicsConstants, CODATA2014
@@ -320,5 +333,20 @@ export needs_autoscale, add_curve
 export auto_scale_linear, auto_scale_log, resolve_axes
 export extract_curve, plot_material, plot_multigroup, plot_covariance, plot_probability_table
 export render_ascii, render_postscript, to_plot_recipe
+
+# Public API -- ENDF readers (MF12 gammas, MF5 evaporation)
+export read_mf12_gammas, read_mf5_evaporation
+
+# Public API -- Orchestration (run_njoy, TapeManager)
+export TapeManager, PENDFTape, PENDFMaterial, PENDFSection
+export resolve, register!
+export run_njoy, build_tape_manager, RunContext, final_assembly!
+export read_pendf, write_pendf_tape, extract_mf3, extract_mf3_all, copy_with_modifications
+export reconr_module, broadr_module, heatr_module, thermr_module, moder_module
+export compute_thnmax, resolve_thnmax, select_broadr_partials
+export lookup_bragg_params, extract_Z
+export ModuleCall, NJOYInputDeck, parse_njoy_input
+export ReconrParams, BroadrParams, HeatrParams, ThermrParams
+export parse_reconr, parse_broadr, parse_heatr, parse_thermr
 
 end # module NJOY

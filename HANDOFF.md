@@ -2309,3 +2309,173 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t02_pipeline.jl
 # Expected: 17/17 reconr PERFECT, 95.6% broadr data match, 0 failures at 1e-5
 ```
+
+---
+
+### Phase 36: Module-Level Orchestration — `run_njoy()` with Tape-Based Architecture
+
+**Goal**: Build a proper `run_njoy(input_path)` function that reads any Fortran NJOY input deck and executes the module chain automatically, with no hardcoded parameters. Tape-based module communication matching Fortran architecture.
+
+**T01 result**: `run_njoy("njoy-reference/tests/01/input")` passes at 1e-5 with 0 failures. 32,962/32,962 lines. 212 diffs at 1e-9 (sigma1 FP accumulation — same class as hand-wired pipeline).
+
+**Design principle**: Each Julia module is a **drop-in replacement** for the Fortran module. It reads input tapes, writes output tapes. No shared mutable state between modules. The tape files are the communication mechanism — exactly like Fortran NJOY. The `run_njoy()` dispatcher is trivial (matching Fortran main.f90's select-case).
+
+**Architecture**:
+```
+run_njoy(input_path; work_dir)
+  ├─ parse_njoy_input(input_path) → NJOYInputDeck (ModuleCall objects)
+  ├─ build_tape_manager(work_dir) → TapeManager (unit→path mapping)
+  ├─ for each ModuleCall:
+  │   ├─ moder_module(tapes, mc) → copy/register tape files
+  │   ├─ reconr_module(tapes, params) → reconr() + write_pendf_file()
+  │   ├─ broadr_module(tapes, params) → read PENDF, broadn_grid, write PENDF
+  │   ├─ heatr_module(tapes, params) → read PENDF+ENDF, compute_kerma, write PENDF
+  │   ├─ thermr_module(tapes, params) → read PENDF+SAB, calcem, bragg, write PENDF
+  │   └─ groupr: stub (GENDF not validated for T01)
+  └─ final_assembly!() → write_full_pendf() with all accumulated data
+```
+
+**New files created** (all under `src/orchestration/`):
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/orchestration/types.jl` | 85 | TapeManager, PENDFTape/Material/Section structs |
+| `src/orchestration/input_parser.jl` | 380 | Input deck tokenizer + module param parsers (moved from test/) |
+| `src/orchestration/auto_params.jl` | 120 | compute_thnmax, select_broadr_partials, BRAGG_LATTICE_PARAMS |
+| `src/orchestration/pendf_io.jl` | 280 | read_pendf, write_pendf_tape, extract_mf3, copy_with_modifications |
+| `src/orchestration/pipeline.jl` | 300 | run_njoy() dispatcher + RunContext + collection helpers |
+| `src/orchestration/modules/reconr.jl` | 25 | reconr_module: thin wrapper around reconr() |
+| `src/orchestration/modules/broadr.jl` | 110 | broadr_module: auto thnmax, partials, sequential temps |
+| `src/orchestration/modules/heatr.jl` | 170 | heatr_module: reads ENDF MF4/5/12/13, compute_kerma |
+| `src/orchestration/modules/thermr.jl` | 230 | thermr_module: free gas + SAB + Bragg, calcem, MF6 |
+| `src/orchestration/modules/moder.jl` | 80 | moder_module + final_assembly! via write_full_pendf |
+| `src/endf/readers.jl` | 80 | read_mf12_gammas, read_mf5_evaporation |
+
+**Modified files**:
+- `src/NJOY.jl` — includes + exports for orchestration layer
+- `src/processing/pendf_writer.jl` — L2=99 fix for redundant MTs in override_mf3 path
+
+**Key auto-computed parameters** (no hardcoded material-specific values):
+
+| Parameter | Source | Function |
+|-----------|--------|----------|
+| thnmax | Lowest inelastic threshold in MF3 sections | `compute_thnmax()` |
+| Broadr partials | Scan for MT=2/18/102 in PENDF | `select_broadr_partials()` |
+| Bragg lattice (a, c, σ_coh, A_mass) | Lookup table by MAT (matches Fortran sigcoh) | `lookup_bragg_params()` |
+| Z (atomic number) | ZA / 1000 from PENDF HEAD | `extract_Z()` |
+| MF12 gamma data | `read_mf12_gammas()` from ENDF | New reader in endf/readers.jl |
+| MF5 evaporation (u, θ) | `read_mf5_evaporation()` from ENDF | New reader in endf/readers.jl |
+| MF12/MF13 passthrough | Linearized onto reconr grid via `interpolate()` | `_linearize_mf_section()` |
+
+**Bugs found and fixed during Phase 36**:
+
+1. **MF12 NK interpretation (CRITICAL)**: `read_mf12_gammas` read NK-1 per-gamma subsections instead of NK. NK is the number of photon transitions, not total subsections. The total yield TAB1 is subsection 0; gammas are 1 through NK. Missing the 3rd gamma (1.2625 MeV) caused 2.4% systematic KERMA error. **Fix**: `for k in 1:nk` instead of `for k in 2:nk`.
+
+2. **_interp_to_grid! threshold boundary**: Used `E <= src_e[1]` → zero at E == first energy. Should be `E < src_e[1]`. Caused zero KERMA at E=1e-5 eV.
+
+3. **MF12/MF13 passthrough**: Raw ENDF lines (13+43) instead of reconr-linearized lines (348+139). Fortran emerge interpolates MF12/MF13 via gety1 onto the reconr grid. **Fix**: `_linearize_mf_section()` evaluates TabulatedFunction at each reconr energy, applies `round_sigfig(y, 7, 0)`, formats as ENDF TAB1 with proper sequence numbers.
+
+4. **MF13 TAB1 L2 field**: Wrote 0 instead of 2 (LF=2 = tabulated distribution). The `read_mf13_sections` doesn't capture LF from the TAB1 record. **Fix**: Hardcode L2=2 for MF13 (always tabulated in reconr output).
+
+5. **MF12/MF13 HEAD ZA/AWR**: Wrote 0.0 instead of material ZA/AWR. **Fix**: Pass ZA/AWR from reconr result.
+
+6. **MF12/MF13 sequence numbers**: Wrote "    0" instead of incrementing 1,2,3... Tolerance test parses integers from sequence column. **Fix**: Track sequence counter in `_linearize_mf_section`.
+
+7. **L2=99 for MT=4 in override_mf3 path**: `write_full_pendf` only set L2=99 for MT=1 in the broadened-override path, not for MT=4 or MT=103-107. **Fix**: Apply same redundant-detection logic as the reconr path. This fix is in `src/processing/pendf_writer.jl`.
+
+8. **ThermrParams parser field ordering**: Card 2 fields were shifted — nbin was at position 3 (not ntemp). **Fix**: Corrected field mapping to match Fortran: matde, matdp, nbin, ntemp, iinc, icoh, iform, natom, mtref, iprint.
+
+9. **Input parser '/' inside quotes**: The tokenizer stripped '/' from ALL cards including quoted strings like `'pendf tape for c-nat from endf/b tape 511'`. **Fix**: `_find_slash_outside_quotes()` skips '/' inside single/double quotes.
+
+**Trap 121 (NEW — FIXED)**: MF12 NK=3 means 3 photon transitions = 3 per-gamma TAB1 subsections AFTER the total yield subsection. Total subsections = NK+1. The reader must iterate `1:nk` after skipping the total, not `2:nk`.
+
+**Trap 122 (NEW — FIXED)**: Fortran emerge interpolates MF12/MF13 onto the reconr energy grid via gety1 and applies sigfig(sn,7,0) before writing. The PENDF MF12/MF13 is NOT a raw passthrough of the ENDF — it's a linearized TAB1 on the same grid as MF3. Julia must do the same: evaluate TabulatedFunction at each reconr energy, round to 7 sigfigs, format as ENDF lines.
+
+**Trap 123 (NEW — FIXED)**: The `write_full_pendf` L2=99 logic for redundant MTs only applied in the reconr-path branch (lines 286-307), NOT the override_mf3 branch (lines 260-273). When broadr copies MT=4 through to its output PENDF and it ends up in override_mf3, the override branch used L2 from the ENDF (L2=1) instead of L2=99. Both branches must detect redundant MTs.
+
+**How to run T01 via orchestrated pipeline**:
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e '
+using NJOY
+tapes = run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01_orch")
+println("Output: ", resolve(tapes, 25))
+println("Lines: ", countlines(resolve(tapes, 25)))
+'
+# Expected: 32962 lines, matches referenceTape25
+# Tolerance test:
+python3 -c "
+import re; from math import isclose
+fp=re.compile(r'([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)')
+ref=open('njoy-reference/tests/01/referenceTape25').readlines()
+trial=open('/tmp/t01_orch/tape25').readlines()
+n=min(len(ref),len(trial))
+for rtol in [1e-9,1e-7,1e-5,1e-4,1e-3]:
+    f=0
+    for i in range(n):
+        r=ref[i]; t=trial[i]
+        if r==t: continue
+        rF=fp.findall(r); tF=fp.findall(t)
+        if not rF:
+            if r.rstrip()!=t.rstrip(): f+=1
+            continue
+        if len(rF)!=len(tF): f+=1; continue
+        ok=True
+        for a,b in zip(rF,tF):
+            try: rv=float(a); tv=float(b)
+            except: continue
+            if not isclose(rv,tv,rel_tol=rtol,abs_tol=1e-10): ok=False; break
+        if not ok: f+=1
+    print(f'rel_tol={rtol:.0e}: {f} lines fail ({f/n*100:.1f}%)')
+"
+# Expected: 0 at 1e-5, 212 at 1e-9
+```
+
+**Remaining work — PRIORITIZED for next agent**:
+
+### 1. Extend run_njoy to T02 and beyond
+
+T02 (Pu-238, reconr→broadr with 3 temperatures) should work with the existing orchestration since `broadr_module` supports sequential multi-temperature broadening. Test:
+```bash
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work_dir="/tmp/t02_orch")'
+```
+The T02 chain continues to unresr→groupr which are stubbed. The broadr stage should match the oracle.
+
+### 2. Grind T01 from 1e-5 → 1e-9
+
+212 remaining diffs at 1e-9. Breakdown:
+- MT=444: ~100 diffs (damage ±1 ULP cascade)
+- MT=301: ~50 diffs (KERMA cascade from MT=1)
+- MT=1: ~40 diffs (sigma1 broadening FP accumulation)
+- MF6/MT=229: ~15 diffs (sigl FP at high IEs)
+- MF6/MT=221: ~5 diffs (free gas cosine FP)
+- MF3/MT=229: 1 diff (coh window edge)
+- MF3/MT=2: 1 diff (sigma1 ±1 ULP)
+
+Use the 3+1 agent grind method. Rule 6: nothing is irreducible.
+
+### 3. Implement remaining module stubs
+
+- `groupr_module`: multigroup averaging (needed for T01 GENDF, T02 chain)
+- `unresr_module`: unresolved self-shielding (needed for T02 chain)
+- `acer_module`: ACE format output (T14, T48, T50-54)
+- `gaspr_module`: gas production (T45)
+- `leapr_module`: S(α,β) generation (T22, T23, T33)
+
+### 4. Generate oracle caches for untested tests
+
+31 reconr tests RAN_OK without oracles. `run_njoy` can now be used to test these.
+
+### 5. Key files for the next agent
+
+| File | What it does |
+|------|-------------|
+| `src/orchestration/pipeline.jl` | `run_njoy()` entry point + RunContext + helpers |
+| `src/orchestration/modules/broadr.jl` | broadr_module with auto thnmax + partials |
+| `src/orchestration/modules/heatr.jl` | heatr_module with ENDF readers |
+| `src/orchestration/modules/thermr.jl` | thermr_module for free gas + SAB |
+| `src/orchestration/auto_params.jl` | Parameter auto-computation |
+| `src/orchestration/pendf_io.jl` | PENDF read/write/extract/modify |
+| `src/orchestration/input_parser.jl` | Input deck tokenizer (moved from test/) |
+| `src/processing/pendf_writer.jl` | `write_full_pendf` — the final PENDF assembly |
+| `test/validation/t01_pipeline.jl` | Original hand-wired pipeline (still useful for comparison) |

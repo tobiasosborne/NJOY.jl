@@ -257,12 +257,17 @@ function write_full_pendf(io::IO, result::NamedTuple;
             if sec_orig !== nothing
                 qm, qi = sec_orig[3], sec_orig[4]
             end
-            # Broadened sections: L2 preserves reconr value (broadr doesn't change L2)
-            # MT=1 special: reconr recout writes L2=99
-            if imt == 1
+            # Broadened sections: L2 from reconr convention
+            # Fortran recout: ALL redundant/computed reactions get L2=99
+            is_redundant = imt == 1 || imt == 4
+            if !is_redundant && imt in (103,104,105,106,107)
+                lo, hi = Dict(103=>(600,649),104=>(650,699),
+                        105=>(700,749),106=>(750,799),107=>(800,849))[imt]
+                is_redundant = any(s -> lo <= Int(s.mt) <= hi, result.mf3_sections)
+            end
+            if is_redundant
                 l2_head = 99
             else
-                # Look up L2/LR from original ENDF MF3 section
                 for sec in result.mf3_sections
                     if Int(sec.mt) == imt
                         l2_head = Int(sec.L2)
