@@ -229,14 +229,84 @@ function reconr(endf_file::AbstractString;
             eresl, eresh, eresr = _resonance_bounds_from_file(io)
         end
 
+        # Read MF=23 sections early (needed for the no-resonance path below)
+        mf23_sections = read_mf23_sections(io, actual_mat)
+
         # Handle materials with no resonances (LRU=0 only, e.g. H-2)
         if (isinf(eresl) || eresh == 0.0) && rml_data === nothing
-            # For LRU=0, Fortran sets eresr/eresh = ehigh = 20e6 (constant,
-            # reconr.f90:144,308-309). NOT from MF2 EH.
-            ehigh_const = 20.0e6  # Fortran parameter ehigh=20.e6_kr
+            # For photoatomic materials (MF=23 only, no MF=3), use MF=23 sections
+            is_photoatomic = isempty(mf3_sections) && !isempty(mf23_sections)
 
-            # Build union grid matching Fortran lunion (reconr.f90:1771-2238).
-            # elim = min(0.99e6, eresr) = min(0.99e6, 20e6) = 0.99e6
+            if is_photoatomic
+                # Photoatomic path: linearize MF=23 sections, compute MT=501 total
+                # Fortran reconr skips lunion for photoatomic; emerge processes
+                # directly. We use lunion_grid with elim=0 (step ratio everywhere,
+                # matching Fortran line 1811: eresr=0 → elim=0).
+                all_secs = mf23_sections
+                all_energies = lunion_grid(all_secs, err; awr=mf2.AWR, elim=0.0)
+
+                # Evaluate each MF=23 section at every grid point
+                # Matching Fortran emerge lines 4791-4794:
+                #   - Below threshold (first energy): XS=0
+                #   - AT threshold (abs(thresh-eg) < 1e-10*thresh): XS=0
+                #   - Above threshold: interpolate normally
+                n_pts = length(all_energies)
+                mf23_mt_list = Int[]
+                mf23_xs = Dict{Int, Vector{Float64}}()
+                for sec in all_secs
+                    mt = Int(sec.mt)
+                    mt == 501 && continue  # redundant total — compute as sum
+                    push!(mf23_mt_list, mt)
+                    thresh = round_sigfig(sec.tab.x[1], 7, 0)
+                    xs = Vector{Float64}(undef, n_pts)
+                    for (i, e) in enumerate(all_energies)
+                        if thresh > 1.0 && thresh - e > 1.0e-10 * thresh
+                            xs[i] = 0.0
+                        elseif thresh > 1.0 && abs(thresh - e) < 1.0e-10 * thresh
+                            xs[i] = 0.0  # AT threshold (Fortran emerge line 4794)
+                        else
+                            xs[i] = round_sigfig(interpolate(sec.tab, e), 7)
+                        end
+                    end
+                    mf23_xs[mt] = xs
+                end
+
+                # MT=501 = sum of all except MT=515,517 (Fortran emerge lines 4896-4910)
+                total_xs = zeros(n_pts)
+                for (mt, xs) in mf23_xs
+                    mt == 515 && continue
+                    mt == 517 && continue
+                    total_xs .+= xs
+                end
+                for i in 1:n_pts
+                    total_xs[i] = round_sigfig(total_xs[i], 7)
+                end
+
+                # Build output sections with linearized data on the union grid
+                interp_lin = InterpolationTable([n_pts], [2])
+                all_out_sections = MF3Section[]
+                tab_501 = TabulatedFunction(interp_lin, copy(all_energies), total_xs)
+                push!(all_out_sections, MF3Section(Int32(501), 0.0, 0.0, tab_501,
+                                                   Int32(23), mf2.AWR, Int32(0), Int32(0)))
+                for mt in mf23_mt_list
+                    xs = mf23_xs[mt]
+                    tab_mt = TabulatedFunction(interp_lin, copy(all_energies), xs)
+                    orig = nothing
+                    for sec in all_secs
+                        Int(sec.mt) == mt && (orig = sec; break)
+                    end
+                    qm = orig !== nothing ? orig.QM : 0.0
+                    qi = orig !== nothing ? orig.QI : 0.0
+                    push!(all_out_sections, MF3Section(Int32(mt), qm, qi, tab_mt,
+                                                       Int32(23), mf2.AWR, Int32(0), Int32(0)))
+                end
+
+                return (energies=all_energies, total=total_xs,
+                        elastic=total_xs, fission=zeros(n_pts), capture=zeros(n_pts),
+                        mf2=mf2, mf3_sections=all_out_sections)
+            end
+
+            # Standard LRU=0 path (neutron, e.g. H-2, C-nat)
             all_energies = lunion_grid(mf3_sections, err;
                                        awr=mf2.AWR)
 
@@ -306,7 +376,7 @@ function reconr(endf_file::AbstractString;
         if urr_table !== nothing
             append!(mf2_nodes, urr_table.energies)
         end
-        all_lunion_sections = vcat(mf3_sections, mf10_sections, mf12_sections, mf13_sections)
+        all_lunion_sections = vcat(mf3_sections, mf10_sections, mf12_sections, mf13_sections, mf23_sections)
         # Fortran: if (eresr.lt.elim) elim=eresr (reconr.f90:1811)
         elim = min(0.99e6, eresr > 0.0 ? eresr : 0.99e6)
         bg_grid = lunion_grid(all_lunion_sections, err;

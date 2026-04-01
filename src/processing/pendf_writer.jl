@@ -87,13 +87,20 @@ function write_pendf(io::IO, result::NamedTuple;
     # TPID
     _write_tpid_line(io, label, Int(actual_mat))
 
+    # Build MF lookup from sections
+    mt_mf = Dict{Int,Int}()
+    for sec in result.mf3_sections
+        mt_mf[Int(sec.mt)] = Int(sec.mf)
+    end
+
     # MF1/MT451
-    _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns)
+    _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
+                      mt_to_mf=mt_mf)
 
     # MF2/MT151
     _write_legacy_mf2(io, mf2, actual_mat, ns)
 
-    # MF3 sections
+    # MF3/MF23 sections
     _write_legacy_mf3(io, result, actual_mat, reactions, ns)
 
     # MEND and TEND (NS=0 matching Fortran)
@@ -693,14 +700,15 @@ end
 
 function _collect_reactions(result)
     # Collect reactions in ENDF file order (matching Fortran emerge/recout).
-    # MT=1 (total) always first. Then non-redundant MTs from MF3 in file order.
-    # Redundant MTs are computed sums inserted at their natural MT position:
-    #   MT=4   = sum(MT=51-91)     MT=18  = sum(MT=19+20+21+38)
-    #   MT=103 = sum(MT=600-649)   MT=104 = sum(MT=650-699)
-    #   MT=105 = sum(MT=700-749)   MT=106 = sum(MT=750-799)
-    #   MT=107 = sum(MT=800-849)
+    # For MF=3: MT=1 (total) first; for MF=23: MT=501 (photoatomic total) first.
     reactions = Tuple{Int32, String}[]
-    push!(reactions, (Int32(1), "total"))
+    is_photoatomic = !isempty(result.mf3_sections) &&
+                     all(s -> Int(s.mf) == 23, result.mf3_sections)
+    if is_photoatomic
+        push!(reactions, (Int32(501), "total"))
+    else
+        push!(reactions, (Int32(1), "total"))
+    end
 
     has_inelastic = any(s -> Int(s.mt) >= 51 && Int(s.mt) <= 91, result.mf3_sections)
     has_partial_fission = any(s -> Int(s.mt) == 19, result.mf3_sections)
@@ -718,6 +726,8 @@ function _collect_reactions(result)
         # Skip truly redundant MTs (never output by Fortran)
         (mt == 1 || mt == 3 || mt == 101 || mt == 120 ||
          mt == 151 || mt == 27 || (mt >= 251 && mt <= 300 && mt != 261)) && continue
+        mt == 501 && continue  # photoatomic total (redundant, handled above)
+        mt == 460 && continue  # delayed photon total
         # MT=4: output as redundant sum if inelastic levels present
         if mt == 4
             has_inelastic && push!(reactions, (Int32(4), "inelastic"))
@@ -751,7 +761,8 @@ function _collect_reactions(result)
 end
 
 function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
-                            n_pts, reactions, ns::Ref{Int})
+                            n_pts, reactions, ns::Ref{Int};
+                            mt_to_mf::Dict{Int,Int}=Dict{Int,Int}())
     ns[] = 1
     nxc = 2 + length(reactions)
 
@@ -764,7 +775,8 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
     _write_cont_line(io, 0.0, 0.0, 1, 451, 3, 0, Int(mat), 1, 451, ns)
     _write_cont_line(io, 0.0, 0.0, 2, 151, 4, 0, Int(mat), 1, 451, ns)
     for (mt, _) in reactions
-        _write_cont_line(io, 0.0, 0.0, 3, Int(mt), nc_per, 0,
+        dir_mf = get(mt_to_mf, Int(mt), 3)
+        _write_cont_line(io, 0.0, 0.0, dir_mf, Int(mt), nc_per, 0,
                          Int(mat), 1, 451, ns)
     end
 
@@ -810,30 +822,44 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
     awr = result.mf2.AWR
     za = result.mf2.ZA
 
-    for (mt, _) in reactions
-        ns[] = 1  # Restart sequence per section (matching Fortran)
+    # Build MF lookup: MT → actual MF from section data
+    mt_to_mf = Dict{Int, Int}()
+    for sec in result.mf3_sections
+        mt_to_mf[Int(sec.mt)] = Int(sec.mf)
+    end
 
-        # Get xs data and determine threshold
+    cur_mf = 0
+
+    for (mt, _) in reactions
+        ns[] = 1
+
         sec_data = _get_legacy_section(result, Int(mt))
         sec_data === nothing && continue
 
         sec_e, sec_xs, qm, qi = sec_data
 
-        # HEAD: ZA, AWR, 0, L2, 0, 0
-        # L2=99 for reconr output (Fortran emerge convention)
+        # Determine actual MF (3 for neutron, 23 for photoatomic)
+        out_mf = get(mt_to_mf, Int(mt), 3)
+
+        # Handle MF transition: write FEND when MF changes
+        if cur_mf != 0 && out_mf != cur_mf
+            _write_fend_zero(io, Int(mat))
+        end
+        cur_mf = out_mf
+
+        # HEAD: ZA, AWR, 0, L2=99, 0, 0
         _write_cont_line(io, za, awr, 0, 99, 0, 0,
-                         Int(mat), 3, Int(mt), ns)
+                         Int(mat), out_mf, Int(mt), ns)
 
         # TAB1: QM, QI, 0, LR, NR=1, NP
-        # Fortran emerge: QI=0 for redundant sums (MT=1,4)
-        qi_out = (mt == 1 || mt == 4) ? 0.0 : qi
+        qi_out = (mt == 1 || mt == 4 || mt == 501) ? 0.0 : qi
         np = length(sec_e)
         _write_cont_line(io, qm, qi_out, 0, 0, 1, np,
-                         Int(mat), 3, Int(mt), ns)
+                         Int(mat), out_mf, Int(mt), ns)
 
-        # Interpolation table: NBT, INT as integers (Fortran format)
+        # Interpolation table
         @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n",
-                np, 2, "", Int(mat), 3, Int(mt), ns[])
+                np, 2, "", Int(mat), out_mf, Int(mt), ns[])
         ns[] += 1
 
         # Data pairs
@@ -843,14 +869,14 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
             push!(data, sec_e[i])
             push!(data, sec_xs[i])
         end
-        _write_data_values(io, data, Int(mat), 3, Int(mt), ns; pair_data=true)
+        _write_data_values(io, data, Int(mat), out_mf, Int(mt), ns; pair_data=true)
 
-        # SEND (NS=99999 per ENDF convention)
-        _write_send(io, Int(mat), 3)
+        _write_send(io, Int(mat), out_mf)
     end
 
-    # FEND (MAT, MF=0, MT=0, NS=0)
-    _write_fend_zero(io, Int(mat))
+    if cur_mf != 0
+        _write_fend_zero(io, Int(mat))
+    end
 end
 
 """Get energies, XS, QM, QI for a given MT, handling thresholds."""
@@ -868,6 +894,9 @@ function _get_legacy_section(result, mt::Int)
     end
 
     if mt == 1
+        return energies, result.total, 0.0, 0.0
+    elseif mt == 501
+        # Photoatomic total: MT=501 = sum of all MF=23 except MT=515,517
         return energies, result.total, 0.0, 0.0
     elseif mt == 4
         # Redundant sum: MT=4 = sum(MT=51-91)

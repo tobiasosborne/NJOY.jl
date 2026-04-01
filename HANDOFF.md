@@ -2479,3 +2479,71 @@ Use the 3+1 agent grind method. Rule 6: nothing is irreducible.
 | `src/orchestration/input_parser.jl` | Input deck tokenizer (moved from test/) |
 | `src/processing/pendf_writer.jl` | `write_full_pendf` — the final PENDF assembly |
 | `test/validation/t01_pipeline.jl` | Original hand-wired pipeline (still useful for comparison) |
+
+---
+
+### Phase 37: Multi-temp broadr, multi-material reconr, MF=23 photoatomic support
+
+**Goal**: Make `run_njoy` work for T02 (multi-temp broadr) and T03 (photoatomic, multi-material reconr).
+
+**9 bugs found and fixed:**
+
+1. **Multi-temperature broadr output (CRITICAL)**: `broadr_module` only wrote the final temperature. Fortran writes ALL temperatures as separate MAT blocks. Added `write_broadr_pendf()` in `broadr.jl` that writes one complete MAT block per temperature (MF1+MF2+MF3+MEND). Each block has correct directory NC values, temperature in MF1/MT451 CONT and MF2/MT152.
+
+2. **Sequential T_eff for broadening (CRITICAL)**: `broadr_module` used `alpha = awr / (bk * T)` (full temperature). Fortran uses `T_eff = T_new - T_old` for sequential broadening. Without this, 900K and 2100K grids differed (2540 vs 2592, 2307 vs 2418). Fix: `t_eff = temp - t_old`.
+
+3. **thnmax from eresh (CRITICAL for T02)**: `resolve_thnmax(0)` computed lowest inelastic threshold (44 keV for Pu-238). Fortran broadr.f90 lines 427-431: when `thnmx=0`, `thnmax = min(eresh, lowest_threshold)` where `eresh` is from MF2/MT151. For Pu-238: `eresh=200 eV → thnmax=200`. Added `eresh` kwarg to `resolve_thnmax`, `_extract_eresh_from_pendf()` to read EH from MF2/MT151.
+
+4. **Multi-material reconr (T03)**: `reconr_module` only processed one MAT. T03 has MAT=1 (hydrogen) + MAT=92 (uranium). Added `ReconrMatSpec` struct, multi-material loop in `reconr_module`, `_write_reconr_mat_block()` for appending MAT blocks to same PENDF.
+
+5. **parse_reconr ncards handling (T02 regression fix)**: T02 input has `ncards=3` (3 description lines after err). The parser tried to parse description lines as MAT numbers, crashing. Fix: read `ncards` from card3 field 2, skip that many cards per material.
+
+6. **MF=23 reader**: Added `read_mf23_sections()` in `reconr_types.jl` — identical format to MF=3 (HEAD + TAB1), returns `MF3Section` with `mf=23`.
+
+7. **Photoatomic reconr path**: When no MF=3 but MF=23 exists (photoatomic), builds union grid from MF=23 breakpoints, linearizes to INT=2, evaluates each section with threshold zero at first energy (Fortran emerge line 4794), computes MT=501 as sum of partials excluding MT=515/517.
+
+8. **MF-aware PENDF writer**: `_write_legacy_mf3()` now uses the section's actual `mf` field (3 or 23) instead of hardcoding 3. Directory entries also use correct MF via `mt_to_mf` dict passed through `_write_legacy_mf1()`.
+
+9. **MT=501/460 skip in lunion_grid**: Both the pre-pass breakpoint loop and the main bisection loop now skip MT=501 (photoatomic total, redundant) and MT=460 (delayed photon total), matching Fortran reconr.f90 lines 1875-1877.
+
+**T02 broadr results** (multi-temperature):
+```
+Grid sizes: 2925/2592/2418 — EXACT MATCH with oracle ✓
+Data lines: 13133/13133 — exact count match ✓
+Data exact: 86.0% (PENDF round-trip precision)
+Tolerance:  0 failures at 1e-5 ✓
+```
+
+**T03 reconr results** (photoatomic, multi-material):
+```
+MF=23 data: 2112/2112 lines — exact count match ✓
+Byte-identical: 99.5% (2102/2112)
+Tolerance 1e-5: 2 failures (MAT=92 MT=516 grid ±1 ULP from lunion vs emerge)
+MAT=1 MT=501: 100% PERFECT (225/225 lines)
+```
+
+**T03 remaining 2 failures at 1e-5** (investigated, root cause found):
+
+The Fortran reconr **skips lunion entirely** for photoatomic materials (`lrp ≠ 1`). The grid comes from emerge's processing of MF=23 breakpoints directly — NOT from lunion's panel bisection. Julia uses lunion_grid + `_linearize_mf3!` which produces a similar but not identical grid. Confirmed via gdb: label 140 is NEVER reached for MF=23 sections in T03. The grid points at E≈1.024e6 (MAT=92 MT=516) differ by ±1 in 7th sigfig between Julia's `_linearize_mf3!` midpoints and Fortran's emerge evaluation grid.
+
+**To fix the remaining 2 diffs**: need to understand how Fortran emerge builds the grid for photoatomic materials (when lunion is skipped). The Fortran emerge reads each section's TAB1 from the scratch tape and evaluates at the breakpoints of the UNION grid. The union grid for photoatomic is built by emerge itself (not lunion) — each section's breakpoints contribute to the common grid. The emerge grid construction for photoatomic needs to be matched exactly.
+
+**Trap 124 (NEW — FIXED)**: Fortran broadr uses `T_eff = T_new - T_old` for sequential multi-temperature broadening, NOT the full temperature. `alpha = awr / (bk * T_eff)`. Without this, second and third temperature grids differ significantly.
+
+**Trap 125 (NEW — FIXED)**: Fortran broadr.f90 lines 427-431: when `thnmx=0`, `thnmax = eresh` (resolved resonance range boundary from MF2), then reduced by lowest inelastic threshold. For Pu-238: eresh=200 eV, no thresholds below 200 → thnmax=200. For C-nat: eresh=2e7 (from reconr MF2/MT151), lowest threshold=4.81e6 → thnmax=4.81e6.
+
+**Trap 126 (NEW — FIXED)**: Fortran reconr.f90 line 4794: `if (thresh.gt.one.and.abs(thresh-eg).lt.test*thresh) sn=0`. At the exact threshold energy (E=1000 eV for photoatomic sections), XS is forced to 0. This applies to ALL sections including MF=23 partials. Without this, the MT=501 total was 12.24 instead of 0 at E=1000.
+
+**Trap 127 (NEW — INVESTIGATED)**: Fortran reconr SKIPS lunion entirely for photoatomic materials (`lrp ≠ 1` at line 304). The grid comes from emerge processing the MF=23 breakpoints directly. Julia currently uses lunion_grid + `_linearize_mf3!` which produces a similar but not identical grid. The remaining 2 diffs at 1e-5 (MAT=92 MT=516 at E≈1.024e6) are from this fundamental path difference.
+
+**PENDF round-trip and SEND handling (Trap 128)**: `read_pendf` includes the SEND record in section lines. When copying non-broadened sections verbatim, the SEND must be stripped (via `_count_data_lines`) to avoid double SEND. Same applies to MF2 sections and directory NC computation.
+
+**Files changed**:
+- `src/orchestration/modules/broadr.jl` — multi-temp collection, T_eff, eresh, write_broadr_pendf + helpers
+- `src/orchestration/modules/reconr.jl` — multi-material, _write_reconr_mat_block
+- `src/orchestration/input_parser.jl` — ReconrMatSpec, parse_reconr with ncards/ngrid
+- `src/orchestration/auto_params.jl` — resolve_thnmax with eresh kwarg
+- `src/processing/reconr_types.jl` — read_mf23_sections
+- `src/processing/reconr.jl` — photoatomic path, MF=23 in all_lunion_sections
+- `src/processing/reconr_grid.jl` — MT=501/460 skips
+- `src/processing/pendf_writer.jl` — MF-aware writer, MT=501 handling, _collect_reactions photoatomic

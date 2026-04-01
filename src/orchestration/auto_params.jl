@@ -29,20 +29,26 @@ function compute_thnmax(mf3_sections, awr::Float64)
 end
 
 """
-    resolve_thnmax(user_thnmax::Float64, mf3_sections, awr::Float64) -> Float64
+    resolve_thnmax(user_thnmax, mf3_sections, awr; eresh=Inf) -> Float64
 
 Apply the Fortran broadr convention for the user-supplied thnmax value:
-- thnmax == 0: auto-compute from reaction thresholds
+- thnmax == 0: auto-compute (min of eresh and lowest inelastic threshold)
 - thnmax < 0: use abs(thnmax) directly
-- thnmax > 0: use user value directly
+- thnmax > 0: use min(user_value, eresh)
+
+`eresh` is the resolved resonance range upper energy from MF2/MT151.
+Fortran broadr.f90 lines 427-431.
 """
-function resolve_thnmax(user_thnmax::Float64, mf3_sections, awr::Float64)
+function resolve_thnmax(user_thnmax::Float64, mf3_sections, awr::Float64;
+                        eresh::Float64=Inf)
     if user_thnmax == 0.0
-        return compute_thnmax(mf3_sections, awr)
+        thnmax = eresh
+        thresh = compute_thnmax(mf3_sections, awr)
+        return min(thnmax, thresh)
     elseif user_thnmax < 0.0
         return abs(user_thnmax)
     else
-        return user_thnmax
+        return min(user_thnmax, eresh)
     end
 end
 

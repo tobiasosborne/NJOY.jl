@@ -116,6 +116,41 @@ function _skip_to_send(io::IO)
 end
 
 """
+    read_mf23_sections(io::IO, mat::Integer) -> Vector{MF3Section}
+
+Read all MF=23 (photoatomic) cross section sections for material `mat`.
+Format is identical to MF=3 (HEAD + TAB1). Returns MF3Section with mf=23.
+"""
+function read_mf23_sections(io::IO, mat::Integer)
+    sections = MF3Section[]
+    seekstart(io)
+    while !eof(io)
+        pos = position(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        mf = _parse_int(p[71:72])
+        mt = _parse_int(p[73:75])
+        mat_line = _parse_int(p[67:70])
+        mat_line != mat && continue
+        if mf == 23 && mt > 0
+            seek(io, pos)
+            try
+                head = read_cont(io)
+                tab1 = read_tab1(io)
+                tf = TabulatedFunction(tab1)
+                push!(sections, MF3Section(Int32(mt), tab1.C1, tab1.C2, tf,
+                                           Int32(23), head.C2, Int32(head.L2), Int32(tab1.L2)))
+                _skip_to_send(io)
+            catch e
+                @warn "read_mf23_sections: skipping MF23/MT=$mt" exception=(e, catch_backtrace())
+                _skip_to_send(io)
+            end
+        end
+    end
+    return sections
+end
+
+"""
     read_mf12_lo1_sections(io::IO, mat::Integer) -> Vector{MF3Section}
 
 Read MF=12 photon multiplicity sections with LO=1 (tabulated multiplicities).

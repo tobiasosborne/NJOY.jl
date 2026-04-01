@@ -140,18 +140,40 @@ _fint(card, n; default=0)   = n <= length(card) ? _parse_int_token(card[n]) : de
 # Module-specific parameter extractors
 # =========================================================================
 
+struct ReconrMatSpec
+    mat::Int; err::Float64; description::String
+end
+
 struct ReconrParams
     nendf::Int; npend::Int; mat::Int; err::Float64; title::String
+    materials::Vector{ReconrMatSpec}
 end
+ReconrParams(nendf, npend, mat, err, title) =
+    ReconrParams(nendf, npend, mat, err, title, [ReconrMatSpec(mat, err, "")])
 
 function parse_reconr(mc::ModuleCall)::ReconrParams
     cards = mc.raw_cards
     isempty(cards) && return ReconrParams(0, 0, 0, 0.001, "")
-    nendf = _fint(cards[1], 1); npend = _fint(cards[1], 2)
+    nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
     title = length(cards) >= 2 ? strip(replace(join(cards[2], " "), r"^['\"]|['\"]$" => "")) : ""
-    mat = length(cards) >= 3 ? _fint(cards[3], 1) : 0
-    err = length(cards) >= 4 ? _fnum(cards[4], 1; default=0.001) : 0.001
-    ReconrParams(abs(nendf), abs(npend), mat, err, title)
+    materials = ReconrMatSpec[]
+    ci = 3
+    while ci <= length(cards)
+        mat_val = _fint(cards[ci], 1)
+        mat_val == 0 && break
+        ncards = length(cards[ci]) >= 2 ? _fint(cards[ci], 2; default=0) : 0
+        ngrid = length(cards[ci]) >= 3 ? _fint(cards[ci], 3; default=0) : 0
+        err_val = ci + 1 <= length(cards) ? _fnum(cards[ci+1], 1; default=0.001) : 0.001
+        desc = ""
+        if ncards > 0 && ci + 2 <= length(cards)
+            desc = strip(replace(join(cards[ci+2], " "), r"^['\"]|['\"]$" => ""))
+        end
+        push!(materials, ReconrMatSpec(abs(mat_val), err_val, desc))
+        ci += 2 + max(ncards, 0) + max(ngrid, 0)
+    end
+    first_mat = isempty(materials) ? 0 : materials[1].mat
+    first_err = isempty(materials) ? 0.001 : materials[1].err
+    ReconrParams(nendf, npend, first_mat, first_err, title, materials)
 end
 
 struct BroadrParams

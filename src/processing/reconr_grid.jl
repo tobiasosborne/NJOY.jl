@@ -38,6 +38,8 @@ function build_grid(mf2::MF2Data, mf3_sections::Vector{MF3Section};
     for sec in mf3_sections
         mt = Int(sec.mt)
         (mt == 1 || mt == 3 || mt == 101) && continue
+        mt == 501 && continue  # photoatomic total (redundant, Fortran line 1875)
+        mt == 460 && continue  # delayed photon total (Fortran line 1877)
         for e in sec.tab.x
             push!(nodes, e)
         end
@@ -246,8 +248,11 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
 
     for sec in mf3_sections
         mt = Int(sec.mt)
+        # Skips applied to ALL MF values (Fortran reconr.f90:1875-1878)
+        mt == 501 && continue  # photoatomic total — redundant (Fortran line 1875)
+        mt == 460 && continue  # delayed photon total (Fortran line 1877)
         # Skip redundant reactions (matching Fortran reconr.f90:1881-1901)
-        # Only apply to MF=3 sections — MF=12/13 bypass these checks
+        # Only apply to MF=3 sections — MF=12/13/23 bypass these checks
         # (Fortran line 1881: if (mfh.ne.3) go to 180)
         if Int(sec.mf) == 3
             (mt == 1 || mt == 3 || mt == 101) && continue
