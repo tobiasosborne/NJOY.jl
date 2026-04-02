@@ -28,11 +28,11 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     @info "errorr: MF$mfcov MTs available: $avail_mts"
 
     if params.nin > 0
-        # Second errorr call: read covariance from previous output tape
+        # Second errorr call: copy previous covariance tape + append new MT
         nin_path = resolve(tapes, params.nin)
-        _errorr_passthrough(nin_path, nout_path, params)
+        _errorr_second_call(tapes, params, endf_path, nin_path, nout_path, za, awr, mfcov)
         register!(tapes, params.nout, nout_path)
-        @info "errorr: passthrough from tape $(params.nin) → tape $(params.nout)"
+        @info "errorr: second call, tape $(params.nin) + new cov → tape $(params.nout)"
         return nothing
     end
 
@@ -271,12 +271,258 @@ end
 # Passthrough for second errorr call
 # =========================================================================
 
-"""Copy covariance data from one errorr output to another (for chained errorr calls)."""
-function _errorr_passthrough(nin_path::String, nout_path::String, params::ErrorrParams)
-    # For the second errorr call, we pass through the first errorr's output
-    # with potential modifications (different mfcov, different group structure)
-    # For now, just copy the input tape
-    cp(nin_path, nout_path; force=true)
+"""Second errorr call: copy previous covariance + append new MT covariance."""
+function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
+                              endf_path::String, nin_path::String, nout_path::String,
+                              za::Float64, awr::Float64, mfcov::Int)
+    mat = params.mat
+
+    # Build second group structure from user boundaries
+    egn2 = params.user_egn
+    isempty(egn2) && error("errorr second call requires user energy grid")
+    ngn2 = length(egn2) - 1
+
+    # Read nubar from GENDF tape (ngout)
+    nubar_values = Float64[]
+    if params.ngout != 0
+        gendf_path = resolve(tapes, abs(params.ngout))
+        nubar_values = _read_gendf_nubar(gendf_path, mat, egn2)
+    end
+
+    # Read MF31 covariance from ENDF and expand onto second group grid
+    cov_mt = 452  # nubar
+    cov_matrix = zeros(Float64, ngn2, ngn2)
+    try
+        open(endf_path) do io
+            seekstart(io)
+            find_section(io, mfcov, cov_mt; target_mat=mat) || return
+            head = read_cont(io); nl = Int(head.N2)
+            for _ in 1:nl
+                sh = read_cont(io)
+                nc = Int(sh.N1); ni = Int(sh.N2)
+                for _ in 1:nc
+                    try; read_list(io); catch; break; end
+                end
+                nc > 0 && continue  # Skip derived sub-sections
+                for _ in 1:ni
+                    try
+                        lst = read_list(io)
+                        lb = Int(lst.L2)
+                        lb in (0,1,2,5,6) || continue
+                        ne = Int(lst.N2); np = Int(lst.N1)
+                        block = if lb in (0,1,2)
+                            nk = div(np, 2); nk == 0 && continue
+                            CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
+                                lst.data[1:2:2nk], lst.data[2:2:2nk])
+                        elseif lb == 5
+                            CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
+                                lst.data[1:ne], lst.data[ne+1:np])
+                        else
+                            continue
+                        end
+                        cov_matrix .+= expand_covariance_block(block, egn2)
+                    catch; end
+                end
+                break  # Only first standalone sub-section
+            end
+        end
+    catch e
+        @warn "errorr: MF$mfcov/MT$cov_mt read failed: $e"
+    end
+
+    # Read nin content
+    nin_lines = readlines(nin_path)
+    # Find last content line (before MEND/TEND)
+    last_content = length(nin_lines)
+    while last_content > 0
+        p = rpad(nin_lines[last_content], 80)
+        mat_val = _parse_int(p[67:70])
+        mat_val <= 0 || break
+        last_content -= 1
+    end
+
+    open(nout_path, "w") do io
+        # 1. Copy nin content (previous errorr output) with continuous seq numbers
+        seq = 0
+        for i in 1:last_content
+            p = rpad(nin_lines[i], 80)
+            seq += 1
+            @printf(io, "%s%5d\n", p[1:75], seq)
+        end
+
+        # MEND only (FEND already included in copied nin content)
+        seq += 1; @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, seq)
+
+        # 2. Second material: MF1/MT451 with new group structure
+        seq += 1
+        _write_cont_line(io, za, awr, 5, 0, -length(egn2), 0, mat, 1, 451, seq)
+        seq += 1
+        _write_cont_line(io, 0.0, 0.0, ngn2, 0, length(egn2), 0, mat, 1, 451, seq)
+        idx = 1
+        while idx <= length(egn2)
+            seq += 1; buf = ""
+            for col in 1:6
+                idx > length(egn2) && break
+                buf *= format_endf_float(egn2[idx]); idx += 1
+            end
+            _write_data_line(io, buf, mat, 1, 451, seq)
+        end
+        _write_send_line(io, mat, 1)
+        _write_fend_line(io, mat)
+
+        # 3. MF3/MT452: group-averaged nubar
+        seq = 1
+        _write_cont_line(io, za, 0.0, 0, 0, ngn2, 0, mat, 3, cov_mt, seq); seq += 1
+        idx_v = 1
+        while idx_v <= length(nubar_values)
+            buf = ""
+            for col in 1:6
+                idx_v > length(nubar_values) && break
+                buf *= _fmt_errorr_xs(nubar_values[idx_v]); idx_v += 1
+            end
+            _write_data_line(io, buf, mat, 3, cov_mt, seq); seq += 1
+        end
+        _write_send_line(io, mat, 3)
+        _write_fend_line(io, mat)
+
+        # 4. MF33/MT452: nubar covariance matrix
+        seq = 1
+        _write_cont_line(io, za, awr, 0, 0, 0, 1, mat, 33, cov_mt, seq); seq += 1
+        _write_cont_line(io, 0.0, 0.0, 0, cov_mt, 0, ngn2, mat, 33, cov_mt, seq); seq += 1
+        for row in 1:ngn2
+            _write_cont_line(io, 0.0, 0.0, ngn2, 1, ngn2, row, mat, 33, cov_mt, seq); seq += 1
+            idx_v = 1
+            while idx_v <= ngn2
+                buf = ""
+                for col in 1:6
+                    idx_v > ngn2 && break
+                    buf *= _fmt_errorr_cov(cov_matrix[row, idx_v]); idx_v += 1
+                end
+                _write_data_line(io, buf, mat, 33, cov_mt, seq); seq += 1
+            end
+        end
+        _write_send_line(io, mat, 33)
+        _write_fend_line(io, mat)
+
+        # MEND + TEND
+        _write_fend_line(io, 0)
+        @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
+    end
+end
+
+"""Read group-averaged nubar from GENDF tape for specified energy groups."""
+function _read_gendf_nubar(gendf_path::String, mat::Int, egn::Vector{Float64})
+    # Read nubar tabulated data from the GENDF MF3/MT452 records
+    ngn = length(egn) - 1
+    values = Float64[]
+
+    lines = readlines(gendf_path)
+    idx = 1
+    while idx <= length(lines)
+        length(lines[idx]) < 75 && (idx += 1; continue)
+        p = rpad(lines[idx], 80)
+        mf = _parse_int(p[71:72]); mt = _parse_int(p[73:75])
+        mat_val = _parse_int(p[67:70])
+        if mat_val == mat && mf == 3 && mt == 452
+            # Found MT452 section — read group records
+            idx += 1
+            while idx <= length(lines)
+                p2 = rpad(lines[idx], 80)
+                mf2 = _parse_int(p2[71:72]); mt2 = _parse_int(p2[73:75])
+                (mf2 != 3 || mt2 != 452) && break
+                # Group record header: check if it's data (not CONT header)
+                nw = _parse_int(p2[45:55])
+                ig = _parse_int(p2[56:66])
+                if ig > 0 && nw > 0
+                    idx += 1
+                    # Next line has the data values (flux, nubar, sigf_avg)
+                    length(lines[idx]) < 22 && (idx += 1; continue)
+                    p3 = rpad(lines[idx], 80)
+                    # Second value is nubar
+                    nubar = parse_endf_float(p3[12:22])
+                    push!(values, nubar)
+                end
+                idx += 1
+            end
+            break
+        end
+        idx += 1
+    end
+
+    # Now interpolate the GENDF nubar (on LANL-30 grid) onto the user group grid
+    # by finding which GENDF group each user group falls into
+    if length(values) > 0
+        # Read the GENDF group boundaries from MF1
+        gendf_egn = _read_gendf_group_bounds(gendf_path, mat)
+        if length(gendf_egn) > 1
+            return _regroup_nubar(values, gendf_egn, egn)
+        end
+    end
+    values
+end
+
+"""Read group boundaries from a GENDF tape's MF1/MT451."""
+function _read_gendf_group_bounds(gendf_path::String, mat::Int)
+    egn = Float64[]
+    lines = readlines(gendf_path)
+    idx = 1
+    while idx <= length(lines)
+        length(lines[idx]) < 75 && (idx += 1; continue)
+        p = rpad(lines[idx], 80)
+        mf = _parse_int(p[71:72]); mt = _parse_int(p[73:75])
+        if mf == 1 && mt == 451
+            idx += 1  # Skip first HEAD
+            p2 = rpad(lines[idx], 80)
+            ngn = _parse_int(p2[23:33])
+            nw = _parse_int(p2[45:55])
+            idx += 1
+            # Read boundaries (skip first 2 values: elow, ehigh)
+            all_vals = Float64[]
+            while idx <= length(lines) && length(all_vals) < nw
+                p3 = rpad(lines[idx], 80)
+                _parse_int(p3[73:75]) != 451 && break
+                for col in 0:5
+                    s = p3[1+11*col:11+11*col]
+                    v = tryparse(Float64, strip(replace(s, r"([0-9])([+-])(\d)" => s"\1e\2\3")))
+                    v !== nothing && push!(all_vals, v)
+                end
+                idx += 1
+            end
+            # Skip elow (0.0) and ehigh (1e10), then take ngn+1 boundaries
+            if length(all_vals) >= 3
+                egn = all_vals[3:min(end, 2+ngn+1)]
+            end
+            break
+        end
+        idx += 1
+    end
+    egn
+end
+
+"""Regroup nubar from GENDF groups to user groups by flux weighting."""
+function _regroup_nubar(gendf_nubar::Vector{Float64}, gendf_egn::Vector{Float64},
+                         user_egn::Vector{Float64})
+    ngn_user = length(user_egn) - 1
+    result = Vector{Float64}(undef, ngn_user)
+
+    for g in 1:ngn_user
+        elo, ehi = user_egn[g], user_egn[g+1]
+        # Find weighted average of GENDF nubar values overlapping this user group
+        wt_sum = 0.0; nu_wt_sum = 0.0
+        for k in 1:length(gendf_nubar)
+            k >= length(gendf_egn) && break
+            glo, ghi = gendf_egn[k], gendf_egn[k+1]
+            # Overlap
+            olo = max(elo, glo); ohi = min(ehi, ghi)
+            olo >= ohi && continue
+            # Weight by lethargy width of overlap
+            wt = log(ohi / olo)
+            wt_sum += wt
+            nu_wt_sum += wt * gendf_nubar[k]
+        end
+        result[g] = wt_sum > 0 ? nu_wt_sum / wt_sum : 0.0
+    end
+    result
 end
 
 # =========================================================================

@@ -352,9 +352,9 @@ function parse_errorr(mc::ModuleCall)::ErrorrParams
     mfcov = length(cards) >= 4 ? _fint(cards[4], 2; default=33) : 33
     irespr = length(cards) >= 4 ? _fint(cards[4], 3; default=1) : 1
     legord = length(cards) >= 4 ? _fint(cards[4], 4; default=1) : 1
-    # User group structure (ign < 0): read ngn then boundaries
+    # User group structure (ign < 0 or ign == 1): read ngn then boundaries
     user_egn = Float64[]
-    if ign < 0
+    if ign < 0 || ign == 1
         ci = 5
         ngn = ci <= length(cards) ? _fint(cards[ci], 1; default=0) : 0
         ci += 1
