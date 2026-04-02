@@ -128,7 +128,13 @@ function run_njoy(input_path::AbstractString;
             _collect_thermr!(ctx, tapes, params)
 
         elseif mc.name == :groupr
-            @info "groupr: skipped (stub — GENDF output not validated for T01)"
+            params = parse_groupr(mc)
+            groupr_module(tapes, params)
+
+        elseif mc.name == :errorr
+            params = parse_errorr(mc)
+            errorr_module(tapes, params)
+
         elseif mc.name in (:viewr, :plotr)
             @info "$(mc.name): skipped (visualization)"
         else

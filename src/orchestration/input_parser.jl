@@ -323,6 +323,121 @@ struct PurrParams
     temperatures::Vector{Float64}; sigz::Vector{Float64}
 end
 
+struct ErrorrParams
+    nendf::Int; npend::Int; ngout::Int; nout::Int; nin::Int; nstan::Int
+    mat::Int; ign::Int; iwt::Int; iprint::Int; irelco::Int
+    mprint::Int; tempin::Float64
+    iread::Int; mfcov::Int; irespr::Int; legord::Int
+    user_egn::Vector{Float64}  # user energy group boundaries (when ign<0)
+end
+
+function parse_errorr(mc::ModuleCall)::ErrorrParams
+    cards = mc.raw_cards
+    isempty(cards) && return ErrorrParams(0,0,0,0,0,0,0,1,6,1,1,0,0.0,0,33,1,1,Float64[])
+    # Card 1: nendf, npend, ngout, nout, nin, nstan
+    nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
+    ngout = _fint(cards[1], 3; default=0); nout = abs(_fint(cards[1], 4; default=0))
+    nin = abs(_fint(cards[1], 5; default=0)); nstan = abs(_fint(cards[1], 6; default=0))
+    # Card 2: matd, ign, iwt, iprint, irelco
+    mat = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    ign = length(cards) >= 2 ? _fint(cards[2], 2; default=1) : 1
+    iwt = length(cards) >= 2 ? _fint(cards[2], 3; default=6) : 6
+    iprint = length(cards) >= 2 ? _fint(cards[2], 4; default=1) : 1
+    irelco = length(cards) >= 2 ? _fint(cards[2], 5; default=1) : 1
+    # Card 3: mprint, tempin
+    mprint = length(cards) >= 3 ? _fint(cards[3], 1; default=0) : 0
+    tempin = length(cards) >= 3 ? _fnum(cards[3], 2; default=0.0) : 0.0
+    # Card 4: iread, mfcov, irespr, legord
+    iread = length(cards) >= 4 ? _fint(cards[4], 1; default=0) : 0
+    mfcov = length(cards) >= 4 ? _fint(cards[4], 2; default=33) : 33
+    irespr = length(cards) >= 4 ? _fint(cards[4], 3; default=1) : 1
+    legord = length(cards) >= 4 ? _fint(cards[4], 4; default=1) : 1
+    # User group structure (ign < 0): read ngn then boundaries
+    user_egn = Float64[]
+    if ign < 0
+        ci = 5
+        ngn = ci <= length(cards) ? _fint(cards[ci], 1; default=0) : 0
+        ci += 1
+        while ci <= length(cards) && length(user_egn) < ngn + 1
+            for t in cards[ci]
+                startswith(t, "'") && continue
+                push!(user_egn, _parse_num(t))
+                length(user_egn) >= ngn + 1 && break
+            end
+            ci += 1
+        end
+    end
+    ErrorrParams(nendf, npend, ngout, nout, nin, nstan,
+                 mat, ign, iwt, iprint, irelco, mprint, tempin,
+                 iread, mfcov, irespr, legord, user_egn)
+end
+
+struct GrouprParams
+    nendf::Int; npend::Int; ngout_in::Int; nout::Int
+    mat::Int; ign::Int; igg::Int; iwt::Int; lord::Int
+    ntemp::Int; nsigz::Int; iprint::Int
+    title::String
+    temperatures::Vector{Float64}; sigz::Vector{Float64}
+    mt_list::Vector{Tuple{Int,Int,String}}  # (mfd, mtd, name) triplets
+end
+
+function parse_groupr(mc::ModuleCall)::GrouprParams
+    cards = mc.raw_cards
+    isempty(cards) && return GrouprParams(0,0,0,0,0,3,0,6,0,1,1,0,"",Float64[],Float64[],Tuple{Int,Int,String}[])
+    # Card 1: nendf, npend, ngout, nout
+    nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
+    ngout_in = _fint(cards[1], 3; default=0); nout = abs(_fint(cards[1], 4; default=0))
+    # Card 2: matd, ign, igg, iwt, lord, ntemp, nsigz, iprint
+    mat   = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    ign   = length(cards) >= 2 ? _fint(cards[2], 2; default=3) : 3
+    igg   = length(cards) >= 2 ? _fint(cards[2], 3; default=0) : 0
+    iwt   = length(cards) >= 2 ? _fint(cards[2], 4; default=6) : 6
+    lord  = length(cards) >= 2 ? _fint(cards[2], 5; default=0) : 0
+    ntemp = length(cards) >= 2 ? _fint(cards[2], 6; default=1) : 1
+    nsigz = length(cards) >= 2 ? _fint(cards[2], 7; default=1) : 1
+    iprint= length(cards) >= 2 ? _fint(cards[2], 8; default=0) : 0
+    # Card 3: title string
+    title = ""
+    ci = 3
+    if ci <= length(cards)
+        title = strip(replace(join(cards[ci], " "), r"^['\"]|['\"]$" => ""))
+        ci += 1
+    end
+    # Card 4+: temperatures (ntemp values)
+    temps = Float64[]
+    while ci <= length(cards) && length(temps) < ntemp
+        for t in cards[ci]
+            startswith(t, "'") && continue
+            push!(temps, _parse_num(t))
+            length(temps) >= ntemp && break
+        end
+        ci += 1
+    end
+    # Card 5+: sigz values (nsigz values)
+    sigz = Float64[]
+    while ci <= length(cards) && length(sigz) < nsigz
+        for t in cards[ci]
+            startswith(t, "'") && continue
+            push!(sigz, _parse_num(t))
+            length(sigz) >= nsigz && break
+        end
+        ci += 1
+    end
+    # MT list: read (mfd, mtd, name) until mfd=0
+    mt_list = Tuple{Int,Int,String}[]
+    while ci <= length(cards)
+        mfd = _fint(cards[ci], 1; default=0)
+        mfd == 0 && break
+        mtd = _fint(cards[ci], 2; default=0)
+        name = length(cards[ci]) >= 3 ?
+            strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
+        push!(mt_list, (mfd, mtd, name))
+        ci += 1
+    end
+    GrouprParams(nendf, npend, ngout_in, nout, mat, ign, igg, iwt, lord,
+                 ntemp, nsigz, iprint, title, temps, sigz, mt_list)
+end
+
 function parse_purr(mc::ModuleCall)::PurrParams
     cards = mc.raw_cards
     isempty(cards) && return PurrParams(0,0,0,0,1,1,20,64,Float64[],Float64[])

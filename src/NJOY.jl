@@ -124,6 +124,8 @@ include("orchestration/modules/reconr.jl")
 include("orchestration/modules/broadr.jl")
 include("orchestration/modules/heatr.jl")
 include("orchestration/modules/thermr.jl")
+include("orchestration/modules/errorr.jl")
+include("orchestration/modules/groupr.jl")
 include("orchestration/pipeline.jl")
 
 # Public API -- constants
