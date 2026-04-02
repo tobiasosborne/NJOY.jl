@@ -354,39 +354,53 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
 
     # MFcov — covariance matrices
     for mt in reaction_mts
-        # Find all sub-sections for this MT
-        sub_keys = [(mt1, mt2) for (mt1, mt2) in keys(cov_matrices) if mt1 == mt]
-        isempty(sub_keys) && continue
+        # Build list of sub-sections: self-covariance + cross-covariances
+        sub_keys = [(mt, mt2) for (mt1, mt2) in keys(cov_matrices) if mt1 == mt]
+        # Add zero cross-covariances for other reactions with HIGHER MT numbers
+        # (cross-correlations are stored only once, in the lower-MT section)
+        for mt2 in reaction_mts
+            mt2 <= mt && continue
+            (mt, mt2) in sub_keys || push!(sub_keys, (mt, mt2))
+        end
+        sort!(sub_keys, by = x -> x[2])
 
+        isempty(sub_keys) && continue
         seq = 1
         nl = length(sub_keys)
         _write_cont_line(io, za, awr, 0, 0, 0, nl, mat, mfcov, mt, seq); seq += 1
 
         for (mt1, mt2) in sub_keys
-            matrix = cov_matrices[(mt1, mt2)]
+            matrix = get(cov_matrices, (mt1, mt2), nothing)
             # Sub-section header: 0, 0, 0, MT2, 0, NG
             _write_cont_line(io, 0.0, 0.0, 0, mt2, 0, ngn, mat, mfcov, mt, seq); seq += 1
 
-            # Each row as an NI-type block (LB=1 symmetric, one row per block)
-            for row in 1:ngn
-                _write_cont_line(io, 0.0, 0.0, ngn, 1, ngn, row, mat, mfcov, mt, seq); seq += 1
-                idx_v = 1
-                while idx_v <= ngn
-                    buf = ""
-                    for col in 1:6
-                        idx_v > ngn && break
-                        buf *= _fmt_errorr_cov(matrix[row, idx_v]); idx_v += 1
+            if matrix !== nothing && any(!iszero, matrix)
+                # Full covariance matrix: each row as an NI-type block
+                for row in 1:ngn
+                    _write_cont_line(io, 0.0, 0.0, ngn, 1, ngn, row, mat, mfcov, mt, seq); seq += 1
+                    idx_v = 1
+                    while idx_v <= ngn
+                        buf = ""
+                        for col in 1:6
+                            idx_v > ngn && break
+                            buf *= _fmt_errorr_cov(matrix[row, idx_v]); idx_v += 1
+                        end
+                        _write_data_line(io, buf, mat, mfcov, mt, seq); seq += 1
                     end
-                    _write_data_line(io, buf, mat, mfcov, mt, seq); seq += 1
                 end
+            else
+                # Zero cross-covariance: single LIST with LB=9, NP=1, value=0
+                _write_cont_line(io, 0.0, 0.0, 1, 9, 1, ngn, mat, mfcov, mt, seq); seq += 1
+                _write_data_line(io, format_endf_float(0.0), mat, mfcov, mt, seq); seq += 1
             end
         end
         _write_send_line(io, mat, mfcov)
     end
     _write_fend_line(io, mat)
 
-    # MEND
+    # MEND + TEND
     _write_fend_line(io, 0)
+    @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
 end
 
 # =========================================================================
