@@ -247,24 +247,86 @@ function _errorr_group_average(pendf_path::String, mat::Int,
     tape = read_pendf(pendf_path)
     mf3 = extract_mf3_all(tape, mat)
     ngn = length(egn) - 1
-    wfn = iwt == 3 ? inv_e_weight : constant_weight
 
     for (mt, (energies, xs)) in mf3
         mt in (1, 451) && continue
-
-        # Build product arrays at data points
-        n = length(energies)
-        w_vals = [wfn(energies[i]) for i in 1:n]
-        sig_w = [xs[i] * w_vals[i] for i in 1:n]
-
-        # Exact panel integration
-        flux = group_integrate(energies, w_vals, egn)
-        sig_int = group_integrate(energies, sig_w, egn)
-
-        avg = [flux[g] > 0 ? sig_int[g] / flux[g] : 0.0 for g in 1:ngn]
+        if iwt == 3
+            # 1/E weighting: use analytical integration matching Fortran epanel
+            # For piecewise-linear σ(E) on each panel [E1,E2]:
+            #   ∫σ/E dE = (σ1·E2 - σ2·E1)/(E2-E1) · ln(E2/E1) + (σ2 - σ1)
+            #   ∫1/E dE = ln(E2/E1)
+            avg = _group_average_inv_e(energies, xs, egn)
+        else
+            # Flat weighting: standard panel integration
+            n = length(energies)
+            w_vals = [constant_weight(energies[i]) for i in 1:n]
+            sig_w = [xs[i] * w_vals[i] for i in 1:n]
+            flux = group_integrate(energies, w_vals, egn)
+            sig_int = group_integrate(energies, sig_w, egn)
+            avg = [flux[g] > 0 ? sig_int[g] / flux[g] : 0.0 for g in 1:ngn]
+        end
         result[mt] = avg
     end
     result
+end
+
+"""Group averaging with 1/E weight matching Fortran errorr epanel.
+Uses trapezoidal rule with 1% energy stepping (enext = 1.01*E),
+replicating Fortran's egtwtf for iwt=3 which returns enext = s101*e
+where s101 = 1.01. Between PENDF data points, σ is interpolated linearly
+and 1/E is evaluated exactly at each sub-panel boundary."""
+function _group_average_inv_e(energies::Vector{Float64}, xs::Vector{Float64},
+                               egn::Vector{Float64})
+    ngn = length(egn) - 1
+    ne = length(energies)
+    avg = zeros(Float64, ngn)
+    ip = 1
+    s101 = 1.01  # Fortran errorr stepping factor
+
+    for g in 1:ngn
+        elo, ehi = egn[g], egn[g+1]
+        flux_g = 0.0; sigflux_g = 0.0
+
+        # Advance to first panel overlapping this group
+        while ip < ne - 1 && energies[ip+1] <= elo
+            ip += 1
+        end
+
+        jp = ip
+        while jp < ne && energies[jp] < ehi
+            e1, e2 = energies[jp], energies[jp+1]
+            s1, s2 = xs[jp], xs[jp+1]
+
+            # Clip to group boundaries
+            ea = max(e1, elo); eb = min(e2, ehi)
+            ea >= eb && (jp += 1; continue)
+
+            # Trapezoidal integration with 1% sub-panels matching Fortran epanel
+            e_lo = ea
+            while e_lo < eb
+                e_hi = min(s101 * e_lo, eb)  # next weight function point or group boundary
+
+                # Interpolate σ at sub-panel boundaries from PENDF data
+                frac_lo = (e_lo - e1) / (e2 - e1)
+                frac_hi = (e_hi - e1) / (e2 - e1)
+                sig_lo = s1 + frac_lo * (s2 - s1)
+                sig_hi = s1 + frac_hi * (s2 - s1)
+
+                # Trapezoidal: ∫f dE ≈ (f(lo) + f(hi))/2 · ΔE
+                bq = (e_hi - e_lo) / 2.0
+                flux_lo = 1.0 / e_lo; flux_hi = 1.0 / e_hi
+                flux_g += (flux_lo + flux_hi) * bq
+                sigflux_g += (sig_lo * flux_lo + sig_hi * flux_hi) * bq
+
+                e_lo = e_hi
+            end
+
+            jp += 1
+        end
+
+        avg[g] = flux_g > 0 ? sigflux_g / flux_g : 0.0
+    end
+    avg
 end
 
 # =========================================================================
@@ -583,7 +645,6 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
         haskey(group_xs, mt) || continue
         xs = group_xs[mt]
         length(xs) == ngn || continue
-        seq = 1
         _write_cont_line(io, za, 0.0, 0, 0, ngn, 0, mat, 3, mt, seq); seq += 1
         idx_v = 1
         while idx_v <= length(xs)
@@ -611,7 +672,6 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
         sort!(sub_keys, by = x -> x[2])
 
         isempty(sub_keys) && continue
-        seq = 1
         nl = length(sub_keys)
         _write_cont_line(io, za, awr, 0, 0, 0, nl, mat, mfcov, mt, seq); seq += 1
 
@@ -672,18 +732,9 @@ function _write_fend_line(io::IO, mat)
     @printf(io, "%66s%4d%2d%3d%5d\n", "", mat, 0, 0, 0)
 end
 
-"""Format a float for errorr XS output — Fortran free-format style matching reference."""
+"""Format a float for errorr XS output — uses ENDF a11 format (same as Fortran)."""
 function _fmt_errorr_xs(x::Float64)
-    # Fortran errorr uses free-format floats with ~7-8 significant digits
-    # Reference shows values like "41.5829820" (10 chars + space)
-    if x == 0.0
-        return rpad("0.0", 11)
-    end
-    s = @sprintf("%.7f", x)
-    # Trim trailing zeros but keep at least one decimal
-    s = replace(s, r"0+$" => "")
-    endswith(s, '.') && (s *= "0")
-    rpad(s, 11)
+    format_endf_float(x)
 end
 
 """Format a float for errorr covariance output — scientific notation."""
