@@ -370,18 +370,13 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
                     try
                         lst = read_list(io)
                         lb = Int(lst.L2)
-                        lb in (0,1,2,5,6) || continue
+                        # For MF31, use only LB=5 (symmetric matrix) blocks.
+                        # LB=1/2 diagonal corrections require full ERRORR covcal
+                        # treatment with union-grid expansion and are skipped here.
+                        lb == 5 || continue
                         ne = Int(lst.N2); np = Int(lst.N1)
-                        block = if lb in (0,1,2)
-                            nk = div(np, 2); nk == 0 && continue
-                            CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
-                                lst.data[1:2:2nk], lst.data[2:2:2nk])
-                        elseif lb == 5
-                            CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
-                                lst.data[1:ne], lst.data[ne+1:np])
-                        else
-                            continue
-                        end
+                        block = CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
+                            lst.data[1:ne], lst.data[ne+1:np])
                         cov_matrix .+= expand_covariance_block(block, egn2)
                     catch; end
                 end
