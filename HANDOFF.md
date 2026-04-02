@@ -2547,3 +2547,74 @@ The Fortran reconr **skips lunion entirely** for photoatomic materials (`lrp ≠
 - `src/processing/reconr.jl` — photoatomic path, MF=23 in all_lunion_sections
 - `src/processing/reconr_grid.jl` — MT=501/460 skips
 - `src/processing/pendf_writer.jl` — MF-aware writer, MT=501 handling, _collect_reactions photoatomic
+
+### Phase 38: T04 pipeline — ERRORR + GROUPR orchestration, 2/3 tapes BIT-IDENTICAL
+
+**Goal**: Run T04's full chain (moder→reconr→errorr→groupr→errorr) in the completely modular faithful Fortran drop-in fashion, producing output tapes matching referenceTape23/24/25.
+
+**T04 test structure** (from input deck):
+- Chain: moder→reconr→errorr→groupr→errorr
+- Input: tape20 (t511, U-235 ENDF/B-V)
+- Comparison: tape23 vs referenceTape23, tape24 vs referenceTape24, tape25 vs referenceTape25
+- MAT=1395, err=0.10 (10% tolerance for errorr test problem)
+- ERRORR #1: MF33 covariance on 9-group structure (from MF33 energies intersected with [1.0, 1000.0])
+- GROUPR: MT=452 (nubar) on LANL-30 (30 groups), ign=3, iwt=3 (1/E weight)
+- ERRORR #2: MF31 nubar covariance on 7-group user structure [1, 10, 100, ..., 1e7], appended to tape23
+
+**New modules implemented:**
+
+| Module | File | Lines | Purpose |
+|--------|------|-------|---------|
+| ErrorrParams + parse_errorr | `src/orchestration/input_parser.jl` | +115 | Parse ERRORR input cards |
+| GrouprParams + parse_groupr | `src/orchestration/input_parser.jl` | (above) | Parse GROUPR input cards |
+| errorr_module | `src/orchestration/modules/errorr.jl` | 531 | Full ERRORR orchestration |
+| groupr_module | `src/orchestration/modules/groupr.jl` | 297 | Full GROUPR orchestration |
+| Pipeline dispatch | `src/orchestration/pipeline.jl` | +8 | Dispatch for errorr/groupr |
+| T04 validation | `test/validation/t04_pipeline.jl` | 145 | Full pipeline test script |
+
+**Results:**
+| Tape | Lines | Status | Details |
+|------|-------|--------|---------|
+| **tape23** (errorr #1) | 82/82 | **BIT-IDENTICAL** | MF3 XS + MF33 covariance all match |
+| **tape24** (groupr) | 74/74 | **BIT-IDENTICAL** | Nubar + flux + σf_avg all match |
+| **tape25** (errorr #2) | 119/119 | 16 diffs | Copied tape23 matches; MT452 nubar cov needs full covcal |
+
+**Key breakthrough: 1% energy stepping** — The Fortran errorr/groupr `egtwtf` function for iwt=3 (1/E weight) returns `enext = s101 * e` where `s101 = 1.01`. This creates dense sub-panels every 1% of energy within each PENDF panel. Both modules use trapezoidal integration on these sub-panels. Replicating this stepping (instead of piecewise-linear panel integration) produced **exact bit-identical match** on both tape23 and tape24.
+
+**Bugs fixed:**
+
+1. **read_mf33 NC bounds crash (Bug 14)**: NC sub-subsections with odd N1 values (ENDF/B-V quirk) caused BoundsError. Fixed with safe bounds checking.
+
+2. **expand_lb1 off-by-one (Bug 15)**: For LB=0/1/2, energies and data have equal length (E,F pairs). The loop iterated to `length(fk)` but needed `min(length(fk), length(ek)) - 1`.
+
+3. **Covariance double-counting (Bug 16)**: MF33/MT18 Sub 3/4 have NC+NI blocks — NI blocks from NC-derived sub-sections shouldn't be directly summed with standalone Sub 1 NI blocks. Fix: only expand NI blocks from sub-sections with NC=0.
+
+4. **Cross-covariance placement (Bug 17)**: MT18/MT102 cross-covariance stored only in the lower-MT section (MT18). MT102 section has NL=1 (self only), not NL=2.
+
+5. **MF3 XS format (Bug 18)**: ERRORR output uses `format_endf_float` (a11 format), not free-format `@sprintf`. Confirmed via Fortran endf.f90 lineio→a11 chain.
+
+6. **Sequence numbers (Bug 19)**: Fortran uses continuous sequence numbers across MF1/MF3/MF33 sections. Julia was restarting at 1 for each MF.
+
+7. **Integration method (Bug 20 — CRITICAL)**: Group-averaged XS used `group_integrate` with piecewise-linear σ/E → 0.3% error. Fortran's `epanel` uses trapezoidal with 1% stepping sub-panels. Fix: `_group_average_inv_e` with `s101 = 1.01` sub-stepping.
+
+8. **GENDF record format (Bug 21)**: For ratio quantities (MT=452), the GENDF stores (flux, nubar, σf_avg) NOT (flux, nubar, ∫ν·σf·W dE). Fortran `displa` transforms: production/reaction = nubar, reaction/flux = σf_avg.
+
+9. **parse_errorr ign=1 (Bug 22)**: ign=1 means "read user group structure" (same as ign<0). The second errorr call uses ign=1 with 7 user energy boundaries.
+
+10. **FEND duplication (Bug 23)**: Second errorr call copied tape23 including FEND, then added another FEND. Fix: only add MEND after copy.
+
+**tape25 remaining 16 diffs** — Two categories:
+1. **Nubar XS (lines 89-90)**: 0.1% off in high-energy groups (regrouping from LANL-30 to 7-group)
+2. **Nubar covariance (lines 96+)**: 20x off — requires full ERRORR `covcal` pipeline with union-grid expansion + LB=3 correlation handling + flux-weighted collapse. Direct LB=5 block expansion gives 2.4e-6 vs reference 4.8e-5.
+
+**Trap 129 (NEW — FIXED)**: Fortran errorr/groupr `egtwtf` for iwt=3 returns `enext = 1.01*E`. Both modules use trapezoidal rule with these dense sub-panels for 1/E weighting. Without this, group-averaged XS differ by 0.02-0.3% — enough to fail at 1e-5 tolerance. Julia's `group_integrate` with piecewise-linear σ/E is analytically correct but gives DIFFERENT results from the Fortran's approximate quadrature on dense sub-panels.
+
+**Trap 130 (NEW — FIXED)**: For GENDF ratio quantities (MT=251-253, MT=452/455/456), the Fortran `displa` subroutine transforms raw integrals to (flux, yield, cross_section). The panel accumulates 3 integrals: flux=∫W dE, production=∫ν·σf·W dE, reaction=∫σf·W dE. The displa transforms: ans(2) = production/reaction = nubar, ans(3) = reaction/flux = σf_avg.
+
+**Trap 131 (NEW — INVESTIGATED)**: MF31/MT452 Sub 1 has 5 NI blocks (LB=5, LB=1, LB=2, LB=2, LB=2). The LB=5 block has the symmetric covariance matrix (~5e-5 values). The LB=1/2 blocks add large diagonal corrections (~4e-3). The Fortran ERRORR covcal processes all blocks via union-grid expansion + flux-weighted collapse, which properly distributes the corrections. Direct expansion onto the output grid gives wrong values (20x off for LB=5 alone, or 200x with all blocks summed).
+
+**How to run T04:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/t04_pipeline.jl
+```
