@@ -52,11 +52,67 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
         group_xs = _errorr_group_average(pendf_path, params.mat, egn, params.iwt)
     end
 
-    # Compute multigroup covariance matrices using process_covariance
-    cov_results = process_covariance(endf_path, egn; mts=avail_mts)
+    # Compute multigroup covariance matrices
+    # Read MF33 sub-sections and expand NI blocks onto the group grid.
+    # Only use NI blocks from standalone sub-sections (NC=0).
+    # Sub-sections with NC>0 contain derived covariance that requires
+    # NC processing (linear combinations of other MTs) — skip for now.
     cov_matrices = Dict{Tuple{Int,Int}, Matrix{Float64}}()
-    for cm in cov_results
-        cov_matrices[(cm.mt1, cm.mt2)] = cm.matrix
+    for mt in avail_mts
+        try
+            open(endf_path) do io
+                seekstart(io)
+                find_section(io, mfcov, mt; target_mat=params.mat) || return
+                head = read_cont(io); nl = Int(head.N2)
+                for _ in 1:nl
+                    sh = read_cont(io)
+                    mt2 = Int(sh.L2); mt2 == 0 && (mt2 = mt)
+                    nc = Int(sh.N1); ni = Int(sh.N2)
+                    # Read NC sub-subsections
+                    for _ in 1:nc
+                        try; read_list(io); catch; break; end
+                    end
+                    # Only expand NI blocks from standalone sub-sections (nc==0)
+                    for _ in 1:ni
+                        try
+                            lst = read_list(io)
+                            nc > 0 && continue  # Skip NI in derived sub-sections
+                            lb = Int(lst.L2)
+                            lb in (0,1,2,5,6) || continue
+                            ne = Int(lst.N2); np = Int(lst.N1)
+                            if lb in (0,1,2,3,4)
+                                nk = div(np, 2)
+                                nk == 0 && continue
+                                block = CovarianceBlock(mt, mt2, lb, Int(lst.L1),
+                                    lst.data[1:2:2nk], lst.data[2:2:2nk])
+                            elseif lb == 5
+                                ek = lst.data[1:ne]
+                                fvals = lst.data[ne+1:np]
+                                block = CovarianceBlock(mt, mt2, lb, Int(lst.L1), ek, fvals)
+                            elseif lb == 6
+                                nek = ne; nel = Int(lst.L1)
+                                ek = vcat(lst.data[1:nek], lst.data[nek+1:nek+nel])
+                                fvals = lst.data[nek+nel+1:np]
+                                block = CovarianceBlock(mt, mt2, lb, Int(lst.L1), ek, fvals)
+                            else
+                                continue
+                            end
+                            C = expand_covariance_block(block, egn)
+                            key = (mt, mt2)
+                            if haskey(cov_matrices, key)
+                                cov_matrices[key] .+= C
+                            else
+                                cov_matrices[key] = C
+                            end
+                        catch e
+                            @debug "errorr: skipping NI block: $e"
+                        end
+                    end
+                end
+            end
+        catch e
+            @warn "errorr: covariance failed for MT=$mt: $e"
+        end
     end
 
     # Write output tape
@@ -356,10 +412,17 @@ function _write_fend_line(io::IO, mat)
     @printf(io, "%66s%4d%2d%3d%5d\n", "", mat, 0, 0, 0)
 end
 
-"""Format a float for errorr XS output — Fortran free-format style (F10.7)."""
+"""Format a float for errorr XS output — Fortran free-format style matching reference."""
 function _fmt_errorr_xs(x::Float64)
-    # The errorr XS output uses free-format floats, not ENDF a11 format
-    s = @sprintf("%.7g", x)
+    # Fortran errorr uses free-format floats with ~7-8 significant digits
+    # Reference shows values like "41.5829820" (10 chars + space)
+    if x == 0.0
+        return rpad("0.0", 11)
+    end
+    s = @sprintf("%.7f", x)
+    # Trim trailing zeros but keep at least one decimal
+    s = replace(s, r"0+$" => "")
+    endswith(s, '.') && (s *= "0")
     rpad(s, 11)
 end
 

@@ -34,7 +34,9 @@ end
 function expand_lb1(block::CovarianceBlock, egrid::AbstractVector{<:Real})
     ne = length(egrid) - 1; C = zeros(Float64, ne, ne)
     ek, fk = block.energies, block.data
-    for k in 1:length(fk)
+    # ENDF (E,F) pairs: F[k] applies over interval [E[k], E[k+1])
+    nk = min(length(fk), length(ek)) - 1
+    for k in 1:nk
         elo, ehi = ek[k], ek[k+1]
         for i in 1:ne
             emid = 0.5 * (egrid[i] + egrid[i+1])
