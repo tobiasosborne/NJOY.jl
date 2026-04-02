@@ -157,9 +157,11 @@ function read_mf33(io::IO, mat::Integer, mt::Integer)
         for _ in 1:nc
             lst = read_list(io); nci = Int(lst.N1)
             coeffs = Float64[]; mts_nc = Int[]
-            for k in 1:2:nci
+            k = 1
+            while k + 1 <= length(lst.data) && k <= nci
                 push!(mts_nc, round(Int, lst.data[k]))
                 push!(coeffs, lst.data[k+1])
+                k += 2
             end
             push!(nc_subs, (coeffs=coeffs, mts=mts_nc))
         end
