@@ -139,51 +139,70 @@ end
 # Group averaging using existing group_integrate infrastructure
 # =========================================================================
 
-"""Compute GENDF records for nubar: (flux, nubar_g, nu_sigf_integral) per group.
-Nubar is weighted by fission XS: ν_g = ∫ν·σf·W dE / ∫σf·W dE."""
+"""Compute GENDF records for nubar: (flux, nubar_g, sigf_avg) per group.
+Nubar weighted by fission XS: ν_g = ∫ν·σf·W dE / ∫σf·W dE.
+Uses trapezoidal with 1% stepping matching Fortran groupr panel+getwtf."""
 function _groupr_nubar_records(nubar_data, mf3::Dict, fis_mt::Int,
                                 egn::Vector{Float64}, wfn)
     ngn = length(egn) - 1
-    nu_e = nubar_data.energies
-    nu_v = nubar_data.values
+    nu_e = nubar_data.energies; nu_v = nubar_data.values
 
-    # Build a merged energy grid from nubar + fission XS
     if fis_mt > 0 && haskey(mf3, fis_mt)
         fis_e, fis_xs = mf3[fis_mt]
     else
-        # No fission XS — use flat weighting
-        fis_e = nu_e
-        fis_xs = ones(Float64, length(nu_e))
+        fis_e = nu_e; fis_xs = ones(Float64, length(nu_e))
     end
 
-    # Merge grids
+    # Merge grids for panel boundaries
     merged_e = sort!(unique!(vcat(nu_e, fis_e, egn)))
-
-    # Interpolate nubar and fission XS onto merged grid
     nu_merged = _interp_linlin(merged_e, nu_e, nu_v)
     fis_merged = _interp_linlin(merged_e, fis_e, fis_xs)
 
-    # Build product arrays: W(E), σf(E)·W(E), ν(E)·σf(E)·W(E)
-    n = length(merged_e)
-    w_vals = [wfn(merged_e[i]) for i in 1:n]
-    sigf_w = [fis_merged[i] * w_vals[i] for i in 1:n]
-    nu_sigf_w = [nu_merged[i] * fis_merged[i] * w_vals[i] for i in 1:n]
-
-    # Integrate over each group using exact panel integration
-    flux = group_integrate(merged_e, w_vals, egn)
-    sigf_int = group_integrate(merged_e, sigf_w, egn)
-    nu_sigf_int = group_integrate(merged_e, nu_sigf_w, egn)
-
-    # Build records: (flux, nubar_g, sigf_avg)
-    # Fortran displa transforms ratio records to (flux, yield, cross_section)
+    s101 = 1.01  # Fortran stepping factor
     records = NTuple{3,Float64}[]
+    ip = 1
+
     for g in 1:ngn
-        nubar_g = sigf_int[g] > 0 ? nu_sigf_int[g] / sigf_int[g] : 0.0
-        sigf_avg = flux[g] > 0 ? sigf_int[g] / flux[g] : 0.0
-        # Round to 7 sigfigs matching Fortran displa (sigfig(x,7,0))
-        nubar_g = round_sigfig(nubar_g, 7)
-        sigf_avg = round_sigfig(sigf_avg, 7)
-        push!(records, (round_sigfig(flux[g], 7), nubar_g, sigf_avg))
+        elo, ehi = egn[g], egn[g+1]
+        flux_g = 0.0; sigf_int_g = 0.0; nu_sigf_int_g = 0.0
+
+        while ip < length(merged_e) - 1 && merged_e[ip+1] <= elo; ip += 1; end
+
+        jp = ip
+        while jp < length(merged_e) && merged_e[jp] < ehi
+            jn = min(jp + 1, length(merged_e))
+            e1, e2 = merged_e[jp], merged_e[jn]
+            sf1, sf2 = fis_merged[jp], fis_merged[jn]
+            nu1, nu2 = nu_merged[jp], nu_merged[jn]
+            ea = max(e1, elo); eb = min(e2, ehi)
+            ea >= eb && (jp += 1; continue)
+
+            # 1% sub-stepping matching Fortran getwtf s101=1.01
+            e_lo = ea
+            while e_lo < eb
+                e_hi = min(s101 * e_lo, eb)
+                de = e2 > e1 ? e2 - e1 : 1.0
+                frac_lo = (e_lo - e1) / de; frac_hi = (e_hi - e1) / de
+                sf_lo = sf1 + frac_lo * (sf2 - sf1)
+                sf_hi = sf1 + frac_hi * (sf2 - sf1)
+                nu_lo = nu1 + frac_lo * (nu2 - nu1)
+                nu_hi = nu1 + frac_hi * (nu2 - nu1)
+
+                bq = (e_hi - e_lo) / 2.0
+                fl_lo = 1.0 / e_lo; fl_hi = 1.0 / e_hi
+                flux_g += (fl_lo + fl_hi) * bq
+                sigf_int_g += (sf_lo * fl_lo + sf_hi * fl_hi) * bq
+                nu_sigf_int_g += (nu_lo * sf_lo * fl_lo + nu_hi * sf_hi * fl_hi) * bq
+                e_lo = e_hi
+            end
+            jp += 1
+        end
+
+        nubar_g = sigf_int_g > 0 ? nu_sigf_int_g / sigf_int_g : 0.0
+        sigf_avg = flux_g > 0 ? sigf_int_g / flux_g : 0.0
+        push!(records, (round_sigfig(flux_g, 7),
+                       round_sigfig(nubar_g, 7),
+                       round_sigfig(sigf_avg, 7)))
     end
     records
 end
