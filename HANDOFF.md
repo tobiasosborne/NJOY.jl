@@ -2618,3 +2618,66 @@ The Fortran reconr **skips lunion entirely** for photoatomic materials (`lrp ≠
 rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. test/validation/t04_pipeline.jl
 ```
+
+---
+
+### Phase 39: UNRESR + CCCCR orchestration — MT152 BIT-IDENTICAL, T02 end-to-end
+
+**Goal**: Wire unresr and ccccr into `run_njoy()` so T02 runs its full chain (moder→reconr→broadr→moder→unresr→groupr→ccccr→moder→moder).
+
+**9 bugs found and fixed (all via 3+1 agent pattern + Fortran gdb diagnostics):**
+
+1. **ajku Faddeeva function (CRITICAL)**: Julia's `ajku` was a naive 40-point midpoint rule that gave ~2.4x wrong xj values. Fortran uses the complex probability integral (Faddeeva function) with precomputed 62×62 tables + 8-point Gaussian quadrature. Ported full algorithm: `_uw` (complex w function via asymptotic/Taylor series), `_UNRESR_W_TABLE` (precomputed table), `_quikw` (fast table lookup with 4-region rational approximation), `ajku` (Gaussian quadrature). **After fix: ajku matches Fortran to machine precision.**
+
+2. **bondarenko_xs multi-sequence accumulation (CRITICAL)**: Julia computed `sigu += sigm * t_part_seq / (1 - ttj_seq)` per-sequence independently. Fortran accumulates `tl`, `tj`, `tk` across ALL sequences first, applies cross-sequence correction `(1 - xj_other)`, then divides by global `(1 - yj)` (lines 1152-1191). Rewrote to two-phase: phase 1 accumulates per-sequence arrays, phase 2 sums with cross-isotope correction matching Fortran exactly. **After fix: MT152 426/426 BIT-IDENTICAL.**
+
+3. **sigbt missing from total**: `bondarenko_xs` line 428 only added `bkg[1]` to total XS, missing `spot + sint` (potential scattering + interference). Fortran line 1195: `sigu(1,is) = sigf(1,is,4) + sigbt` where `sigbt = sigbkg(1) + spot + sint`.
+
+4. **URR energy grid construction**: ENDF has only 3 fission-width energy nodes (200, 500, 10000 eV). Fortran `rdunf2` synthesizes 23-point grid by subdividing with 78-point equi-lethargy reference grid (`egridu`) using `wide=1.26` threshold and `step=1.01` ratio. Implemented `_build_unresr_grid` + `_UNRESR_EGRIDU` constant. Grid matches oracle exactly.
+
+5. **MF2 URR reader format**: Mode 11 (LFW=1) subsection header is a LIST record (C1=SPI, C2=AP, N1=NE, N2=NLS) with NE energy values in the body, not a CONT. Matched existing `_read_urr_lfw1` pattern from reader.jl.
+
+6. **MF3 backgrounds from ENDF**: Fortran `rdunf3` reads MF3 backgrounds from the ENDF tape (nendf), not the PENDF. And skips the HEAD record before reading the TAB1. For Pu-238, MF3 in the URR range is 0 (ENDF convention: resonance XS comes from MF2, not MF3).
+
+7. **Broadr 90-char lines**: `write_broadr_pendf` used `@printf "%32s%11d..."` producing 90-char lines instead of ENDF-standard 80. Fixed to `"%22s%11d..."` (22+44+14=80).
+
+8. **Broadr extra MEND lines**: Broadr wrote `(0,0,0,0)` MEND records after each MF's FEND, creating 6 extra lines. Removed intermediate MENDs; kept only one MEND per temperature block.
+
+9. **TPID and descriptions passthrough**: Added `title` and `descriptions` parameters to `reconr_module` → `write_pendf_file` → `_write_legacy_mf1`. Pipeline now passes reconr input deck description cards through to the PENDF.
+
+**New files created:**
+- `src/orchestration/modules/unresr.jl` (~700 lines): Full unresr_module with MF2 URR reader, MF3 background reader, 78-point grid construction, Bondarenko computation, MT152 ENDF format writer, PENDF copy-with-insert
+- `src/orchestration/modules/ccccr.jl` (~90 lines): ccccr_module stub (writes placeholder CCCC files, doesn't crash)
+
+**Files modified:**
+- `src/processing/unresr.jl`: Replaced naive `ajku` with Faddeeva function port (~200 lines). Rewrote `bondarenko_xs` with two-phase accumulation + sigbt fix.
+- `src/orchestration/pipeline.jl`: Added `:unresr` and `:ccccr` dispatch cases. Title/descriptions passthrough.
+- `src/orchestration/modules/broadr.jl`: Fixed 90→80 char lines. Removed extra MEND lines.
+- `src/orchestration/modules/reconr.jl`: Added title/descriptions parameters.
+- `src/processing/pendf_writer.jl`: Added title/descriptions to `write_pendf` and `_write_legacy_mf1`.
+- `src/NJOY.jl`: Includes for new modules.
+
+**T02 results:**
+```
+tape28: 13870 lines (ref: 13873) — 3 lines short
+MT152: 426/426 BIT-IDENTICAL (zero failures at any tolerance)
+MF3 data: correct values, correct positions
+```
+
+**Remaining 3-line gap**: Julia's reconr doesn't write preliminary MF2/MT152 (the Fortran reconr does). This causes broadr temp blocks 2-3 to have NXC=19 instead of 20 (missing 1 directory entry per block = 3 lines). Fix requires adding MF2/MT152 to the reconr PENDF writer (`write_pendf` / `_write_legacy_mf1`).
+
+**Trap 132 (NEW — FIXED)**: Julia's `ajku` was a naive 40-point midpoint rule — completely wrong algorithm. The Fortran uses the complex probability integral (Faddeeva function) via precomputed 62×62 tables with bilinear interpolation (for |z|²<36), rational approximation (36-144), simpler rational (144-10000), and asymptotic form (>10000). The 8-point Gaussian quadrature evaluates the integral with 4 `quikw` calls per point. Without this, Bondarenko XS had ~2.4x systematic error.
+
+**Trap 133 (NEW — FIXED)**: `bondarenko_xs` must accumulate `tl`, `tj`, `tk` from ALL sequences first, then sum with cross-sequence correction `(1-xj_other)*abns(ks)` before dividing by global `(1-yj)`. Per-sequence `1/(1-ttj)` gives wrong results at low sigma0 (up to 174% error). The Fortran's two-phase approach (lines 1076-1191) is NOT equivalent to the per-sequence formula.
+
+**Trap 134 (NEW — FIXED)**: Fortran `rdunf2` synthesizes the URR energy grid from a 78-point equi-lethargy reference grid (`egridu`). The ENDF provides only 3 fission-width energy nodes. Between consecutive nodes with ratio > 1.26, intermediate points from `egridu` are inserted using 1.01 step ratio. Result: 23-point grid for Pu-238. The sentinel is 1e6 (placed at END of sorted list via `ilist`), not 0 (at start).
+
+**Trap 135 (NEW — FIXED)**: Broadr `write_broadr_pendf` produced 90-char lines via `@printf "%32s%11d..."`. ENDF standard is 80 chars. Fixed to `"%22s%11d..."` (22 blanks + 4×11 data + 4+2+3+5 trailer = 80). Without this, every line comparison fails because MAT/MF/MT fields are at wrong positions.
+
+**Trap 136 (NEW)**: Julia's reconr doesn't write preliminary MF2/MT152 (infinite-dilution Bondarenko table, nsigz=1). The Fortran reconr does. This causes the broadr PENDF to have NXC=19 (no MT152 directory entry) while the Fortran has NXC=20. The unresr module fixes block 1's directory but blocks 2-3 remain 1 line short each.
+
+**How to run T02:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work_dir="/tmp/t02_orch")'
+```

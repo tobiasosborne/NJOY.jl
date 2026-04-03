@@ -76,7 +76,9 @@ function write_pendf(io::IO, result::NamedTuple;
                      mat::Integer = 0,
                      label::AbstractString = "reconstructed data",
                      err::Float64 = 0.001,
-                     tempr::Float64 = 0.0)
+                     tempr::Float64 = 0.0,
+                     title = nothing,
+                     descriptions::Vector{String} = String[])
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -84,8 +86,9 @@ function write_pendf(io::IO, result::NamedTuple;
     # Determine reactions
     reactions = _collect_reactions(result)
 
-    # TPID
-    _write_tpid_line(io, label, Int(actual_mat))
+    # TPID: use title if provided, otherwise label
+    tpid_text = title !== nothing ? title : label
+    _write_tpid_line(io, tpid_text, Int(actual_mat))
 
     # Build MF lookup from sections
     mt_mf = Dict{Int,Int}()
@@ -95,7 +98,7 @@ function write_pendf(io::IO, result::NamedTuple;
 
     # MF1/MT451
     _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
-                      mt_to_mf=mt_mf)
+                      mt_to_mf=mt_mf, descriptions=descriptions)
 
     # MF2/MT151
     _write_legacy_mf2(io, mf2, actual_mat, ns)
@@ -762,17 +765,26 @@ end
 
 function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                             n_pts, reactions, ns::Ref{Int};
-                            mt_to_mf::Dict{Int,Int}=Dict{Int,Int}())
+                            mt_to_mf::Dict{Int,Int}=Dict{Int,Int}(),
+                            descriptions::Vector{String}=String[])
     ns[] = 1
     nxc = 2 + length(reactions)
+    nwd = length(descriptions)
 
     _write_cont_line(io, mf2.ZA, mf2.AWR, 2, 0, 0, 0,
                      Int(mat), 1, 451, ns)
-    _write_cont_line(io, tempr, err, 0, 0, 0, nxc,
+    _write_cont_line(io, tempr, err, 0, 0, nwd, nxc,
                      Int(mat), 1, 451, ns)
 
+    # Description text lines (NWD lines)
+    for desc in descriptions
+        @printf(io, "%-66s%4d%2d%3d%5d\n", rpad(desc, 66)[1:66], Int(mat), 1, 451, ns[])
+        ns[] += 1
+    end
+
     nc_per = 3 + cld(n_pts, 3)
-    _write_cont_line(io, 0.0, 0.0, 1, 451, 3, 0, Int(mat), 1, 451, ns)
+    nc_self = 2 + nwd + nxc
+    _write_cont_line(io, 0.0, 0.0, 1, 451, nc_self, 0, Int(mat), 1, 451, ns)
     _write_cont_line(io, 0.0, 0.0, 2, 151, 4, 0, Int(mat), 1, 451, ns)
     for (mt, _) in reactions
         dir_mf = get(mt_to_mf, Int(mt), 3)

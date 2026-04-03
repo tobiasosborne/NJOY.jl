@@ -93,13 +93,14 @@ function run_njoy(input_path::AbstractString;
 
         elseif mc.name == :reconr
             params = parse_reconr(mc)
-            reconr_module(tapes, params)
+            descs = _extract_descriptions(mc)
+            reconr_module(tapes, params; title=params.title, descriptions=descs)
             # Collect for final assembly
             endf_path = resolve(tapes, params.nendf)
             ctx.reconr_result = reconr(endf_path; mat=params.mat, err=params.err)
             ctx.mat = params.mat; ctx.err = params.err
             ctx.label = params.title
-            ctx.descriptions = _extract_descriptions(mc)
+            ctx.descriptions = descs
             # Extract MF12/MF13 passthrough from original ENDF
             _extract_mf12_mf13!(ctx, endf_path, params.mat)
 
@@ -130,6 +131,14 @@ function run_njoy(input_path::AbstractString;
         elseif mc.name == :groupr
             params = parse_groupr(mc)
             groupr_module(tapes, params)
+
+        elseif mc.name == :unresr
+            params = parse_unresr(mc)
+            unresr_module(tapes, params)
+
+        elseif mc.name == :ccccr
+            params = parse_ccccr(mc)
+            ccccr_module(tapes, params)
 
         elseif mc.name == :errorr
             params = parse_errorr(mc)

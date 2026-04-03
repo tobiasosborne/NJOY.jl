@@ -12,7 +12,8 @@ write PENDF tape. Matches Fortran reconr.f90 interface.
 Input tapes: nendf (ENDF evaluation)
 Output tapes: npend (pointwise ENDF = PENDF)
 """
-function reconr_module(tapes::TapeManager, params::ReconrParams)
+function reconr_module(tapes::TapeManager, params::ReconrParams;
+                       title::String="", descriptions::Vector{String}=String[])
     endf_path = resolve(tapes, params.nendf)
     pendf_path = resolve(tapes, params.npend)
 
@@ -23,7 +24,9 @@ function reconr_module(tapes::TapeManager, params::ReconrParams)
         mspec = materials[1]
         @info "reconr: MAT=$(mspec.mat) err=$(mspec.err) → $pendf_path"
         r = reconr(endf_path; mat=mspec.mat, err=mspec.err)
-        write_pendf_file(pendf_path, r; mat=mspec.mat, err=mspec.err)
+        write_pendf_file(pendf_path, r; mat=mspec.mat, err=mspec.err,
+                         title=isempty(title) ? nothing : title,
+                         descriptions=descriptions)
         @info "reconr: $(length(r.energies)) points written"
     else
         open(pendf_path, "w") do io

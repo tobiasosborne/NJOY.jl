@@ -237,17 +237,16 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
                 @printf(io, "%s%4d%2d%3d%5d\n", line, mat, 1, 451, ns[])
                 ns[] += 1
             end
-            @printf(io, "%32s%11d%11d%11d%11d%4d%2d%3d%5d\n",
+            @printf(io, "%22s%11d%11d%11d%11d%4d%2d%3d%5d\n",
                     "", 1, 451, self_nc, 0, mat, 1, 451, ns[])
             ns[] += 1
             for (mf_d, mt_d, nc_d, mod_d) in dir_entries
-                @printf(io, "%32s%11d%11d%11d%11d%4d%2d%3d%5d\n",
+                @printf(io, "%22s%11d%11d%11d%11d%4d%2d%3d%5d\n",
                         "", mf_d, mt_d, nc_d, mod_d, mat, 1, 451, ns[])
                 ns[] += 1
             end
             _write_send(io, mat, 1)
             _write_fend_zero(io, mat)
-            @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
 
             for (mt2, lines2) in mf2_sections
                 ns[] = 1
@@ -263,7 +262,6 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
                 _write_send(io, mat, 2)
             end
             _write_fend_zero(io, mat)
-            @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
 
             for mt3 in mf3_order
                 ns[] = 1
@@ -300,9 +298,11 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
                 _write_send(io, mat, 3)
             end
             _write_fend_zero(io, mat)
+            # MEND (MAT=0): end of material block for this temperature
             @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
         end
 
+        # TEND (MAT=-1): end of tape
         @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
     end
 end

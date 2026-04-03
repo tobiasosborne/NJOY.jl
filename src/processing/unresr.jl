@@ -89,31 +89,221 @@ function urr_penetrability(l::Int, rho::Float64, rhoc::Float64)
     end
 end
 
+# ── Complex probability integral w(z) — Faddeeva function ────────
+# Matches Fortran unresr.f90 subroutines: uw, uwtab, quikw, ajku.
+# The w function table is precomputed once and cached.
+
+"""Compute complex probability integral w(z) = exp(-z²)erfc(-iz).
+Matches Fortran `uw` (unresr.f90:1494-1657)."""
+function _uw(rez::Float64, aim1::Float64)
+    rpi = sqrt(Float64(pi))
+    rew = 0.0; aimw = 0.0
+    aimz = abs(aim1); abrez = abs(rez)
+    (abrez + aimz == 0) && return (1.0, 0.0)
+    r2 = rez * rez; ai2 = aimz * aimz
+    eps_uw = 1.0e-7
+
+    # Determine computation path (asymptotic vs Taylor)
+    use_taylor = false
+    if abrez + 1.25 * aimz - 5.0 > 0; use_taylor = false
+    elseif abrez + 1.863636 * aimz - 4.1 > 0; use_taylor = false
+    elseif r2 + 1.71 * ai2 - 2.89 < 0; use_taylor = true
+    elseif r2 + 1.18 * ai2 - 5.76 >= 0; use_taylor = true
+    elseif aimz - 1.5 >= 0; use_taylor = false
+    else; use_taylor = true
+    end
+
+    if !use_taylor && aim1 >= 0
+        # Asymptotic series (kw=1, label 370)
+        rv = 2 * (r2 - ai2); ak = 4 * rez * aimz; el = ak
+        h = 0.0; b = 0.0; a = 0.0
+        tempm = 0.0; temel = 0.0; g = 1.0
+        c = -1.1283792 * aimz; d = 1.1283792 * rez
+        am = rv - 1; aak = 1.0; k = 0
+        while true
+            ajtemp = 2 * aak; temp4 = (1 - ajtemp) * ajtemp
+            ajp = rv - (4 * aak + 1)
+            # label 480: recurrence
+            tempc = ajp * c + temp4 * a - ak * d
+            tempd = ajp * d + temp4 * b + ak * c
+            temel_n = ajp * el + temp4 * h + ak * am
+            tempm_n = ajp * am + temp4 * g - ak * el
+            a = c; b = d; g = am; h = el
+            c = tempc; d = tempd; am = tempm_n; el = temel_n
+            tempm = tempm_n; temel = temel_n
+            # Overflow/underflow scaling
+            if abs(tempm) + abs(temel) > 1e15
+                c *= 1e-15; d *= 1e-15; am *= 1e-15; el *= 1e-15
+                tempc *= 1e-15; tempd *= 1e-15; tempm *= 1e-15; temel *= 1e-15
+            elseif abs(tempm) + abs(temel) < 1e-15
+                c *= 1e15; d *= 1e15; am *= 1e15; el *= 1e15
+                tempc *= 1e15; tempd *= 1e15; tempm *= 1e15; temel *= 1e15
+            end
+            # label 390: convergence
+            aak += 1; k += 1
+            pr = rew; pim = aimw
+            amagn = tempm^2 + temel^2
+            rew = (tempc * tempm + tempd * temel) / amagn
+            aimw = (tempm * tempd - temel * tempc) / amagn
+            (abs(rew - pr) < eps_uw && abs(aimw - pim) < eps_uw) && break
+            k > 200 && break  # safety
+        end
+    else
+        # Taylor series (kw=2, label 420)
+        aimz_t = aim1  # use original sign
+        temp1 = r2 + ai2; temp2 = 2 * temp1 * temp1
+        aj = -(r2 - ai2) / temp2; ak = 2 * rez * aimz_t / temp2
+        c = 0.0; b = 0.0; ajsig = 0.0; d = 0.0
+        g = 0.0; h = 0.0; el = 0.0; a = 1.0; am = 1.0
+        sigp = 1.5
+        expon = exp(temp2 * aj)
+        expc = expon * cos(temp2 * ak)
+        exps = -expon * sin(temp2 * ak)
+        sig2p = 2 * sigp
+        while true
+            aj4sig = 4 * ajsig; aj4sm1 = aj4sig - 1
+            temp3 = 1 / (aj4sm1 * (aj4sig + 3))
+            tt4 = sig2p * (2 * ajsig - 1)
+            denom_tt = aj4sm1 * (aj4sig + 1) * (aj4sig - 3) * aj4sm1
+            temp4 = denom_tt == 0 ? 0.0 : tt4 / denom_tt
+            ajp = aj + temp3
+            # label 480: recurrence
+            tempc = ajp * c + temp4 * a - ak * d
+            tempd = ajp * d + temp4 * b + ak * c
+            temel_n = ajp * el + temp4 * h + ak * am
+            tempm_n = ajp * am + temp4 * g - ak * el
+            a = c; b = d; g = am; h = el
+            c = tempc; d = tempd; am = tempm_n; el = temel_n
+            tempm = tempm_n; temel = temel_n
+            if abs(tempm) + abs(temel) > 1e15
+                c *= 1e-15; d *= 1e-15; am *= 1e-15; el *= 1e-15
+                tempc *= 1e-15; tempd *= 1e-15; tempm *= 1e-15; temel *= 1e-15
+            elseif abs(tempm) + abs(temel) < 1e-15
+                c *= 1e15; d *= 1e15; am *= 1e15; el *= 1e15
+                tempc *= 1e15; tempd *= 1e15; tempm *= 1e15; temel *= 1e15
+            end
+            # label 440: convergence
+            ajsig += 1
+            temp7 = rpi * (am^2 + el^2)
+            ref = (aimz_t * (c * am + d * el) - rez * (am * d - c * el)) / temp7 / temp1
+            aimf = (aimz_t * (am * d - c * el) + rez * (c * am + d * el)) / temp7 / temp1
+            pr = rew; pim = aimw
+            rew = expc - ref; aimw = exps - aimf
+            (abs(rew - pr) < eps_uw && abs(aimw - pim) < eps_uw) && break
+            sig2p = 2 * ajsig
+            ajsig > 200 && break  # safety
+        end
+    end
+    return (rew, aimw)
+end
+
+# Precomputed w-function table (62×62 grid, x,y from -0.1 to 6.0)
+const _UNRESR_W_TABLE = let
+    nx = 62; ny = 62
+    dx = 0.1; dy = 0.1; x0 = -0.1; y0 = -0.1
+    tr = zeros(nx, ny); ti = zeros(nx, ny)
+    for i in 1:nx, j in 1:ny
+        xi = x0 + (i - 1) * dx; yj = y0 + (j - 1) * dy
+        rw, iw = _uw(xi, yj)
+        tr[i, j] = rw; ti[i, j] = iw
+    end
+    (tr=tr, ti=ti)
+end
+
+"""Fast w function lookup. Matches Fortran `quikw` (unresr.f90:1297-1377)."""
+function _quikw(ax::Float64, y::Float64)
+    rpi = sqrt(Float64(pi))
+    aki = ax < 0 ? -1.0 : 1.0
+    x = abs(ax)
+    test = x * x + y * y
+
+    if test < 36.0
+        # Table interpolation
+        ii = Int(floor(x * 10)); jj = Int(floor(y * 10))
+        i = ii + 2; j = jj + 2; n = j - 1
+        p = 10 * x - ii; q = 10 * y - jj
+        p2 = p * p; q2 = q * q; pq = p * q
+        hp = p / 2; hq = q / 2; hq2 = q2 / 2; hp2 = p2 / 2
+        a1 = hq2 - hq; a2 = hp2 - hp
+        a3 = 1 + pq - p2 - q2; a4 = hp2 - pq + hp; a5 = hq2 - pq + hq
+        tr = _UNRESR_W_TABLE.tr; ti_t = _UNRESR_W_TABLE.ti
+        rew = a1 * tr[i, n] + a2 * tr[i-1, j] + a3 * tr[i, j] +
+              a4 * tr[i+1, j] + a5 * tr[i, j+1] + pq * tr[i+1, j+1]
+        aimw = a1 * ti_t[i, n] + a2 * ti_t[i-1, j] + a3 * ti_t[i, j] +
+               a4 * ti_t[i+1, j] + a5 * ti_t[i, j+1] + pq * ti_t[i+1, j+1]
+        return (rew, aimw * aki)
+    elseif test < 144.0
+        a1 = x^2 - y^2; a2 = 2 * x * y; a3 = a2^2
+        a4 = a1 - 0.2752551; a5 = a1 - 2.724745
+        d1 = 0.5124242 / (a4^2 + a3); d2 = 0.05176536 / (a5^2 + a3)
+        rew = d1 * (a2 * x - a4 * y) + d2 * (a2 * x - a5 * y)
+        aimw = d1 * (a4 * x + a2 * y) + d2 * (a5 * x + a2 * y)
+        return (rew, aimw * aki)
+    elseif test < 10000.0
+        a1 = (x^2 - y^2) * 2; a2 = 4 * x * y
+        a4 = a1 - 1; d1 = 1.1283792 / (a4^2 + a2^2)
+        rew = d1 * (a2 * x - a4 * y)
+        aimw = d1 * (a4 * x + a2 * y)
+        return (rew, aimw * aki)
+    else
+        a1 = 1 / (rpi * test)
+        return (y * a1, x * a1 * aki)
+    end
+end
+
 # ── ETOX / Bondarenko integration ─────────────────────────────────
 """
     ajku(beta, sti) -> (xj, xk)
 
-J and K integral contributions for one set of sampled widths.
-Numerical quadrature of the Bondarenko kernel.
-
-- `beta = sigma_m / sigma_peak`
-- `sti  = Gamma_total / Delta_Doppler`
+J and K integral contributions using Gaussian quadrature and the
+complex probability integral (Faddeeva function).
+Matches Fortran `ajku` (unresr.f90:1383-1454).
 """
 function ajku(beta::Float64, sti::Float64)
-    xj = 0.0
-    xk = 0.0
-    nq = 40
-    du = 12.0 / nq
-    for iq in 1:nq
-        u = (iq - 0.5) * du
-        phi = sti / (u * u + sti * sti)
-        denom = 1.0 + beta * phi
-        xj += phi / denom * du
-        xk += phi / (denom * denom) * du
+    xg = (0.095012510, 0.28160355, 0.45801678, 0.61787624,
+          0.75540441, 0.8656312, 0.94457502, 0.98940093)
+    wg = (0.18945061, 0.18260342, 0.16915652, 0.14959600,
+          0.12462897, 0.09515851, 0.06225352, 0.02715246)
+    eps_aj = 0.0002
+    pi2 = Float64(pi) / 2; sqpi = sqrt(Float64(pi))
+
+    term = (-sti / 2) < log(floatmin(Float64)) ? 0.0 : exp(-sti / 2)
+    ep = (1 - term) / eps_aj - beta
+
+    if ep <= 0
+        aj = pi2 / beta
+        ak = 2 * aj
+    else
+        y = 0.0; z = 0.0; yk = 0.0; zk = 0.0
+        y1 = sti / 2
+        b1 = beta / (sqpi * y1)
+        a = sqrt((1 + beta) / beta)
+        a2 = a * a
+        c = 200 / (a * sti)
+        remj = (pi2 - atan(c)) / (beta * a)
+        remk = ((1 + a2) * remj - (1 - a2) * c / ((c * c + 1) * beta * a)) / (2 * a2)
+        for n in 1:8
+            ax = 5 * xg[n] + 5
+            rew, _ = _quikw(ax, y1)
+            x1 = 1 / (1 + b1 / rew); z1 = x1 * x1 / rew
+            ax = -5 * xg[n] + 5
+            rew, _ = _quikw(ax, y1)
+            x2 = 1 / (1 + b1 / rew); z2 = x2 * x2 / rew
+            ax = 45 * xg[n] + 55
+            rew, _ = _quikw(ax, y1)
+            x3 = 1 / (1 + b1 / rew); z3 = x3 * x3 / rew
+            ax = -45 * xg[n] + 55
+            rew, _ = _quikw(ax, y1)
+            x4 = 1 / (1 + b1 / rew); z4 = x4 * x4 / rew
+            y += wg[n] * (x3 + x4)
+            yk += wg[n] * (z3 + z4)
+            z += wg[n] * (x1 + x2)
+            zk += wg[n] * (z1 + z2)
+        end
+        aj = 5 * (z + 9 * y) / y1 + remj
+        ak = aj + 5 * b1 * (zk + 9 * yk) / y1 + remk
     end
-    xj /= Float64(pi)
-    xk /= Float64(pi)
-    return xj, xk
+    return (aj, ak)
 end
 
 """
@@ -167,10 +357,19 @@ function bondarenko_xs(model::URRStatModel, E::Float64, T::Float64,
     sigbt = bkg[1] + spot + sint
     sigm = [sigbt + s0 for s0 in sigma0_values]
 
-    # Pass 2: Hwang quadrature
+    # Pass 2: Hwang quadrature — accumulate per-sequence tl, tj, tk
+    # Matches Fortran unresl lines 1076-1145
     nqp = 10
-    sigu = zeros(5, nsigz)
-    for seq in model.sequences
+    ns = length(model.sequences)
+    # tl[kx, is0, ks]: per-reaction partial (kx=1..3: fission, capture, elastic)
+    tl = zeros(3 * ns, nsigz)
+    # tj[ks, is0]: per-sequence total
+    tj = zeros(ns, nsigz)
+    # tk[ks, is0]: per-sequence transport term
+    tk = zeros(ns, nsigz)
+    abns = ones(ns)  # abundance per sequence (1.0 for single isotope)
+
+    for (ks, seq) in enumerate(model.sequences)
         Vl, ps = urr_penetrability(seq.l, rho, rhoc)
         gnx = seq.GN0 * Vl * sqE * Float64(seq.AMUN)
         gj = (2.0 * seq.J + 1.0) / (4.0 * model.SPI + 2.0)
@@ -211,34 +410,72 @@ function bondarenko_xs(model::URRStatModel, E::Float64, T::Float64,
             end
         end
 
+        # Normalize and store per-sequence (Fortran lines 1134-1145)
         for is0 in 1:nsigz
-            tk_part[is0] /= d
+            tk[ks, is0] = tk_part[is0] / d
             ttj = 0.0
             for kx in 1:4
-                t_part[kx, is0] /= d
                 ttj += t_part[kx, is0]
             end
-            denom = 1.0 - ttj
-            if abs(denom) < 1e-30; denom = 1e-30; end
-            sigu[3, is0] += sigm[is0] * t_part[1, is0] / denom  # fission
-            sigu[4, is0] += sigm[is0] * t_part[2, is0] / denom  # capture
-            sigu[2, is0] += sigm[is0] * t_part[3, is0] / denom  # elastic
-            sigu[1, is0] += sigm[is0] * ttj / denom             # total (URR part)
-            # transport
-            denom_k = 1.0 - tk_part[is0]
-            if abs(denom_k) < 1e-30; denom_k = 1e-30; end
-            fact = sigma0_values[is0]
-            sigu[5, is0] += sigbt * denom / denom_k +
-                            fact * (tk_part[is0] - ttj) / denom_k
+            for kx in 1:3
+                tl[kx + (ks-1)*3, is0] = t_part[kx, is0] / d
+            end
+            tj[ks, is0] = ttj / d
         end
     end
 
-    # Add backgrounds and potential scattering
+    # Pass 3: Sum over all sequences with cross-sequence correction
+    # Matches Fortran unresl lines 1152-1191
+    sigu = zeros(5, nsigz)
     for is0 in 1:nsigz
-        sigu[1, is0] += bkg[1]    # total includes all backgrounds
+        yy = zeros(3)
+        yj = 0.0; yk = 0.0
+        for ks in 1:ns
+            # xj, xk = sum of OTHER sequences' tj, tk (Fortran lines 1164-1168)
+            xj_other = 0.0; xk_other = 0.0
+            for ksp in 1:ns
+                if ksp != ks
+                    xj_other += tj[ksp, is0] * abns[ksp]
+                    xk_other += tk[ksp, is0] * abns[ksp]
+                end
+            end
+            # Accumulate with cross-sequence correction (lines 1170-1177)
+            for kx in 1:3
+                knm1 = kx + (ks - 1) * 3
+                yy[kx] += tl[knm1, is0] * (1.0 - xj_other) * abns[ks]
+            end
+            ttt = tj[ks, is0] * (1.0 - xj_other) * abns[ks]
+            yj += ttt
+            yk += (tk[ks, is0] - tj[ks, is0]) * (1.0 - xk_other) * abns[ks] + ttt
+        end
+        # Final XS (Fortran lines 1179-1189)
+        denom = 1.0 - yj
+        if abs(denom) < 1e-30; denom = 1e-30; end
+        sigf1 = sigm[is0] * yy[1] / denom  # fission (gg(1))
+        sigf2 = sigm[is0] * yy[2] / denom  # capture (gg(2))
+        sigf3 = sigm[is0] * yy[3] / denom  # elastic (gg(3))
+        sigf4 = sigf1 + sigf2 + sigf3       # total (sum of partials)
+        # Transport (Fortran lines 1184-1189)
+        denom_k = 1.0 - yk
+        if abs(denom_k) < 1e-30; denom_k = 1e-30; end
+        term = denom / denom_k
+        term1 = sigma0_values[is0] * (yk - yj) / denom_k
+        sigtr = sigbt * term + term1
+
+        sigu[1, is0] = sigf4      # total (URR part only, sigbt added below)
+        sigu[2, is0] = sigf3      # elastic
+        sigu[3, is0] = sigf1      # fission
+        sigu[4, is0] = sigf2      # capture
+        sigu[5, is0] = sigtr      # transport
+    end
+
+    # Add backgrounds and potential scattering (Fortran lines 1195-1199)
+    sigbt_out = bkg[1] + spot + sint
+    for is0 in 1:nsigz
+        sigu[1, is0] += sigbt_out             # total = URR + sigbt
         sigu[2, is0] += bkg[2] + spot + sint  # elastic
-        sigu[3, is0] += bkg[3]    # fission
-        sigu[4, is0] += bkg[4]    # capture
+        sigu[3, is0] += bkg[3]                # fission
+        sigu[4, is0] += bkg[4]                # capture
     end
 
     return sigu
