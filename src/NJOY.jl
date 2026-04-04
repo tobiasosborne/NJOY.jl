@@ -219,8 +219,8 @@ export generate_ladder, generate_ptable, bondarenko_from_ptable
 export CHI2_QUANTILES
 
 # Public API -- GROUPR (group-averaged cross sections)
-export LANL_30, WIMS_69, VITAMINJ_175, SANDII_620, XMAS_172, ECCO_33
-export GroupStructureId, IGN_LANL30, IGN_WIMS69, IGN_SANDII620
+export LANL_30, RRD_50, WIMS_69, VITAMINJ_175, SANDII_620, XMAS_172, ECCO_33
+export GroupStructureId, IGN_LANL30, IGN_RRD50, IGN_WIMS69, IGN_SANDII620
 export IGN_VITAMINJ, IGN_XMAS172, IGN_ECCO33
 export get_group_structure, num_groups, validate_group_bounds, find_group
 export MultiGroupXS

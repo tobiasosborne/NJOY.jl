@@ -158,6 +158,19 @@ const XMAS_172 = NTuple{173,Float64}((
     1.96403e7,
 ))
 
+"RRD 50-group neutron energy structure [eV] (ign=5), 51 bounds."
+const RRD_50 = NTuple{51,Float64}((
+    1.000021e-5, 6.825603e-1, 1.125352e0,  1.855391e0,  3.059023e0,  5.043477e0,
+    8.315287e0,  1.370959e1,  2.260329e1,  3.726653e1,  6.144212e1,  1.013009e2,
+    1.670170e2,  2.753645e2,  3.535750e2,  4.539993e2,  5.829466e2,  7.485183e2,
+    9.611165e2,  1.234098e3,  1.584613e3,  2.034684e3,  2.612586e3,  3.354626e3,
+    4.307425e3,  5.530844e3,  7.101744e3,  9.118820e3,  1.170880e4,  1.503439e4,
+    1.930454e4,  2.478752e4,  3.182781e4,  4.086771e4,  5.247518e4,  6.737947e4,
+    8.651695e4,  1.110900e5,  1.426423e5,  1.831564e5,  2.351775e5,  3.019738e5,
+    3.877421e5,  4.978707e5,  8.208500e5,  1.353353e6,  2.231302e6,  3.678794e6,
+    6.065307e6,  1.000000e7,  1.997108e7,
+))
+
 "ECCO 33-group neutron energy structure [eV], 34 bounds."
 const ECCO_33 = NTuple{34,Float64}((
     1.000010e-05, 1.000000e-01, 5.400000e-01, 4.000000e+00,
@@ -174,6 +187,7 @@ const ECCO_33 = NTuple{34,Float64}((
 "Named group structure identifier for the standard built-in structures."
 @enum GroupStructureId begin
     IGN_LANL30     = 3
+    IGN_RRD50      = 5
     IGN_WIMS69     = 9
     IGN_SANDII620  = 12
     IGN_VITAMINJ   = 17
@@ -184,6 +198,7 @@ end
 "Return group boundary tuple for built-in structure. Ascending energy [eV]."
 function get_group_structure(ign::GroupStructureId)
     ign == IGN_LANL30    && return LANL_30
+    ign == IGN_RRD50     && return RRD_50
     ign == IGN_WIMS69    && return WIMS_69
     ign == IGN_SANDII620 && return SANDII_620
     ign == IGN_VITAMINJ  && return VITAMINJ_175

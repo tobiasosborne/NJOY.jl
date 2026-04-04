@@ -152,7 +152,11 @@ function run_njoy(input_path::AbstractString;
     end
 
     # 5. Final assembly: produce complete output tape via write_full_pendf
-    if ctx.reconr_result !== nothing && last_moder_out > 0
+    #    Only run when thermr/heatr data needs to be merged into the final tape.
+    #    For chains like T02 (reconr→broadr→unresr→groupr), each module writes
+    #    its own complete output tape — no assembly needed.
+    needs_assembly = !isempty(ctx.thermr_mts) || !isempty(ctx.extra_mf3) || !isempty(ctx.mf6_records)
+    if ctx.reconr_result !== nothing && last_moder_out > 0 && needs_assembly
         final_assembly!(tapes, last_moder_out,
             ctx.reconr_result, ctx.override_mf3, ctx.extra_mf3,
             ctx.mf6_records, ctx.mf6_xsi, ctx.mf6_emax, ctx.mf6_stubs,

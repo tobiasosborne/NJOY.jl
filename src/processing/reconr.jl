@@ -483,7 +483,8 @@ function reconr(endf_file::AbstractString;
         return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                 fission=fission_arr, capture=capture_arr,
                 mf2=mf2, mf3_sections=mf3_sections,
-                reaction_xs=reaction_xs)
+                reaction_xs=reaction_xs,
+                urr_table=urr_table, urr_lssf=urr_lssf)
     end
 end
 

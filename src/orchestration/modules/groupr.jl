@@ -82,13 +82,20 @@ end
 
 function _groupr_group_structure(params::GrouprParams)
     ign = params.ign
-    if ign == 2 || ign == 3
+    if ign == 3
         return collect(Float64, LANL_30)
-    elseif ign == 4
+    elseif ign == 5
+        return collect(Float64, RRD_50)
+    elseif ign == 9
         return collect(Float64, WIMS_69)
     else
-        @warn "groupr: unsupported ign=$ign, using LANL-30"
-        return collect(Float64, LANL_30)
+        # Try the generic get_group_structure
+        try
+            return collect(Float64, get_group_structure(ign))
+        catch
+            @warn "groupr: unsupported ign=$ign, using LANL-30"
+            return collect(Float64, LANL_30)
+        end
     end
 end
 

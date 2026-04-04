@@ -423,7 +423,15 @@ function parse_groupr(mc::ModuleCall)::GrouprParams
         end
         ci += 1
     end
-    # MT list: read (mfd, mtd, name) until mfd=0
+    # Card 7 (optional): weight function parameters
+    # iwt=1: tabulated weight function → skip 1 card (plus tab1 data, simplified here)
+    # iwt=4: ehi, sigpot, ebreak, tb[, tc, eb, ef] → skip 1 card
+    # iwt=5: EPRI-cell weight function → skip 1 card
+    if iwt in (1, 4, 5) && ci <= length(cards)
+        ci += 1
+    end
+    # MT list: read (mfd, mtd, name) until mfd=0 — first temperature block only
+    # (Fortran groupr uses the first block's MT list for all temperatures)
     mt_list = Tuple{Int,Int,String}[]
     while ci <= length(cards)
         mfd = _fint(cards[ci], 1; default=0)

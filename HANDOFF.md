@@ -2681,3 +2681,82 @@ MF3 data: correct values, correct positions
 rm -rf ~/.julia/compiled/v1.12/NJOY*
 julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work_dir="/tmp/t02_orch")'
 ```
+
+---
+
+### Phase 40: T02 tape28 PASSES at 1e-5 — 8 bugs fixed in reconr/broadr/unresr
+
+**Goal**: Get T02's full chain (moder→reconr→broadr→unresr→groupr→ccccr→moder) passing the official tolerance test.
+
+**T02 official test** compares tape28 (unresr PENDF, 13873 lines) AND tape29 (groupr GENDF, 6213 lines) at rel_tol=1e-9.
+
+**Results after Phase 40:**
+```
+tape28: 13873/13873 lines — STRUCTURAL MATCH ✓
+tape28 rel_tol=1e-5: 0 failures ← PASSES ✓
+tape28 rel_tol=1e-9: 1836 failures (all ±1 ULP sigma1 broadening class)
+tape29: 627/6213 lines — needs groupr MF3 multi-temp/sigma0 + MF6 transfer matrices
+T01 tape25: no regression (32962 lines, 0 failures at 1e-5, 212 at 1e-9)
+```
+
+**8 bugs found and fixed (all via grind method + Fortran source reading):**
+
+1. **parse_groupr weight function card skip (FIXED)**: For iwt=1/4/5, the parser didn't skip the weight function parameter card before reading the MT list. For T02 (iwt=4), card 6 (`.1 0.025 0.8208e06 1.4e06`) was parsed as MFD=0 → 0 MT requests. Fix: skip 1 card for iwt in (1,4,5). **Impact: groupr processes 17 MTs instead of 0.**
+
+2. **ign=5 RRD 50-group structure (ADDED)**: T02 uses ign=5 (50 groups). Julia only had ign=2,3,4. Added `RRD_50` constant with 51 boundaries computed from Fortran gl5 lethargy array via `sigfig(1e7 * exp(-u), 7, 0)` matching groupr.f90 line 4471. Verified exact match against reference tape29 group boundaries.
+
+3. **Pipeline final_assembly! overwrite (FIXED)**: `run_njoy` called `final_assembly!` unconditionally on the last moder output unit. For T02, this overwrote tape29 (groupr GENDF) with a reconr PENDF. Fix: only run final_assembly! when thermr/heatr data needs merging. **Impact: tape29 preserved as groupr output.**
+
+4. **Unresr multi-block MT152 insertion (FIXED)**: `_write_unresr_pendf` only modified block 1 of the multi-temperature PENDF. Blocks 2-3 were copied without MT152. Complete rewrite as state machine: detects block boundaries via MF1/MT451 HEAD after MEND, modifies MF1 directory (incrementing NXC, inserting MT152 entry), inserts MT152 data after MT151 SEND. Matches Fortran unresr.f90 lines 138-321 (per-temperature loop). **Impact: all 3 blocks now have MT152.**
+
+5. **Reconr preliminary MT152 (ADDED)**: Fortran reconr (lines 5203-5214) writes a preliminary MF2/MT152 section with nsigz=1 (infinite dilution) Bondarenko XS. Julia reconr didn't write it. Added to `write_pendf` via `_write_legacy_mf2`: CONT(ZA,AWR,LSSF,0,0,INTUNR) + LIST(temp,0,5,1,NCP,nunr) + data(sigma0=1e10, per-energy: E,total,elastic,fission,capture,elastic_copy). Directory: NC=3+nunr. Also added `urr_table` and `urr_lssf` to reconr result tuple. **Impact: tape28 MT152 NC=27 matches Fortran (was 141).**
+
+6. **MF2/MT151 EL value (FIXED)**: Julia wrote EL from `iso.ranges[1].EL` (=1.0 eV for Pu-238 resolved range). Fortran reconr recout writes `elow=1e-5` (the ENDF minimum). Fix: hardcode EL=1e-5 matching Fortran. **Impact: -3 failures.**
+
+7. **Broadr TAB1 interp format (FIXED)**: Julia wrote NR/NP as ENDF floats (`2.925000+3 2.000000+0`). Fortran tab1io writes as integers (`2925  2`). Fix: use `@printf "%11d%11d"` for interp record in broadr. **Impact: -12 failures.**
+
+8. **Reconr MF3 HEAD L2 values (FIXED)**: `_write_legacy_mf3` hardcoded L2=99 for ALL MTs. Fortran reconr recout line 5331: `scr(4)=lfs` (level number from ENDF) for non-redundant MTs, L2=99 only for redundant MTs (1, 4, 103-107). Fix: read L2 from `sec.L2` per MT. **Impact: -27 failures.**
+
+**Trap 137 (NEW — FIXED)**: parse_groupr must skip the weight function card for iwt=1/4/5 before reading the MT request list. Without this, the first MT card is parsed as MFD=0 → empty MT list.
+
+**Trap 138 (NEW — FIXED)**: ign=5 is the RRD 50-group structure. Boundaries are computed from gl5 lethargy array: `E = sigfig(ezero * exp(-u), 7, 0)` where `ezero = 1e7`. The gl5 array has 51 values from 27.631 down to -0.6917.
+
+**Trap 139 (NEW — FIXED)**: final_assembly! should only run when thermr/heatr data needs merging. For chains like T02 (reconr→broadr→unresr→groupr), each module writes its own complete tape. Running final_assembly! overwrites the groupr GENDF output.
+
+**Trap 140 (NEW — FIXED)**: Fortran reconr writes preliminary MF2/MT152 with nsigz=1 (infinite dilution) for materials with URR data. This preliminary table is later replaced by unresr with multi-sigma0 data, but the directory NC=3+nunr is PRESERVED by unresr (Fortran unresr line 283: `j` only advances when `new>0`). Julia must write this preliminary MT152 in reconr output.
+
+**Trap 141 (NEW — FIXED)**: Fortran tab1io writes the interpolation record (NBT, INT) as integers using `%11d` format, not ENDF floats. Julia's broadr was using format_endf_float. The difference (`2925  2` vs `2.925000+3 2.000000+0`) causes tolerance failures because the float values parse as different numbers.
+
+**Trap 142 (NEW — FIXED)**: Fortran reconr recout uses `scr(4)=lfs` (level number from ENDF MF3 HEAD) for non-redundant MTs (line 5331) and `scr(4)=99` only for redundant MTs (lines 5234, 5266, 5348). `_write_legacy_mf3` was hardcoding L2=99 for ALL MTs.
+
+**Remaining for tape28 (all ±1 ULP sigma1 class)**:
+- 1836 failures at 1e-9, 0 at 1e-5
+- All from Doppler broadening FP accumulation order (same class as T01 MT=1)
+
+**Remaining for tape29 (groupr GENDF, 627/6213 lines)**:
+- MF3: present (17 MTs × 50 groups) but single-temp single-sigma0 format. Need multi-temp (3) × multi-sigma0 (7) GENDF records.
+- MF6: missing entirely. Need transfer matrices for elastic, inelastic, fission.
+- MF1: needs ntemp=3, nsigz=7 in HEAD; sigma0 values in directory.
+- iwt=4: weight function params not yet used (1/E weight used as default).
+
+**Files changed**:
+- `src/orchestration/input_parser.jl` — weight function card skip for iwt=1/4/5
+- `src/processing/group_structures.jl` — RRD_50 constant + IGN_RRD50 enum
+- `src/orchestration/modules/groupr.jl` — ign=5 dispatch
+- `src/orchestration/pipeline.jl` — conditional final_assembly!
+- `src/orchestration/modules/unresr.jl` — complete rewrite of _write_unresr_pendf as state machine
+- `src/processing/reconr.jl` — urr_table + urr_lssf in result tuple
+- `src/processing/pendf_writer.jl` — preliminary MT152, L2 from sec.L2, urr_table plumbing
+- `src/orchestration/modules/broadr.jl` — integer TAB1 interp format
+- `src/NJOY.jl` — RRD_50 + IGN_RRD50 exports
+
+**How to verify Phase 40:**
+```bash
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work_dir="/tmp/t02_test")'
+# tape28: 13873 lines, 0 failures at 1e-5
+# tape29: 627 lines (needs groupr work for 6213)
+# T01 regression check:
+julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01_test")'
+# tape25: 32962 lines, 0 failures at 1e-5
+```

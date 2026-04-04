@@ -278,7 +278,10 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
 
                     _write_cont_line(io, za, awr, 0, l2_head, 0, 0, mat, 3, mt3, ns)
                     _write_cont_line(io, qm, qi, 0, lr, 1, b_np, mat, 3, mt3, ns)
-                    _write_data_values(io, Float64[Float64(b_np), 2.0], mat, 3, mt3, ns)
+                    # Interpolation record: NBT=NP, INT=2 — as integers matching Fortran tab1io
+                    @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n",
+                            b_np, 2, "", mat, 3, mt3, ns[])
+                    ns[] += 1
                     data = Float64[]
                     sizehint!(data, 2 * b_np)
                     for i in 1:b_np

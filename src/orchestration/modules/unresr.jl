@@ -542,181 +542,184 @@ function _write_unresr_pendf(pendf_in::String, pendf_out::String,
     in_lines = readlines(pendf_in)
     mat = params.mat
 
-    # Parse input PENDF structure
-    tpid_line = in_lines[1]
-    mf1_start = 0; mf1_end = 0
-    mf2_start = 0; mf2_fend = 0
-    mf3_start = 0
-    old_mt152_start = 0; old_mt152_end = 0
-
-    for (i, line) in enumerate(in_lines)
-        length(line) < 14 && continue
-        # Parse MAT/MF/MT from last 14 chars (handles variable-width lines)
-        n = length(line)
-        pmat = _parse_int(line[n-13:n-10]); pmf = _parse_int(line[n-9:n-8]); pmt = _parse_int(line[n-7:n-5])
-        pmat == mat || continue
-        if pmf == 1 && pmt == 451 && mf1_start == 0; mf1_start = i; end
-        if pmf == 1 && pmt == 0 && mf1_start > 0 && mf1_end == 0; mf1_end = i; end
-        if pmf == 2 && pmt == 151 && mf2_start == 0; mf2_start = i; end
-        if pmf == 2 && pmt == 152; old_mt152_start == 0 && (old_mt152_start = i); old_mt152_end = i; end
-        if pmf == 0 && pmt == 0 && mf2_start > 0 && mf2_fend == 0; mf2_fend = i; end
-        if pmf == 3 && mf3_start == 0; mf3_start = i; end
-    end
-
-    # Extract existing descriptions from input MF1
-    descriptions = String[]
-    za = urr.za; awr = urr.awr
-    old_nwd = 0; temp_val = 0.0; tol_val = 0.0
-    if mf1_start > 0
-        p2 = rpad(in_lines[mf1_start], 80)[1:80]
-        za = parse_endf_float(p2[1:11]); awr = parse_endf_float(p2[12:22])
-        if mf1_start + 1 <= length(in_lines)
-            p3 = rpad(in_lines[mf1_start + 1], 80)[1:80]
-            temp_val = parse_endf_float(p3[1:11])
-            tol_val = parse_endf_float(p3[12:22])
-            old_nwd = Int(_parse_int(p3[45:55]))
-        end
-        for k in 1:old_nwd
-            idx = mf1_start + 1 + k
-            idx <= length(in_lines) && push!(descriptions, rpad(in_lines[idx], 80)[1:min(66, length(rpad(in_lines[idx], 80)))])
-        end
-    end
-
-    # Collect directory entries from input (MF2 + MF3 sections)
-    dir_entries = Tuple{Int,Int,Int,Int}[]  # (mf, mt, nc, mod)
-    dir_start = mf1_start + 2 + old_nwd  # first directory line in input
-    if dir_start <= mf1_end
-        for i in dir_start:mf1_end-1  # exclude SEND
-            ln = in_lines[i]; nl = length(ln); nl < 14 && continue
-            _parse_int(ln[nl-13:nl-10]) == mat || continue
-            _parse_int(ln[nl-9:nl-8]) == 1 && _parse_int(ln[nl-7:nl-5]) == 451 || continue
-            p = rpad(ln, 80)[1:80]
-            # Parse directory: try standard 6×11 ENDF fields then broadr %32s+%11d format
-            # Broadr writes %32s%11d%11d%11d%11d → MF at [34:44], MT at [45:55], NC at [56:66]
-            # But sometimes shifted: MF at [33:43], etc. Use field parsing for robustness.
-            vals = Int[]
-            for f in 1:6
-                v = Int(_parse_int(p[(f-1)*11+1:f*11]))
-                v != 0 && push!(vals, v)
-            end
-            length(vals) < 3 && continue
-            dmf = vals[1]; dmt = vals[2]; dnc = vals[3]
-            (dmf == 0 && dmt == 0) && continue
-            (dmf == 1 && dmt == 451) && continue  # skip self-reference
-            push!(dir_entries, (dmf, dmt, dnc, 0))
-        end
-    end
-
-    # Add MT152 directory entry if not already present.
-    # If MT152 already exists (from broadr), keep its NC value — the Fortran
-    # unresr does NOT update the directory NC when new=0 (line 283: j only
-    # advances if new>0, so the computed ncds gets overwritten by the old entry).
-    mt152_nc = 2 + div(length(params.sigz) + length(urr.energies) * (1 + 5 * length(params.sigz)) - 1, 6)
-    has_mt152 = any(d -> d[1] == 2 && d[2] == 152, dir_entries)
-    if !has_mt152
-        idx152 = findfirst(d -> d[1] == 2 && d[2] == 151, dir_entries)
-        if idx152 !== nothing
-            insert!(dir_entries, idx152 + 1, (2, 152, mt152_nc, 0))
-        else
-            push!(dir_entries, (2, 152, mt152_nc, 0))
-        end
-    else
-        # Keep existing NC from broadr (Fortran behavior: new=0 → no update)
-        # Don't modify dir_entries — broadr NC is preserved
-    end
-
-    # Update temperature to first temperature (Fortran writes MF1 at it=1)
-    temp_val = isempty(params.temperatures) ? temp_val : params.temperatures[1]
-
-    nwd = length(descriptions)
-    nxc = length(dir_entries) + 1  # +1 for self-reference
-
-    # Strategy: copy input line-by-line, replacing the first block's
-    # MF1/MT451 and MT152 while copying everything else verbatim.
-    # This handles multi-temperature PENDFs correctly.
-
-    # Find first block's MT152 boundaries (for replacement) and MT151 SEND
-    blk1_mt152_start = 0; blk1_mt152_send = 0; blk1_mt151_send = 0
-    for (i, line) in enumerate(in_lines)
-        length(line) < 14 && continue
+    # Helper to parse MAT/MF/MT from the last 14 chars of a line
+    function _lp(line)
         nl = length(line)
-        lmat = _parse_int(line[nl-13:nl-10])
-        lmf = _parse_int(line[nl-9:nl-8])
-        lmt = _parse_int(line[nl-7:nl-5])
-        lmat == mat || continue
-        if lmf == 2 && lmt == 152 && blk1_mt152_start == 0
-            blk1_mt152_start = i
-        end
-        if lmf == 2 && lmt == 0 && blk1_mt152_start > 0 && blk1_mt152_send == 0
-            blk1_mt152_send = i
-        end
-        # Find first MF2 SEND (end of MT151) — for inserting MT152 when none exists
-        if lmf == 2 && lmt == 0 && blk1_mt151_send == 0
-            blk1_mt151_send = i
-        end
+        nl < 14 && return (0, 0, 0)
+        (_parse_int(line[nl-13:nl-10]), _parse_int(line[nl-9:nl-8]), _parse_int(line[nl-7:nl-5]))
     end
+
+    # Parse nonzero values from a directory line (skipping leading zeros)
+    function _dir_vals(line)
+        p = rpad(line, 80)[1:66]
+        vals = Int[]
+        for f in 1:6
+            v = Int(_parse_int(p[(f-1)*11+1:f*11]))
+            v != 0 && push!(vals, v)
+        end
+        vals
+    end
+
+    # Compute MT152 NC for directory (matching Fortran ncds)
+    mt152_nc = 2 + div(length(params.sigz) + length(urr.energies) *
+                       (1 + 5 * length(params.sigz)) - 1, 6)
+
+    # ── Process line by line with state machine ─────────────────────────
+    # States: :copy, :in_mf1, :after_mt151_send
+    # Strategy matching Fortran unresr.f90 lines 241-321:
+    #   1. Copy MF1/MT451 with NXC+1 and MT152 directory entry inserted
+    #   2. Copy MF2/MT151 verbatim
+    #   3. After MT151 SEND, insert MT152 data + SEND
+    #   4. Copy rest (FEND, MF3+, MEND) verbatim
+
+    block_idx = 0
+    expect_new_block = true  # TPID or after MEND
 
     open(pendf_out, "w") do out
         i = 1
         while i <= length(in_lines)
-            # Replace first MF1/MT451 section
-            if i == mf1_start
-                # Write TPID (line before MF1)
-                # (TPID is already written at line 1 = tpid_line)
+            line = in_lines[i]
+            pm, pf, pt = _lp(line)
 
-                # Write rewritten MF1/MT451
-                ns = 1
-                @printf(out, "%s%s%11d%11d%11d%11d%4d%2d%3d%5d\n",
-                    format_endf_float(za), format_endf_float(awr),
-                    3, 1, 0, nxc, mat, 1, 451, ns); ns += 1
-                @printf(out, "%s%s%11d%11d%11d%11d%4d%2d%3d%5d\n",
-                    format_endf_float(temp_val), format_endf_float(tol_val),
-                    0, 0, nwd, nxc, mat, 1, 451, ns); ns += 1
-                for desc in descriptions
-                    @printf(out, "%-66s%4d%2d%3d%5d\n", desc, mat, 1, 451, ns); ns += 1
+            # Detect new temperature block start (MF1/MT451 HEAD)
+            if pm == mat && pf == 1 && pt == 451 && expect_new_block
+                expect_new_block = false
+                block_idx += 1
+
+                # ── Phase 1: Copy MF1/MT451, insert MT152 directory entry ──
+                # Read NWD and NXC from CONT line (line i+1)
+                cont_line = in_lines[i + 1]
+                cont_p = rpad(cont_line, 80)[1:80]
+                nwd_blk = Int(_parse_int(cont_p[45:55]))
+                nxc_blk = Int(_parse_int(cont_p[56:66]))
+
+                # Check if MT152 already in this block's directory
+                dir_start = i + 2 + nwd_blk  # first directory line
+                dir_end = dir_start + nxc_blk - 1  # last directory line (before SEND)
+                blk_has_mt152 = false
+                mt151_dir_idx = 0
+                for j in dir_start:min(dir_end, length(in_lines))
+                    vals = _dir_vals(in_lines[j])
+                    length(vals) >= 2 || continue
+                    vals[1] == 2 && vals[2] == 152 && (blk_has_mt152 = true)
+                    vals[1] == 2 && vals[2] == 151 && (mt151_dir_idx = j)
                 end
-                self_nc = 2 + nwd + nxc
-                @printf(out, "%22s%11d%11d%11d%11d%4d%2d%3d%5d\n",
-                    "", 1, 451, self_nc, 0, mat, 1, 451, ns); ns += 1
-                for (dmf, dmt, dnc, dmod) in dir_entries
-                    @printf(out, "%22s%11d%11d%11d%11d%4d%2d%3d%5d\n",
-                        "", dmf, dmt, dnc, dmod, mat, 1, 451, ns); ns += 1
+
+                need_insert = !blk_has_mt152
+
+                # Write HEAD line — increment NXC (field 6) if inserting MT152
+                if need_insert
+                    hp = rpad(line, 80)[1:80]
+                    old_nxc_head = Int(_parse_int(hp[56:66]))
+                    println(out, hp[1:55] * lpad(string(old_nxc_head + 1), 11) * hp[67:80])
+                else
+                    println(out, line)
                 end
-                @printf(out, "%66s%4d%2d%3d%5d\n", "", mat, 1, 0, 99999)
-                @printf(out, "%66s%4d%2d%3d%5d\n", "", mat, 0, 0, 0)  # FEND
-                # Skip to after MF1 SEND + FEND + zero/gap lines from input
-                i = mf1_end + 1
-                # Skip FEND and gap lines between MF1 and MF2
-                while i <= length(in_lines)
-                    ln = in_lines[i]; nl = length(ln)
-                    nl < 14 && (i += 1; continue)
-                    lmf = _parse_int(ln[nl-9:nl-8]); lmt = _parse_int(ln[nl-7:nl-5])
-                    (lmf == 0 && lmt == 0) && (i += 1; continue)  # skip FEND/gap
-                    break
+
+                # Write CONT line with NXC incremented if inserting MT152
+                if need_insert
+                    new_nxc = nxc_blk + 1
+                    seq_str = rpad(cont_line, 80)[67:80]
+                    println(out, cont_p[1:44] * lpad(string(nwd_blk), 11) *
+                            lpad(string(new_nxc), 11) * seq_str)
+                else
+                    println(out, cont_line)
                 end
-                continue
 
-            # Replace first MT152 block with full unresr data
-            elseif blk1_mt152_start > 0 && i == blk1_mt152_start
-                _write_mt152(out, params, urr, mt152_blocks)
-                # Skip old MT152 data; the SEND at blk1_mt152_send terminates
-                i = blk1_mt152_send
-                continue
+                # Copy description lines
+                for j in (i + 2):(i + 1 + nwd_blk)
+                    println(out, in_lines[j])
+                end
 
-            # Insert MT152 after MT151 SEND when no existing MT152
-            elseif blk1_mt152_start == 0 && blk1_mt151_send > 0 && i == blk1_mt151_send
-                # Write the MT151 SEND line first
-                println(out, in_lines[i])
-                # Insert new MT152 + SEND (MF2 FEND follows from broadr copy)
-                _write_mt152(out, params, urr, mt152_blocks)
-                @printf(out, "%66s%4d%2d%3d%5d\n", "", mat, 2, 0, 99999)
-                i += 1
-                continue
+                # Copy directory lines, inserting MT152 after MT151
+                seq_offset = 0
+                for j in dir_start:dir_end
+                    dln = in_lines[j]
+                    vals = _dir_vals(dln)
 
-            else
-                println(out, in_lines[i])
-                i += 1
+                    # Update self-reference NC if inserting
+                    if need_insert && length(vals) >= 3 && vals[1] == 1 && vals[2] == 451
+                        old_nc = vals[3]
+                        trailer = rpad(dln, 80)[67:80]
+                        println(out, @sprintf("%22s%11d%11d%11d%11d", "", 1, 451, old_nc + 1, 0) * trailer)
+                    elseif seq_offset > 0
+                        # Renumber sequence
+                        old_seq = _parse_int(rpad(dln, 80)[76:80])
+                        println(out, rpad(dln, 80)[1:75] * @sprintf("%5d", old_seq + seq_offset))
+                    else
+                        println(out, dln)
+                    end
+
+                    # Insert MT152 directory entry after MT151
+                    if need_insert && j == mt151_dir_idx
+                        seq = _parse_int(rpad(dln, 80)[76:80])
+                        @printf(out, "%22s%11d%11d%11d%11d%4d%2d%3d%5d\n",
+                            "", 2, 152, mt152_nc, 0, mat, 1, 451, seq + 1)
+                        seq_offset = 1
+                    end
+                end
+
+                # Copy MF1 SEND (renumbered if needed)
+                send_line_idx = dir_end + 1
+                if send_line_idx <= length(in_lines)
+                    if seq_offset > 0
+                        sln = in_lines[send_line_idx]
+                        old_seq = _parse_int(rpad(sln, 80)[76:80])
+                        println(out, rpad(sln, 80)[1:75] * @sprintf("%5d", old_seq + seq_offset))
+                    else
+                        println(out, in_lines[send_line_idx])
+                    end
+                end
+
+                # Copy MF1 FEND
+                fend_idx = send_line_idx + 1
+                if fend_idx <= length(in_lines)
+                    println(out, in_lines[fend_idx])
+                end
+
+                # Skip to after MF1 FEND
+                i = fend_idx + 1
+                continue
             end
+
+            # Detect MF2/MT151 SEND → insert MT152 after it
+            if pm == mat && pf == 2 && pt == 0 && block_idx > 0 && block_idx <= length(mt152_blocks)
+                # Check: is the next line MF2 FEND or MF2/MT152?
+                next_pm, next_pf, next_pt = i + 1 <= length(in_lines) ? _lp(in_lines[i+1]) : (0, 0, 0)
+                is_fend_next = (next_pm == mat && next_pf == 0) || (next_pm == 0)
+                is_mt152_next = (next_pm == mat && next_pf == 2 && next_pt == 152)
+
+                if is_fend_next
+                    # This is MT151 SEND, FEND follows → insert MT152 here
+                    println(out, line)  # write MT151 SEND
+                    _write_mt152(out, params, urr, [mt152_blocks[block_idx]])
+                    i += 1
+                    continue
+                elseif is_mt152_next
+                    # This is MT151 SEND, existing MT152 follows → replace MT152
+                    println(out, line)  # write MT151 SEND
+                    _write_mt152(out, params, urr, [mt152_blocks[block_idx]])
+                    # Skip old MT152 data + its SEND
+                    i += 1
+                    while i <= length(in_lines)
+                        pm2, pf2, pt2 = _lp(in_lines[i])
+                        if pm2 == mat && pf2 == 2 && pt2 == 0
+                            i += 1; break  # skip old MT152 SEND
+                        end
+                        i += 1
+                    end
+                    continue
+                end
+            end
+
+            # Detect MEND record → next block expected
+            if pm == 0 && pf == 0 && pt == 0
+                expect_new_block = true
+            end
+
+            # Default: copy verbatim
+            println(out, line)
+            i += 1
         end
     end
 end

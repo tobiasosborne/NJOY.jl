@@ -96,12 +96,17 @@ function write_pendf(io::IO, result::NamedTuple;
         mt_mf[Int(sec.mt)] = Int(sec.mf)
     end
 
+    # Extract URR table if present (for MT152 in reconr output)
+    urr_tab = hasproperty(result, :urr_table) ? result.urr_table : nothing
+    urr_lssf_val = hasproperty(result, :urr_lssf) ? Int(result.urr_lssf) : 0
+
     # MF1/MT451
     _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
-                      mt_to_mf=mt_mf, descriptions=descriptions)
+                      mt_to_mf=mt_mf, descriptions=descriptions, urr_table=urr_tab)
 
-    # MF2/MT151
-    _write_legacy_mf2(io, mf2, actual_mat, ns)
+    # MF2/MT151 + MT152 (if URR data exists)
+    _write_legacy_mf2(io, mf2, actual_mat, ns;
+                      urr_table=urr_tab, urr_lssf=urr_lssf_val)
 
     # MF3/MF23 sections
     _write_legacy_mf3(io, result, actual_mat, reactions, ns)
@@ -309,9 +314,11 @@ function write_full_pendf(io::IO, result::NamedTuple;
                 is_redundant = any(s -> lo <= Int(s.mt) <= hi, result.mf3_sections)
             end
             if is_redundant
+                # Fortran recout lines 5234,5266,5348: scr(4)=99 for redundant MTs
                 l2_head = 99
             else
                 # Non-redundant: L2 from ENDF MF3 HEAD (level number for MT=51-68)
+                # Fortran recout line 5331: scr(4)=lfs
                 for sec in result.mf3_sections
                     if Int(sec.mt) == imt
                         l2_head = Int(sec.L2)
@@ -766,9 +773,12 @@ end
 function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                             n_pts, reactions, ns::Ref{Int};
                             mt_to_mf::Dict{Int,Int}=Dict{Int,Int}(),
-                            descriptions::Vector{String}=String[])
+                            descriptions::Vector{String}=String[],
+                            urr_table=nothing)
     ns[] = 1
-    nxc = 2 + length(reactions)
+    # NXC = number of directory entries: self-ref + MT151 [+ MT152] + MF3 sections
+    has_mt152 = urr_table !== nothing
+    nxc = 2 + length(reactions) + (has_mt152 ? 1 : 0)
     nwd = length(descriptions)
 
     _write_cont_line(io, mf2.ZA, mf2.AWR, 2, 0, 0, 0,
@@ -786,6 +796,11 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
     nc_self = 2 + nwd + nxc
     _write_cont_line(io, 0.0, 0.0, 1, 451, nc_self, 0, Int(mat), 1, 451, ns)
     _write_cont_line(io, 0.0, 0.0, 2, 151, 4, 0, Int(mat), 1, 451, ns)
+    # MT152 directory entry: NC = 3 + nunr (Fortran reconr.f90 line 5164)
+    if has_mt152
+        nunr = length(urr_table.energies)
+        _write_cont_line(io, 0.0, 0.0, 2, 152, 3 + nunr, 0, Int(mat), 1, 451, ns)
+    end
     for (mt, _) in reactions
         dir_mf = get(mt_to_mf, Int(mt), 3)
         _write_cont_line(io, 0.0, 0.0, dir_mf, Int(mt), nc_per, 0,
@@ -796,7 +811,8 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
     _write_fend_zero(io, Int(mat))
 end
 
-function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
+function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
+                           urr_table=nothing, urr_lssf::Int=0)
     ns[] = 1
     nis = length(mf2.isotopes)
     _write_cont_line(io, mf2.ZA, mf2.AWR, 0, 0, nis, 0, Int(mat), 2, 151, ns)
@@ -804,7 +820,8 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
     for iso in mf2.isotopes
         # Fortran recout uses ZA (not ZAI) for the isotope CONT record
         _write_cont_line(io, mf2.ZA, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
-        el = length(iso.ranges) > 0 ? iso.ranges[1].EL : 1.0e-5
+        # Fortran recout uses eresl (=elow=1e-5) for EL, not range[1].EL
+        el = 1.0e-5
         # Fortran recout uses eresr for EH: resolved range EH if LRU=1 exists,
         # otherwise ehigh=2e7 for LRU=0-only materials
         eh = 2.0e7  # ehigh: default for no-resonance materials
@@ -826,6 +843,44 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int})
     end
 
     _write_send(io, Int(mat), 2)
+
+    # MT152: preliminary unresolved Bondarenko table (nsigz=1, infinite dilution)
+    # Matches Fortran reconr.f90 lines 5203-5214
+    if urr_table !== nothing
+        nunr = length(urr_table.energies)
+        ns[] = 1
+        # CONT record: ZA, AWR, LSSF, 0, 0, INTUNR
+        _write_cont_line(io, mf2.ZA, mf2.AWR, urr_lssf, 0, 0,
+                         urr_table.intlaw, Int(mat), 2, 152, ns)
+        # LIST record: temp, 0, NLI=5, NLIB=1, NCP=1+6*nunr, nunr
+        ncp = 1 + 6 * nunr
+        _write_cont_line(io, 0.0, 0.0, 5, 1, ncp, nunr, Int(mat), 2, 152, ns)
+        # Pack data: sigma0, then per-energy (E, total, elastic, fission, capture, elastic_copy)
+        data = Float64[]
+        push!(data, 1.0e10)  # sentinel sigma0 value (infinite dilution)
+        for ie in 1:nunr
+            push!(data, urr_table.energies[ie])
+            push!(data, urr_table.total[ie])
+            push!(data, urr_table.elastic[ie])
+            push!(data, urr_table.fission[ie])
+            push!(data, urr_table.capture[ie])
+            push!(data, urr_table.elastic[ie])  # copy of elastic (Fortran line 1690)
+        end
+        # Write data in 6-values-per-line ENDF format
+        idx = 1
+        while idx <= length(data)
+            buf = ""
+            for col in 1:6
+                idx > length(data) && break
+                buf *= format_endf_float(data[idx])
+                idx += 1
+            end
+            @printf(io, "%-66s%4d%2d%3d%5d\n", rpad(buf, 66)[1:66], Int(mat), 2, 152, ns[])
+            ns[] += 1
+        end
+        _write_send(io, Int(mat), 2)
+    end
+
     _write_fend_zero(io, Int(mat))
 end
 
@@ -859,9 +914,18 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
         end
         cur_mf = out_mf
 
-        # HEAD: ZA, AWR, 0, L2=99, 0, 0
-        _write_cont_line(io, za, awr, 0, 99, 0, 0,
-                         Int(mat), out_mf, Int(mt), ns)
+        # HEAD: ZA, AWR, 0, L2, 0, 0
+        # Fortran recout: redundant MTs get L2=99, non-redundant get L2=lfs (level number)
+        imt = Int(mt)
+        l2_val = 99
+        for sec in result.mf3_sections
+            if Int(sec.mt) == imt
+                l2_val = Int(sec.L2)
+                break
+            end
+        end
+        _write_cont_line(io, za, awr, 0, l2_val, 0, 0,
+                         Int(mat), out_mf, imt, ns)
 
         # TAB1: QM, QI, 0, LR, NR=1, NP
         qi_out = (mt == 1 || mt == 4 || mt == 501) ? 0.0 : qi
