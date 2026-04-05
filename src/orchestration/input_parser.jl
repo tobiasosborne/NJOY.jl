@@ -25,9 +25,10 @@ const NJOY_MODULES = Set([
 const AVAILABLE_MODULES = Set([
     :moder, :reconr, :broadr, :heatr, :thermr, :unresr, :purr,
     :groupr, :errorr, :acer, :gaspr, :leapr, :gaminr, :covr,
+    :dtfr, :matxsr, :viewr,
 ])
 
-const SKIP_MODULES = Set([:viewr, :plotr])
+const SKIP_MODULES = Set([:plotr])
 
 # =========================================================================
 # Tokeniser
@@ -444,6 +445,329 @@ function parse_groupr(mc::ModuleCall)::GrouprParams
     end
     GrouprParams(nendf, npend, ngout_in, nout, mat, ign, igg, iwt, lord,
                  ntemp, nsigz, iprint, title, temps, sigz, mt_list)
+end
+
+# =========================================================================
+# GAMINR parser — matches gaminr.f90 ruing subroutine
+# Card 1: nendf npend ngam1 ngam2
+# Card 2: matb igg iwt lord iprint
+# Card 3: title
+# Card 4: (igg=1 only) ngg egg(1)..egg(ngg+1)
+# Card 5: (iwt=1 only) weight function data
+# Then repeat: card 6 (mfd mtd name) until mfd=0/-1, card 7 (matd, 0=stop)
+# =========================================================================
+
+struct GaminrParams
+    nendf::Int; npend::Int; ngam1::Int; ngam2::Int
+    matb::Int; igg::Int; iwt::Int; lord::Int; iprint::Int
+    title::String
+    materials::Vector{Tuple{Int,Vector{Tuple{Int,Int,String}}}}
+    # (mat, [(mfd,mtd,name)...])
+end
+
+function parse_gaminr(mc::ModuleCall)::GaminrParams
+    cards = mc.raw_cards
+    isempty(cards) && return GaminrParams(0,0,0,0,0,3,3,0,1,"",[])
+    # Card 1: unit numbers
+    nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
+    ngam1 = _fint(cards[1], 3; default=0); ngam2 = abs(_fint(cards[1], 4; default=0))
+    # Card 2: control parameters
+    matb   = length(cards) >= 2 ? _fint(cards[2], 1) : 0
+    igg    = length(cards) >= 2 ? _fint(cards[2], 2; default=3) : 3
+    iwt    = length(cards) >= 2 ? _fint(cards[2], 3; default=3) : 3
+    lord   = length(cards) >= 2 ? _fint(cards[2], 4; default=0) : 0
+    iprint = length(cards) >= 2 ? _fint(cards[2], 5; default=1) : 1
+    # Card 3: title
+    title = ""
+    ci = 3
+    if ci <= length(cards)
+        title = strip(replace(join(cards[ci], " "), r"^['\"]|['\"]$" => ""))
+        ci += 1
+    end
+    # Card 4: custom group structure (igg=1 only) — skip
+    if igg == 1 && ci <= length(cards)
+        ci += 1  # ngg line
+        ci <= length(cards) && (ci += 1)  # egg values
+    end
+    # Card 5: custom weight function (iwt=1 only) — skip
+    if iwt == 1 && ci <= length(cards)
+        ci += 1
+    end
+    # Material loop: card 6 (mfd mtd name) + card 7 (matd)
+    # First material uses matb from card 2
+    materials = Tuple{Int,Vector{Tuple{Int,Int,String}}}[]
+    cur_mat = matb
+    while cur_mat != 0
+        reactions = Tuple{Int,Int,String}[]
+        while ci <= length(cards)
+            mfd = _fint(cards[ci], 1; default=0)
+            if mfd == 0
+                ci += 1; break
+            elseif mfd == -1
+                push!(reactions, (-1, 0, ""))
+                ci += 1; break
+            else
+                mtd = _fint(cards[ci], 2; default=0)
+                name = length(cards[ci]) >= 3 ?
+                    strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
+                push!(reactions, (mfd, mtd, name))
+                ci += 1
+            end
+        end
+        push!(materials, (cur_mat, reactions))
+        # Card 7: next matd (0=stop)
+        if ci <= length(cards)
+            cur_mat = _fint(cards[ci], 1; default=0)
+            ci += 1
+        else
+            cur_mat = 0
+        end
+    end
+    GaminrParams(nendf, npend, ngam1, ngam2, matb, igg, iwt, lord, iprint,
+                 title, materials)
+end
+
+# =========================================================================
+# DTFR parser — matches dtfr.f90 ruin subroutine
+# Card 1: nin nout npend nplot
+# Card 2: iprint ifilm iedit
+# iedit=0: Card 3 (nlmax ng iptotl ipingp itabl ned ntherm)
+#          Card 3a (ntherm≠0: mti mtc nlc)
+#          Card 4 (edit names, iptotl-3 entries)
+#          Card 5 (edit specs: ned triplets jpos mt mult)
+# iedit=1: Card 6 (nlmax ng)
+# Card 7: nptabl ngp
+# Card 8: (repeat) hisnam mat jsigz dtemp — blank terminates
+# =========================================================================
+
+struct DtfrEditSpec
+    jpos::Int; mt::Int; mult::Int
+end
+
+struct DtfrMaterial
+    name::String; mat::Int; jsigz::Int; dtemp::Float64
+end
+
+struct DtfrParams
+    nin::Int; nout::Int; npend::Int; nplot::Int
+    iprint::Int; ifilm::Int; iedit::Int
+    nlmax::Int; ng::Int; iptotl::Int; ipingp::Int; itabl::Int
+    ned::Int; ntherm::Int; mti::Int; mtc::Int; nlc::Int
+    edit_names::Vector{String}; edit_specs::Vector{DtfrEditSpec}
+    nptabl::Int; ngp::Int
+    materials::Vector{DtfrMaterial}
+end
+
+function parse_dtfr(mc::ModuleCall)::DtfrParams
+    cards = mc.raw_cards
+    isempty(cards) && return DtfrParams(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,[],[],0,0,[])
+    # Card 1: units
+    nin   = abs(_fint(cards[1], 1)); nout  = abs(_fint(cards[1], 2; default=0))
+    npend = abs(_fint(cards[1], 3; default=0)); nplot = abs(_fint(cards[1], 4; default=0))
+    # Card 2: options
+    iprint = length(cards) >= 2 ? _fint(cards[2], 1; default=0) : 0
+    ifilm  = length(cards) >= 2 ? _fint(cards[2], 2; default=0) : 0
+    iedit  = length(cards) >= 2 ? _fint(cards[2], 3; default=0) : 0
+    ci = 3
+    nlmax = 0; ng = 0; iptotl = 0; ipingp = 0; itabl = 0; ned = 0; ntherm = 0
+    mti = 0; mtc = 0; nlc = 0
+    edit_names = String[]; edit_specs = DtfrEditSpec[]
+    if iedit == 0
+        # Card 3: table parameters
+        if ci <= length(cards)
+            nlmax  = _fint(cards[ci], 1; default=0)
+            ng     = _fint(cards[ci], 2; default=0)
+            iptotl = _fint(cards[ci], 3; default=0)
+            ipingp = _fint(cards[ci], 4; default=0)
+            itabl  = _fint(cards[ci], 5; default=0)
+            ned    = _fint(cards[ci], 6; default=0)
+            ntherm = _fint(cards[ci], 7; default=0)
+            ci += 1
+        end
+        # Card 3a: thermal MTs (ntherm≠0)
+        if ntherm != 0 && ci <= length(cards)
+            mti = _fint(cards[ci], 1; default=0)
+            mtc = _fint(cards[ci], 2; default=0)
+            nlc = _fint(cards[ci], 3; default=0)
+            ci += 1
+        end
+        # Card 4: edit names (nedpos = iptotl - 3 entries)
+        nedpos = max(iptotl - 3, 0)
+        if nedpos > 0 && ci <= length(cards)
+            for j in 1:min(nedpos, length(cards[ci]))
+                push!(edit_names, strip(replace(cards[ci][j], r"^['\"]|['\"]$" => "")))
+            end
+            ci += 1
+        end
+        # Card 5: edit specs (ned triplets)
+        if ned > 0 && ci <= length(cards)
+            j = 1
+            for k in 1:ned
+                jpos = _fint(cards[ci], j; default=0)
+                mt_  = _fint(cards[ci], j+1; default=0)
+                mult = _fint(cards[ci], j+2; default=1)
+                push!(edit_specs, DtfrEditSpec(jpos, mt_, mult))
+                j += 3
+            end
+            ci += 1
+        end
+    else
+        # iedit=1: Card 6
+        if ci <= length(cards)
+            nlmax = _fint(cards[ci], 1; default=5)
+            ng    = _fint(cards[ci], 2; default=30)
+            ci += 1
+        end
+    end
+    # Card 7: photon table parameters
+    nptabl = 0; ngp = 0
+    if ci <= length(cards)
+        nptabl = _fint(cards[ci], 1; default=0)
+        ngp    = _fint(cards[ci], 2; default=0)
+        ci += 1
+    end
+    # Card 8: materials (repeat until blank/empty)
+    materials = DtfrMaterial[]
+    while ci <= length(cards)
+        isempty(cards[ci]) && break
+        name_tok = length(cards[ci]) >= 1 ? strip(replace(cards[ci][1], r"^['\"]|['\"]$" => "")) : ""
+        matd = _fint(cards[ci], 2; default=0)
+        matd == 0 && isempty(name_tok) && break
+        jsigz = _fint(cards[ci], 3; default=1)
+        dtemp = _fnum(cards[ci], 4; default=300.0)
+        push!(materials, DtfrMaterial(name_tok, matd, jsigz, dtemp))
+        ci += 1
+    end
+    DtfrParams(nin, nout, npend, nplot, iprint, ifilm, iedit,
+               nlmax, ng, iptotl, ipingp, itabl, ned, ntherm, mti, mtc, nlc,
+               edit_names, edit_specs, nptabl, ngp, materials)
+end
+
+# =========================================================================
+# MATXSR parser — matches matxsr.f90 ruinm subroutine
+# Card 1: ngen1 ngen2 nmatx (from main matxsr, not ruinm)
+# Card 2: ivers huse  (from main matxsr)
+# Card 3: npart ntype nholl nmat  (from ruinm)
+# Card 4: (nholl cards) hollerith set ID
+# Card 5: particle names (npart)
+# Card 6: group counts (npart)
+# Card 7: data type names (ntype)
+# Card 8: jinp (ntype)
+# Card 9: joutp (ntype)
+# Card 10: (nmat cards) hmat matno matgg
+# =========================================================================
+
+struct MatxsrMaterial
+    name::String; matno::Int; matgg::Int
+end
+
+struct MatxsrParams
+    ngen1::Int; ngen2::Int; nmatx::Int
+    ivers::Int; huse::String
+    npart::Int; ntype::Int; nholl::Int; nmat::Int
+    hsetid::Vector{String}
+    particles::Vector{String}; ngrp::Vector{Int}
+    dtypes::Vector{String}; jinp::Vector{Int}; joutp::Vector{Int}
+    materials::Vector{MatxsrMaterial}
+end
+
+function parse_matxsr(mc::ModuleCall)::MatxsrParams
+    cards = mc.raw_cards
+    isempty(cards) && return MatxsrParams(0,0,0,0,"",0,0,0,0,[],[],[],[],[],[],[])
+    # Card 1: unit numbers
+    ngen1 = _fint(cards[1], 1; default=0)
+    ngen2 = _fint(cards[1], 2; default=0)
+    nmatx = abs(_fint(cards[1], 3; default=0))
+    # Card 2: ivers, huse
+    ivers = length(cards) >= 2 ? _fint(cards[2], 1; default=0) : 0
+    huse  = length(cards) >= 2 && length(cards[2]) >= 2 ?
+        strip(replace(join(cards[2][2:end], " "), r"^['\"]|['\"]$" => "")) : ""
+    ci = 3
+    # Card 3: npart, ntype, nholl, nmat
+    npart = ci <= length(cards) ? _fint(cards[ci], 1; default=1) : 1
+    ntype = ci <= length(cards) ? _fint(cards[ci], 2; default=1) : 1
+    nholl = ci <= length(cards) ? _fint(cards[ci], 3; default=1) : 1
+    nmat  = ci <= length(cards) ? _fint(cards[ci], 4; default=1) : 1
+    ci += 1
+    # Card 4: hollerith set ID (nholl cards)
+    hsetid = String[]
+    for k in 1:nholl
+        ci > length(cards) && break
+        push!(hsetid, strip(replace(join(cards[ci], " "), r"^['\"]|['\"]$" => "")))
+        ci += 1
+    end
+    # Card 5: particle names
+    particles = String[]
+    if ci <= length(cards)
+        for j in 1:min(npart, length(cards[ci]))
+            push!(particles, strip(replace(cards[ci][j], r"^['\"]|['\"]$" => "")))
+        end
+        ci += 1
+    end
+    # Card 6: group counts
+    ngrp = Int[]
+    if ci <= length(cards)
+        for j in 1:min(npart, length(cards[ci]))
+            push!(ngrp, _fint(cards[ci], j))
+        end
+        ci += 1
+    end
+    # Card 7: data type names
+    dtypes = String[]
+    if ci <= length(cards)
+        for j in 1:min(ntype, length(cards[ci]))
+            push!(dtypes, strip(replace(cards[ci][j], r"^['\"]|['\"]$" => "")))
+        end
+        ci += 1
+    end
+    # Card 8: jinp
+    jinp = Int[]
+    if ci <= length(cards)
+        for j in 1:min(ntype, length(cards[ci]))
+            push!(jinp, _fint(cards[ci], j))
+        end
+        ci += 1
+    end
+    # Card 9: joutp
+    joutp = Int[]
+    if ci <= length(cards)
+        for j in 1:min(ntype, length(cards[ci]))
+            push!(joutp, _fint(cards[ci], j))
+        end
+        ci += 1
+    end
+    # Card 10: materials (nmat cards)
+    materials = MatxsrMaterial[]
+    for k in 1:nmat
+        ci > length(cards) && break
+        name = length(cards[ci]) >= 1 ?
+            strip(replace(cards[ci][1], r"^['\"]|['\"]$" => "")) : ""
+        matno = _fint(cards[ci], 2; default=0)
+        matgg = _fint(cards[ci], 3; default=0)
+        push!(materials, MatxsrMaterial(name, matno, matgg))
+        ci += 1
+    end
+    MatxsrParams(ngen1, ngen2, nmatx, ivers, huse,
+                 npart, ntype, nholl, nmat, hsetid,
+                 particles, ngrp, dtypes, jinp, joutp, materials)
+end
+
+# =========================================================================
+# VIEWR parser — matches viewr.f90
+# Card 1: infile nps  (from nsysi — the NJOY input)
+# All other data comes from infile (the plot tape)
+# =========================================================================
+
+struct ViewrParams
+    infile::Int; nps::Int
+end
+
+function parse_viewr(mc::ModuleCall)::ViewrParams
+    cards = mc.raw_cards
+    isempty(cards) && return ViewrParams(0, 0)
+    infile = abs(_fint(cards[1], 1; default=0))
+    nps    = abs(_fint(cards[1], 2; default=0))
+    ViewrParams(infile, nps)
 end
 
 function parse_purr(mc::ModuleCall)::PurrParams

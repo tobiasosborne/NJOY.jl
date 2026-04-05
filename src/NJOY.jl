@@ -128,6 +128,10 @@ include("orchestration/modules/errorr.jl")
 include("orchestration/modules/groupr.jl")
 include("orchestration/modules/unresr.jl")
 include("orchestration/modules/ccccr.jl")
+include("orchestration/modules/gaminr.jl")
+include("orchestration/modules/dtfr.jl")
+include("orchestration/modules/matxsr.jl")
+include("orchestration/modules/viewr.jl")
 include("orchestration/pipeline.jl")
 
 # Public API -- constants

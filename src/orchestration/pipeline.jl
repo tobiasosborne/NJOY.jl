@@ -144,8 +144,24 @@ function run_njoy(input_path::AbstractString;
             params = parse_errorr(mc)
             errorr_module(tapes, params)
 
-        elseif mc.name in (:viewr, :plotr)
-            @info "$(mc.name): skipped (visualization)"
+        elseif mc.name == :gaminr
+            params = parse_gaminr(mc)
+            gaminr_module(tapes, params)
+
+        elseif mc.name == :dtfr
+            params = parse_dtfr(mc)
+            dtfr_module(tapes, params)
+
+        elseif mc.name == :matxsr
+            params = parse_matxsr(mc)
+            matxsr_module(tapes, params)
+
+        elseif mc.name == :viewr
+            params = parse_viewr(mc)
+            viewr_module(tapes, params)
+
+        elseif mc.name == :plotr
+            @info "plotr: skipped (visualization)"
         else
             @warn "Module $(mc.name) not yet implemented"
         end
