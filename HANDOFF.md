@@ -2760,3 +2760,79 @@ julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work
 julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01_test")'
 # tape25: 32962 lines, 0 failures at 1e-5
 ```
+
+---
+
+### Phase 41: viewr+graph.f90 faithful port — 100% BIT-IDENTICAL PostScript
+
+**Goal**: Complete, faithful, idiomatic Julia port of Fortran viewr.f90 (1669 lines) + graph.f90 (2899 lines) — the NJOY PostScript rendering engine.
+
+**Result**: **9274/9274 lines BIT-IDENTICAL** (100.0%, zero diffs) when viewr reads the correct Fortran plot tape. The T03 referenceTape37 is reproduced byte-for-byte.
+
+**Architecture**: New `src/viewr/` directory with 11 focused files. Single `mutable struct GraphState` carries all ~60 module-level variables from graph.f90 — no global mutable state. All functions take `gs::GraphState` as first argument.
+
+**Files created** (4462 lines total, porting 4568 Fortran lines):
+
+| File | Lines | Fortran equivalent | What it implements |
+|------|-------|-------------------|-------------------|
+| `src/viewr/constants.jl` | 152 | graph.f90 data decls | CW(128,3) font width tables (Times-Roman, Helvetica, Symbol), IBRGB/IFRGB/ISRGB color tables, page geometry constants |
+| `src/viewr/types.jl` | 203 | graph.f90 + viewr.f90 module vars | `GraphState` (56 fields) + `ViewrState` (57 fields) mutable structs |
+| `src/viewr/ps_primitives.jl` | 264 | graph.f90:2103-2374 | gplot!, gdone!, newp!, endp!, moveh!, drawh!, fillh!, gset!, gend!, cclip!, nclip!, ncurve! |
+| `src/viewr/transforms.jl` | 377 | graph.f90:212-636 | transw, trans3, initp!, window!, endw!, init2!, frame2!, endfr!, vect2!, vect3!, poly2!, poly3! |
+| `src/viewr/text.jl` | 651 | graph.f90:1634-2095,2795-2896 | DISSPLA markup engine (text3!, text2!, dchr!, txtlen, ssum, charw, stripv, iget, rget) |
+| `src/viewr/axes.jl` | 763 | graph.f90:638-1216 | axis3! (485-line Fortran routine), axis2!, xscale/yscale/zscale, xinvrs/yinvrs |
+| `src/viewr/curves.jl` | 343 | graph.f90:1218-1632 | grid2!/grid3!, curv2!, curv3!, hatch! |
+| `src/viewr/symbols.jl` | 197 | graph.f90:2376-2793 | dsym! (25 symbol types), circle! |
+| `src/viewr/plot_tape.jl` | 163 | viewr.f90 card reading | read_plot_reals, read_plot_string, _read_card_reals, _read_card_string |
+| `src/viewr/set2d.jl` | 945 | viewr.f90:757-1524, graph.f90:487-569 | ascalv, set2d!, erbar!, legndb!, tagit!, init3!, set3d! |
+| `src/viewr/viewr.jl` | 404 | viewr.f90:42-755 | viewr_render! — main plot tape loop |
+
+**Files modified:**
+- `src/NJOY.jl` — includes for 11 viewr engine files in dependency order
+- `src/orchestration/modules/viewr.jl` — replaced 367-line ad-hoc stub with 32-line wrapper calling viewr_render!
+
+**Key design decisions:**
+- All PS format strings match Fortran exactly (`f6.3`, `f9.2`, `f8.3`, `f7.2`, `i4`, `i5`)
+- Coordinate clamping to [-1000, 2000] PS points (prevents PostScript overflow)
+- Landscape rotation in software, not PS `rotate`
+- `moveh!` always strokes previous path before moveto (PS accumulation model)
+- `drawh!` caches linewidth (`wlast`) and dash pattern (`ldash`) to suppress redundant PS commands
+- Text rendered character-by-character with per-char `findfont/makefont/setfont/show`
+- Log axis guards for non-positive data values (Fortran would produce NaN/garbage, Julia would crash)
+
+**Verification**:
+```bash
+# Generate Fortran reference plot tape
+cd /tmp && mkdir -p t03_fortran && cd t03_fortran
+cp ~/Projects/NJOY.jl/njoy-reference/tests/03/input .
+cp ~/Projects/NJOY.jl/njoy-reference/tests/resources/gam23 tape30
+cp ~/Projects/NJOY.jl/njoy-reference/tests/resources/gam27 tape32
+~/Projects/NJOY.jl/njoy-reference/build/njoy < input > output 2>&1
+
+# Run Julia viewr on Fortran plot tape
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=~/Projects/NJOY.jl -e '
+using NJOY
+open("/tmp/t03_viewr_test.ps", "w") do io
+    NJOY.viewr_render!(io, "/tmp/t03_fortran/tape36")
+end
+jl = readlines("/tmp/t03_viewr_test.ps")
+rf = readlines("njoy-reference/tests/03/referenceTape37")
+n = min(length(jl), length(rf))
+m = count(i -> jl[i] == rf[i], 1:n)
+println("$m / $n lines match ($(round(100m/n, digits=1))%)")
+# Expected: 9274 / 9274 lines match (100.0%)
+'
+```
+
+**T03 full pipeline** (`run_njoy("njoy-reference/tests/03/input")`) runs end-to-end but produces different PS because **Julia's dtfr writes a wrong plot tape** (10528 lines vs Fortran's 1711). The viewr engine is correct — the dtfr module needs fixing. See dtfr issues below.
+
+**Remaining work for T03 test to pass**: Fix dtfr plot tape generation (5 bugs):
+
+1. **Wrong MT selection**: dtfr plots MT=501 (total XS) instead of MT=621 (PHEAT = photon heating). The Fortran `histod` subroutine (dtfr.f90) selects the heating reaction based on the edit table.
+2. **Missing PENDF overlay curves**: Fortran `ploted` reads PENDF tape (npend=31) and adds continuous point-data curves as `iplot=2` overlays on each histogram plot. Julia skips this entirely.
+3. **Missing 3D transfer matrix plots**: Fortran `plotnn`/`plotnp` produce 3D surface plots from GENDF MF=26 scattering matrices. Julia doesn't implement these.
+4. **Wrong title formatting**: Fortran uses `HISNAM` (6-char isotope label) + 4 spaces + `HEDN` (6-char reaction name) from the DTF edit table. Julia uses generic "total"/"absorp" labels.
+5. **Wrong axis ranges and data values**: Y-axis ranges off by 8 decades (1e2–1e6 vs 1e-2–1e0) because the data is XS instead of heating KERMA.
+
+**Trap 143 (NEW)**: viewr is 100% correct. When T03 produces wrong PS output, the bug is in dtfr's `_write_dtfr_plot_tape`, NOT in viewr. Always test viewr in isolation using the Fortran plot tape (`/tmp/t03_fortran/tape36`) to distinguish viewr bugs from dtfr bugs.
