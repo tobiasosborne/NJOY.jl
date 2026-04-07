@@ -158,14 +158,12 @@ function _write_matxsr_tape(io::IO, gendf::Vector{GendfMaterial}, params::Matxsr
         # Record 6: Material Control
         @printf(io, " 5d %-8s%12.5E\n", rpad(mspec.name, 8), gmat.awr)
         # Submaterial: temp=0, sigz=1e12, itype, n1d, n2d, loc
-        n1d = length(gmat.sections)  # number of vector data types
+        n1d = length(gmat.mf23)  # number of vector data types
         n2d = 0  # number of matrix data types (scattering matrices)
         # Count scattering matrices separately
         n_scat = 0
-        for sec in gmat.sections
-            if sec.mt == 502 || sec.mt == 504
-                n2d += 1
-            end
+        for sec in gmat.mf26
+            n2d += 1
         end
         @printf(io, "%12.5E%12.5E%6d%6d%6d%6d\n",
                 0.0, 1.0e12, 1, n1d + 1, n2d, 0)  # +1 for flux
@@ -173,7 +171,7 @@ function _write_matxsr_tape(io::IO, gendf::Vector{GendfMaterial}, params::Matxsr
         # Record 7: Vector Control
         # Names for each vector quantity
         vec_names = String["gwt0    "]  # flux weight
-        for sec in gmat.sections
+        for sec in gmat.mf23
             push!(vec_names, rpad(_matxsr_mt_name(sec.mt), 8))
         end
 
@@ -205,20 +203,15 @@ function _write_matxsr_tape(io::IO, gendf::Vector{GendfMaterial}, params::Matxsr
         # Flux weights first, then each reaction's group-averaged XS
         all_data = Float64[]
 
-        # Flux weights
-        for sec in gmat.sections
-            for g in 1:min(ngg, length(sec.data))
-                flux, _ = sec.data[g]
-                push!(all_data, flux)
-            end
-            break  # use first section's flux
+        # Flux weights (from GendfMaterial.flux)
+        for g in 1:ngg
+            push!(all_data, gmat.flux[g])
         end
 
         # Each reaction's XS
-        for sec in gmat.sections
-            for g in 1:min(ngg, length(sec.data))
-                _, sigma = sec.data[g]
-                push!(all_data, sigma)
+        for sec in gmat.mf23
+            for g in 1:min(ngg, length(sec.sigma))
+                push!(all_data, sec.sigma[g])
             end
         end
 
@@ -233,10 +226,8 @@ function _write_matxsr_tape(io::IO, gendf::Vector{GendfMaterial}, params::Matxsr
         end
         println(io)
 
-        # Scattering matrices (MF6/MF26)
-        # For now, write diagonal-only matrices for coherent/incoherent
-        for sec in gmat.sections
-            (sec.mt == 502 || sec.mt == 504) || continue
+        # Scattering matrices (MF26)
+        for sec in gmat.mf26
             mt_name = rpad(_matxsr_mt_name(sec.mt), 8)
 
             # Matrix control: name, lord, jconst, jband(ng), ijj(ng)
@@ -253,11 +244,10 @@ function _write_matxsr_tape(io::IO, gendf::Vector{GendfMaterial}, params::Matxsr
             end
             length(int_m) % 12 != 0 && println(io)
 
-            # Matrix data: one value per group (diagonal)
+            # Matrix data: one value per group (diagonal, P0)
             mat_vals = Float64[]
-            for g in 1:min(ngg, length(sec.data))
-                _, sigma = sec.data[g]
-                push!(mat_vals, sigma)
+            for g in 1:ngg
+                push!(mat_vals, sec.transfer[1, g, g])  # P0 diagonal
             end
 
             @printf(io, " 9d         ")

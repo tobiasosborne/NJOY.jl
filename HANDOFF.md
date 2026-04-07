@@ -2825,14 +2825,64 @@ println("$m / $n lines match ($(round(100m/n, digits=1))%)")
 '
 ```
 
-**T03 full pipeline** (`run_njoy("njoy-reference/tests/03/input")`) runs end-to-end but produces different PS because **Julia's dtfr writes a wrong plot tape** (10528 lines vs Fortran's 1711). The viewr engine is correct — the dtfr module needs fixing. See dtfr issues below.
+**T03 full pipeline** runs end-to-end: `run_njoy("njoy-reference/tests/03/input")` produces all 7 tapes (31, 33, 34, 35, 36, 37).
 
-**Remaining work for T03 test to pass**: Fix dtfr plot tape generation (5 bugs):
+### Phase 42: dtfr rewrite — tape34 BIT-IDENTICAL, plot tape 73% match
 
-1. **Wrong MT selection**: dtfr plots MT=501 (total XS) instead of MT=621 (PHEAT = photon heating). The Fortran `histod` subroutine (dtfr.f90) selects the heating reaction based on the edit table.
-2. **Missing PENDF overlay curves**: Fortran `ploted` reads PENDF tape (npend=31) and adds continuous point-data curves as `iplot=2` overlays on each histogram plot. Julia skips this entirely.
-3. **Missing 3D transfer matrix plots**: Fortran `plotnn`/`plotnp` produce 3D surface plots from GENDF MF=26 scattering matrices. Julia doesn't implement these.
-4. **Wrong title formatting**: Fortran uses `HISNAM` (6-char isotope label) + 4 spaces + `HEDN` (6-char reaction name) from the DTF edit table. Julia uses generic "total"/"absorp" labels.
-5. **Wrong axis ranges and data values**: Y-axis ranges off by 8 decades (1e2–1e6 vs 1e-2–1e0) because the data is XS instead of heating KERMA.
+**Result**: **tape34 (DTF): 340/340 BIT-IDENTICAL** when reading Fortran GENDF. **tape36 (plot): 1187/1628 lines match (72.9%)** with Fortran inputs — first 1182 lines identical, remaining diffs in uranium PENDF overlay thinning.
 
-**Trap 143 (NEW)**: viewr is 100% correct. When T03 produces wrong PS output, the bug is in dtfr's `_write_dtfr_plot_tape`, NOT in viewr. Always test viewr in isolation using the Fortran plot tape (`/tmp/t03_fortran/tape36`) to distinguish viewr bugs from dtfr bugs.
+**Bugs fixed**:
+1. **`_dpend` infinite loop (FIXED)**: `gety1_interp` returned `enext == e` when hitting tabulated energy point. Early return now advances to `energies_raw[2]`, while loop uses `<=` not `<`.
+2. **Plot tape formatting (FIXED)**: Title trailing spaces, histogram data leading spaces, axis tag E format (`_fmt_e10_2` for Fortran 0p format).
+3. **matxsr API break (FIXED)**: Migrated from old `gmat.sections`/`sec.data` to new `gmat.mf23`/`gmat.mf26`/`sec.sigma` + `gmat.flux`.
+
+**Files changed**:
+- `src/orchestration/modules/dtfr.jl` — complete rewrite: GENDF reader (MF23+MF26), DTF writer, plot tape writer, dpend fix, fmt_e10_2 helper, GendfMaterial flux field
+- `src/orchestration/modules/matxsr.jl` — API migration
+
+**Remaining T03 blockers (priority order)**:
+
+1. **gaminr MT621 (photon heating KERMA)**: Julia writes raw XS (~0.6 b), Fortran writes KERMA (~4488 b·eV). Missing energy multiplication in `src/processing/gaminr.jl`. Compare Fortran `gaminr.f90` subroutine `gheat`. **This is the #1 blocker** — all tape34/36/37 value differences trace to this.
+
+2. **matxsr transfer matrices**: Writes diagonal-only (131 lines vs 211). Need full banded matrix from `sec.transfer` array with proper `jband`/`ijj` computation.
+
+3. **`_dpend` thinning**: Missing Fortran ns states 3-5. Produces 451 vs 535 points for uranium MT=501 overlay. See `dtfr.f90` lines 1241-1268.
+
+4. **gaminr GENDF structure**: 688 vs 604 lines — dense MF26 format (zeros below threshold), wrong section ordering (all MF23 then all MF26 instead of interleaved per MT).
+
+**How to verify**:
+```bash
+# Generate Fortran oracle
+mkdir -p /tmp/t03_fortran && cd /tmp/t03_fortran
+cp ~/Projects/NJOY.jl/njoy-reference/tests/03/input .
+cp ~/Projects/NJOY.jl/njoy-reference/tests/resources/gam23 tape30
+cp ~/Projects/NJOY.jl/njoy-reference/tests/resources/gam27 tape32
+~/Projects/NJOY.jl/njoy-reference/build/njoy < input > output 2>&1
+
+# Test dtfr in isolation with Fortran GENDF (isolates dtfr from gaminr bugs)
+rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. -e '
+using NJOY
+mats = NJOY._read_gendf_tape("/tmp/t03_fortran/tape33")
+params = NJOY.DtfrParams(33, 34, 31, 36, 1, 1, 0, 5, 12, 4, 5, 16, 1, 0, 0, 0, 0,
+  ["pheat"], [NJOY.DtfrEditSpec(1, 621, 1)], 0, 0,
+  [NJOY.DtfrMaterial("h", 1, 1, 0.0), NJOY.DtfrMaterial("u", 92, 1, 0.0)])
+buf = IOBuffer(); NJOY._write_dtf_output(buf, mats, params)
+jl = split(String(take!(buf)), "\n"); ref = readlines("/tmp/t03_fortran/tape34")
+n = min(length(jl), length(ref))
+println("tape34: $(count(i -> jl[i] == ref[i], 1:n)) / $(length(ref)) BIT-IDENTICAL")
+# Expected: 340 / 340 BIT-IDENTICAL
+'
+```
+
+**Trap 143 (NEW)**: viewr is 100% correct. When T03 produces wrong PS, the bug is in dtfr or upstream (gaminr). Test viewr in isolation with Fortran plot tape.
+
+**Trap 144 (NEW — FIXED)**: `_dpend` hangs when first PENDF energy equals `elow`. Fix: `gety1_interp` early return must return `energies_raw[2]` as `enext`.
+
+**Trap 145 (NEW)**: Julia `%10.2E` → `1.20E+04`. Fortran `E10.2` (0p) → `0.12E+05`. Use `_fmt_e10_2()` for viewr tag values.
+
+**Trap 146 (NEW)**: matxsr uses `gmat.mf23`/`gmat.mf26`/`gmat.flux` now, not old `gmat.sections`/`sec.data`.
+
+**Trap 147 (NEW)**: Test dtfr with Fortran GENDF to isolate dtfr bugs from gaminr bugs. Julia gaminr MT621 is wrong → tape34 shows ~35% match but this is gaminr, not dtfr.
+
+See `worklog/T03_phase2_handoff.md` for full session details.
