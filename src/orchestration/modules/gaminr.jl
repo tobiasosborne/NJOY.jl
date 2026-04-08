@@ -133,8 +133,21 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
     # Read MF27 form factors from ENDF tape (gam27)
     ff_data = _read_mf27_form_factors(endf_path)
 
+    # Fortran processing order: mtlst/mflst interleaves MF23/MF26 per MT
+    # (gaminr.f90:111-114). Reactions are processed in this exact order,
+    # with heating accumulated from each reaction into toth, then MT=621
+    # outputs the accumulated total.
+    #
+    # mtlst = [501, 502, 502, 504, 504, 516, 516, 602, 621]
+    # mflst = [ 23,  23,  26,  23,  26,  23,  26,  23,  23]
+    reaction_sequence = [
+        (23, 501), (23, 502), (26, 502),
+        (23, 504), (26, 504),
+        (23, 516), (26, 516),
+        (23, 602), (23, 621),
+    ]
+
     for (matd, reactions) in params.materials
-        # Read MF23 sections from PENDF for this MAT
         mf23_data = _read_pendf_mf23(pendf_path, matd)
         isempty(mf23_data) && continue
 
@@ -148,48 +161,93 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
             end
         end
 
-        # Read ZA and AWR from PENDF
         za, awr = _read_za_awr_mf23(pendf_path, matd)
+        ff_mat = get(ff_data, matd, nothing)
 
         # Write MF1/MT451 header
         _write_gaminr_mf1(io, za, awr, ngg, egg, params.title, matd)
         _write_fend_line(io, matd)
 
-        # Write MF23 sections (group-averaged scalar cross sections)
-        for mt in mts_to_process
-            haskey(mf23_data, mt) || continue
-            energies, xs_vals = mf23_data[mt]
-            avg = _gaminr_group_average(energies, xs_vals, egg, params.iwt)
-            _write_gaminr_mf3_section(io, za, awr, matd, mt, ngg, avg, nl)
-        end
+        # Total heating accumulator (Fortran toth array, 2*ngg values)
+        # toth[2*g-1] = flux for group g (overwritten each reaction)
+        # toth[2*g]   = accumulated (heating_kerma × flux) for group g
+        toth = zeros(Float64, 2 * ngg)
 
-        # MT=621: heating KERMA = ∫E·σ_pe·W dE / ∫W dE per group
-        # Fortran gaminr computes this from the photoelectric (MT=602) XS
-        if haskey(mf23_data, 602)
-            pe_e, pe_xs = mf23_data[602]
-            heat_avg = _gaminr_heating_average(pe_e, pe_xs, egg, params.iwt)
-            _write_gaminr_mf3_section(io, za, awr, matd, 621, ngg, heat_avg, nl)
-        end
-
-        _write_fend_line(io, matd)  # FEND after MF23
-
-        # MF=26: scattering matrices
-        # Coherent (MT=502), Incoherent (MT=504), Pair production (MT=516)
-        ff_mat = get(ff_data, matd, nothing)
-        scatter_mts = filter(mt -> mt in (502, 504, 516), mts_to_process)
-        if ff_mat !== nothing && !isempty(scatter_mts)
-            for mt in scatter_mts
-                haskey(mf23_data, mt) || continue
-                energies, xs_vals = mf23_data[mt]
-                ff_tab = get(ff_mat, mt, nothing)
-                scat_matrix = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
-                                                     nl, mt, ff_tab)
-                _write_gaminr_mf6_section(io, za, awr, matd, mt, ngg, nl, scat_matrix)
+        for (mfd, mtd) in reaction_sequence
+            # Skip MTs not requested
+            if mtd != 621 && !(mtd in mts_to_process)
+                continue
             end
-            _write_fend_line(io, matd)  # FEND after MF26
+            # Skip MF26 if no form factors or no MF23 data for this MT
+            if mfd == 26 && (ff_mat === nothing || !haskey(mf23_data, mtd))
+                continue
+            end
+            if mfd == 23 && mtd != 621 && !haskey(mf23_data, mtd)
+                continue
+            end
+
+            # Fortran gaminr does NOT write FEND between interleaved MF=23/MF=26
+            # sections. Only SEND (asend) after each section, then MEND after material.
+
+            if mtd == 621
+                # Output accumulated total heating
+                _write_gaminr_mt621(io, za, awr, matd, ngg, toth)
+            elseif mfd == 23
+                # Scalar group-averaged cross section
+                energies, xs_vals = mf23_data[mtd]
+                avg, flux = _gaminr_group_average(energies, xs_vals, egg, params.iwt)
+
+                # For MT=602/522: gtff sets ff(1,2)=E → ng=2 feed columns
+                # → ans has 3 columns: flux, XS, heating
+                # Compute heating column: ∫E·σ·W dE / ∫W dE
+                if mtd in (602, 522)
+                    heat_avg, _ = _gaminr_heating_average(energies, xs_vals, egg, params.iwt)
+                    # Write MF23 section with ng2=3 (flux + XS + heating)
+                    # dspla normalizes: XS = ∫σW/∫W, heating = ∫EσW/∫W
+                    # Then heating accumulation: toth += heating_kerma * flux
+                    # Then ng2 decremented to 2 for output (heating stripped)
+                    for g in 1:ngg
+                        l = 2 * (g - 1)
+                        toth[l+1] = flux[g]  # overwrite with latest flux
+                        toth[l+2] += heat_avg[g] * flux[g]  # accumulate raw heating
+                    end
+                    # Output only XS (ng2=2, heating stripped) — matching Fortran
+                    _write_gaminr_mf3_section(io, za, awr, matd, mtd, ngg, (avg, flux), nl)
+                else
+                    _write_gaminr_mf3_section(io, za, awr, matd, mtd, ngg, (avg, flux), nl)
+                end
+            elseif mfd == 26
+                # Scattering matrix
+                energies, xs_vals = mf23_data[mtd]
+                ff_tab = get(ff_mat, mtd, nothing)
+                scat_matrix = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
+                                                     nl, mtd, ff_tab)
+                # Accumulate heating from scattering matrix (Fortran lines 388-395)
+                # Condition: ng2 != 2 AND mtd != 502 (coherent excluded)
+                # Compute flux once for this MT
+                _, mt_flux = _gaminr_group_average(energies, xs_vals, egg, params.iwt)
+                if mtd != 502
+                    for g in 1:ngg
+                        l = 2 * (g - 1)
+                        heating_kerma = scat_matrix[1, g, ngg + 2]
+                        toth[l+1] = mt_flux[g]
+                        toth[l+2] += heating_kerma * mt_flux[g]
+                    end
+                    # MT=504: strip total AND heating; MT=516: strip heating only
+                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl, scat_matrix,
+                                              mt_flux;
+                                              strip_heating=true, strip_total=(mtd == 504))
+                else
+                    # MT=502: no heating, no total/heating columns
+                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl, scat_matrix,
+                                              mt_flux;
+                                              strip_heating=true, strip_total=true)
+                end
+            end
         end
 
-        _write_fend_line(io, 0)     # MEND
+        # MEND (Fortran writes MAT=0 line after all sections for this material)
+        _write_fend_line(io, 0)
     end
 
     # TEND
@@ -367,6 +425,30 @@ function _write_gaminr_mf3_section(io::IO, za::Float64, awr::Float64,
     end
 
     # SEND
+    _write_send_line(io, mat, 23)
+end
+
+"""Write MT=621 total heating from accumulated toth array.
+Matches Fortran gaminr.f90 label 400 (lines 444-500).
+toth[2g-1] = flux, toth[2g] = accumulated (heating_kerma × flux)."""
+function _write_gaminr_mt621(io::IO, za::Float64, awr::Float64,
+                              mat::Int, ngg::Int, toth::Vector{Float64})
+    seq = 1
+    # HEAD: ZA, AWR, NL=1, NZ=1, 0, NGG
+    _write_cont_line(io, za, awr, 1, 1, 0, ngg, mat, 23, 621, seq); seq += 1
+
+    for g in 1:ngg
+        l = 2 * (g - 1)
+        flux = toth[l + 1]
+        raw_heating = toth[l + 2]
+        # Normalize: heating_kerma = raw_heating / flux (matches dspla line 1070)
+        heating_kerma = flux > 0 ? raw_heating / flux : 0.0
+        # Write [flux, heating_kerma] — ng2=2
+        _write_cont_line(io, 0.0, 0.0, 2, 1, 2, g, mat, 23, 621, seq); seq += 1
+        buf = format_endf_float(flux) * format_endf_float(heating_kerma)
+        _write_data_line(io, buf, mat, 23, 621, seq); seq += 1
+    end
+
     _write_send_line(io, mat, 23)
 end
 
@@ -618,13 +700,14 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
 end
 
 """Incoherent (Compton) scattering matrix — energy loss by recoil.
-Scattered photon E' = E / (1 + E/m_e c² (1 - cos θ)).
-The Legendre moments use Klein-Nishina formula × incoherent form factor."""
+Matches Fortran gtff MT=504 (gaminr.f90:1341-1464) + gpanel integration.
+The Fortran normalizes the angular distribution by siginc (total KN×S integral),
+then gpanel multiplies by σ_MF23. Heating = (E - <E'>) × σ_MF23."""
 function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     ngg = length(egg) - 1
     pl = zeros(Float64, nl)
     q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[1,1])
-    c3 = _GAMINR_C3  # E/(m_e c^2) conversion
+    c3 = _GAMINR_C3
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
@@ -640,30 +723,35 @@ function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, 
             smid = s1 + (emid - e1) / max(e2 - e1, 1e-30) * (s2 - s1)
             wmid = _gaminr_weight(iwt, emid)
             de = eb - ea
-            enow = c3 * emid  # E / (m_e c^2)
+            enow = c3 * emid
 
-            # Angular integration
+            # Compute normalized angular distribution at this energy
+            # matching Fortran gtff: integrate KN×S(q) over all angles,
+            # then normalize each sink group fraction by siginc.
+            # ff_raw[ig_sink] = Σ KN×S(q)×P_l × dμ (unnormalized)
+            # siginc = Σ KN×S(q) × dμ (total)
+            # ebar_raw = Σ KN×S(q)×E' × dμ (energy-weighted)
+            ff_raw = zeros(Float64, nl, ngg)
+            siginc = 0.0
+            ebar_raw = 0.0
+
             n_mu = 20
             for j in 1:n_mu
                 mu = -1.0 + (2.0 * j - 1.0) / n_mu
                 dmu = 2.0 / n_mu
 
-                # Scattered photon energy from Klein-Nishina kinematics
                 ep = emid / (1.0 + enow * (1.0 - mu))
                 ep <= 0 && continue
 
-                # Momentum transfer
                 q = _GAMINR_C1 * sqrt(emid^2 + ep^2 - 2.0 * emid * ep * mu)
                 ff_val = _interp_ff(q, q_vals, ff_vals)
 
-                # Klein-Nishina differential cross section
                 ratio = ep / emid
                 kn = 0.5 * _GAMINR_C2 * ratio^2 * (ratio + 1.0/ratio + mu^2 - 1.0)
-                dsig = kn * ff_val * ff_val
+                dsig = kn * ff_val  # S(q) used linearly (not squared)
 
                 _legndr!(pl, mu, nl)
 
-                # Find which sink group ep falls in
                 ig_sink = 0
                 for gs in 1:ngg
                     if ep >= egg[gs] && ep < egg[gs+1]
@@ -672,32 +760,45 @@ function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, 
                 end
                 ep >= egg[ngg+1] && (ig_sink = ngg)
                 ep < egg[1] && (ig_sink = 0)
-                ig_sink == 0 && continue
 
-                wt = smid * wmid * de * dmu
-                for il in 1:nl
-                    ans[il, ig, ig_sink] += wt * dsig * pl[il]
+                siginc += dsig * dmu
+                ebar_raw += dsig * ep * dmu
+
+                if ig_sink > 0
+                    for il in 1:nl
+                        ff_raw[il, ig_sink] += dsig * pl[il] * dmu
+                    end
                 end
-                # Heating: energy deposited = E - E'
-                ans[1, ig, ngg+2] += wt * dsig * (emid - ep)
+            end
+
+            # Normalize by siginc (Fortran lines 1456-1464)
+            if siginc > 0
+                ebar = ebar_raw / siginc  # average scattered photon energy
+                # heating = (E - <E'>) per interaction (Fortran line 1458)
+                heating_per_interaction = emid - ebar
+
+                # Accumulate into ans: σ_MF23 × W × (normalized_fraction) × dE
+                # Matching Fortran gpanel: rr = σ × W × dE, ans += rr × ff_normalized
+                wt = smid * wmid * de
+                for gs in 1:ngg
+                    for il in 1:nl
+                        ans[il, ig, gs] += wt * (ff_raw[il, gs] / siginc)
+                    end
+                end
+                # Total column = σ_MF23 (since fractions sum to ~1)
+                ans[1, ig, ngg+1] += wt * 1.0
+                # Heating column = σ_MF23 × (E - <E'>)
+                ans[1, ig, ngg+2] += wt * heating_per_interaction
             end
         end
 
-        # Normalize by flux
+        # Normalize by flux (matching dspla)
         for ig_sink in 1:ngg+2
             for il in 1:nl
                 if flux[ig] > 0
                     ans[il, ig, ig_sink] /= flux[ig]
                 end
             end
-        end
-        # Total (column ngg+1) = sum over sink groups
-        for il in 1:nl
-            tot = 0.0
-            for gs in 1:ngg
-                tot += ans[il, ig, gs]
-            end
-            ans[il, ig, ngg+1] = tot
         end
     end
 end
@@ -759,16 +860,31 @@ end
 # =========================================================================
 
 """Write one MF=26 section in GENDF format for a scattering matrix.
-ans[il, ig_source, ig_sink] is the transfer matrix."""
+ans[il, ig_source, ig_sink] is the transfer matrix.
+flux[ig] is the group flux.
+strip_heating: remove heating column (Fortran ng2=ng2-1)
+strip_total: also remove total column (Fortran: if mtd==504, ng2=ng2-1)
+GENDF format: position 1 = flux (NL Legendre moments), positions 2+ = scatter data.
+Matching Fortran gpanel/dspla output at gaminr.f90:400-429."""
 function _write_gaminr_mf6_section(io::IO, za::Float64, awr::Float64,
                                     mat::Int, mt::Int, ngg::Int, nl::Int,
-                                    ans::Array{Float64, 3})
+                                    ans::Array{Float64, 3},
+                                    group_flux::Vector{Float64}=Float64[];
+                                    strip_heating::Bool=false,
+                                    strip_total::Bool=false)
     seq = 1
-    # HEAD: ZA, AWR, NL, 1, 0, NGG
     _write_cont_line(io, za, awr, nl, 1, 0, ngg, mat, 26, mt, seq); seq += 1
 
+    # Compute flux for each group (needed for position 1)
+    # The flux is stored in the ans computation but not in the array.
+    # We reconstruct it from the total column: total = sum of scatter groups.
+    # Actually, the Fortran writes flux from ans(il,1,1) which is the raw flux integral.
+    # Our scatter matrix doesn't store flux. We need it from the caller.
+    # For now, use the group flux from the parent computation.
+    # The flux values are repeated for all NL Legendre orders in the Fortran output.
+
     for ig in 1:ngg
-        # Find the non-zero sink group range
+        # Find non-zero sink group range
         iglo = ngg + 1; ighi = 0
         for gs in 1:ngg
             if abs(ans[1, ig, gs]) > 0
@@ -776,30 +892,52 @@ function _write_gaminr_mf6_section(io::IO, za::Float64, awr::Float64,
                 ighi = max(ighi, gs)
             end
         end
-        # Include total and heating columns
-        ng2 = ighi >= iglo ? ighi - iglo + 1 + 2 : 2  # +2 for total and heating
-        if ighi < iglo
-            iglo = ig; ng2 = 2  # just total and heating
+
+        n_scatter = ighi >= iglo ? ighi - iglo + 1 : 0
+        if n_scatter == 0
+            iglo = ig
         end
 
-        nw = nl * ng2
-        # CONT: 0, 0, ng2, iglo, nw, ig
-        _write_cont_line(io, 0.0, 0.0, ng2, iglo, nw, ig, mat, 26, mt, seq); seq += 1
+        # ng2 = 1(flux) + n_scatter + 1(total) + 1(heating) [before stripping]
+        # But Fortran computes ng2 from gpanel's ng which counts scatter+total+heating
+        # then adds 1 for flux implicitly. The GENDF ng2 value includes flux.
+        ng2_full = 1 + n_scatter + (n_scatter > 0 ? 2 : 0)  # flux + scatter + total + heating
+        ng2_out = ng2_full
+        if strip_heating && n_scatter > 0; ng2_out -= 1; end
+        if strip_total && n_scatter > 0; ng2_out -= 1; end
+        if n_scatter == 0; ng2_out = 2; end  # just flux + zero (Fortran igzero handling)
 
-        # Data: linearized as (il=1..nl, ig_sink) column-major
-        # Order: for each sink group (iglo..ighi, then total, heating), write nl values
+        nw = nl * ng2_out
+        _write_cont_line(io, 0.0, 0.0, ng2_out, iglo, nw, ig, mat, 26, mt, seq); seq += 1
+
         buf = ""
         vals_written = 0
-        for gs_idx in 1:ng2
-            if gs_idx <= ng2 - 2
-                gs = iglo + gs_idx - 1
-            elseif gs_idx == ng2 - 1
-                gs = ngg + 1  # total
-            else
-                gs = ngg + 2  # heating
-            end
+
+        # Build list of columns to write
+        columns = Int[]  # indices into ans array (0 = flux)
+        push!(columns, 0)  # position 1 = flux
+        for gs in iglo:ighi
+            push!(columns, gs)  # scatter groups
+        end
+        if n_scatter > 0
+            if !strip_total; push!(columns, -1); end  # total (ngg+1)
+            if !strip_heating; push!(columns, -2); end  # heating (ngg+2)
+        end
+
+        for col in columns
             for il in 1:nl
-                buf *= format_endf_float(ans[il, ig, gs])
+                val = if col == 0
+                    # Flux: Fortran writes ans(il,1,1) for all Legendre orders
+                    # All Legendre orders get the same flux value in gaminr
+                    !isempty(group_flux) ? group_flux[ig] : 0.0
+                elseif col == -1
+                    ans[il, ig, ngg + 1]  # total
+                elseif col == -2
+                    ans[il, ig, ngg + 2]  # heating
+                else
+                    ans[il, ig, col]  # scatter group
+                end
+                buf *= format_endf_float(val)
                 vals_written += 1
                 if vals_written % 6 == 0
                     _write_data_line(io, buf, mat, 26, mt, seq); seq += 1

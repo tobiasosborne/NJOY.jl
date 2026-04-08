@@ -795,11 +795,12 @@ function _dpend(pendf_path::String, mat::Int, mt::Int,
         return xs_raw[idx], (idx < ne ? energies_raw[idx + 1] : ehigh + 1.0)
     end
 
-    # Initialize
+    # Initialize — matching Fortran dpend state machine (dtfr.f90:1222-1268)
     e = 0.0
     s, enext = gety1_interp(e)
     ixlast = -100
     elast = enext
+    ns = 0
     while true
         e = enext
         if e > step * elast
@@ -820,30 +821,65 @@ function _dpend(pendf_path::String, mat::Int, mt::Int,
 
         ix = trunc(Int, (log10(e) - axl) * fact)
 
-        if ix == ixlast
-            # Thinning logic
-            if npts > 0 && s == y_out[npts]
-                x_out[npts] = e
-                y_out[npts] = s
-                enext > ehigh && break
-                continue
-            end
-            # ns-based logic: simplified — keep point if direction changes
-            if npts >= 2 && (s - y_out[npts]) * (y_out[npts] - y_out[npts - 1]) > 0.0
-                # Same direction — replace last point
-                x_out[npts] = e
-                y_out[npts] = s
-                enext > ehigh && break
-                continue
-            end
+        if ix != ixlast
+            # New pixel column — reset state, add point (label 230)
+            ixlast = ix
+            ns = 0
+            @goto add_point
         end
-        ixlast = ix
 
+        # Same pixel column (label 220)
+        if npts > 0 && s == y_out[npts]
+            @goto replace_point  # label 260
+        end
+
+        # Computed GOTO (label 1242): go to (230,240,240,250,270),ns
+        if ns == 1
+            @goto add_point      # ns=1 → label 230
+        elseif ns == 2 || ns == 3
+            @goto check_direction # ns=2,3 → label 240
+        elseif ns == 4
+            @goto sort_extremes  # ns=4 → label 250
+        elseif ns >= 5
+            @goto update_extremes # ns=5+ → label 270
+        else
+            @goto add_point      # ns=0 → label 230 (shouldn't happen, new pixel resets)
+        end
+
+        @label check_direction   # label 240
+        if npts >= 2 && (s - y_out[npts]) * (y_out[npts] - y_out[npts - 1]) > 0.0
+            @goto replace_point  # same direction → label 260
+        end
+
+        @label add_point         # label 230
         npts += 1
         npts > ndim && break
+        ns += 1
+        @goto replace_point     # fall through to 260
+
+        @label sort_extremes     # label 250
+        ns = 5
+        s2 = y_out[npts - 2]
+        s1 = y_out[npts - 1]
+        if s2 <= s1
+            y_out[npts - 2] = s1
+            y_out[npts - 1] = s2
+        end
+        # fall through to label 270
+
+        @label update_extremes   # label 270
+        if s > y_out[npts - 2]
+            y_out[npts - 2] = s
+            @goto replace_point
+        end
+        # label 280
+        if s < y_out[npts - 1]
+            y_out[npts - 1] = s
+        end
+
+        @label replace_point     # label 260
         x_out[npts] = e
         y_out[npts] = s
-
         enext > ehigh && break
     end
 
