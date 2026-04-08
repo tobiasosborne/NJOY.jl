@@ -413,13 +413,21 @@ function _write_gaminr_mf3_section(io::IO, za::Float64, awr::Float64,
     # HEAD: ZA, AWR, NL, NZ, 0, NGG
     _write_cont_line(io, za, awr, nl, nz, 0, ngg, mat, 23, mt, seq); seq += 1
 
-    # One LIST record per group
+    # One LIST record per group — skip below-threshold zero groups
+    # matching Fortran igzero logic (gaminr.f90:400)
+    igzero = false
     for g in 1:ngg
-        nw = nl * nz  # number of data words = 1 for scalar
-        ng2 = 2       # number of secondary groups (flux + xs) = actually ng2=2 for MF3
-        # From oracle: each group record has: 0,0, ng2=2, ig2lo=1, nw=2, ig=group
+        # Check if this group has nonzero data (Fortran dspla sets igzero=1)
+        if abs(avg[g]) >= 1e-9
+            igzero = true
+        end
+        # Write only when igzero seen or at last group
+        if !igzero && g < ngg
+            continue
+        end
+        nw = nl * nz
+        ng2 = 2
         _write_cont_line(io, 0.0, 0.0, ng2, 1, nw * ng2, g, mat, 23, mt, seq); seq += 1
-        # Data: flux, sigma_avg
         buf = format_endf_float(flux[g]) * format_endf_float(avg[g])
         _write_data_line(io, buf, mat, 23, mt, seq); seq += 1
     end
