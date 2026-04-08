@@ -2886,3 +2886,38 @@ println("tape34: $(count(i -> jl[i] == ref[i], 1:n)) / $(length(ref)) BIT-IDENTI
 **Trap 147 (NEW)**: Test dtfr with Fortran GENDF to isolate dtfr bugs from gaminr bugs. Julia gaminr MT621 is wrong → tape34 shows ~35% match but this is gaminr, not dtfr.
 
 See `worklog/T03_phase2_handoff.md` for full session details.
+
+### Phase 43: gaminr total heating + incoherent normalization + dpend state machine
+
+**Goal**: Get T03 tape37 passing at 1e-5.
+
+**5 bugs found and fixed:**
+
+1. **MT=621 total heating (CRITICAL)**: Julia computed heating only from photoelectric (MT=602). Fortran accumulates from incoherent (MT=504), pair production (MT=516), AND photoelectric. The Fortran gtff sets `ff(1,2)=e` for MT=602, creating a heating column that dspla normalizes in-place before accumulation into `toth`. Added `toth` array and accumulation in `_write_gaminr_tape`. MT=621 group 1 heating went from 7.9 → 4488 eV·barn (matching Fortran). Trap 148.
+
+2. **Incoherent scattering normalization (CRITICAL)**: Julia multiplied σ_MF23 × KN × S(q) = σ² (3-4x too small). Fortran normalizes the angular distribution by siginc (gtff lines 1456-1464), then gpanel multiplies by σ_MF23. Rewrote `_gaminr_incoherent_matrix!` to normalize by siginc before multiplying by σ_MF23. Also fixed: S(q) was squared for incoherent — MF27/MT=504 stores S(q,Z) not F(q), use linearly. Traps 149-150.
+
+3. **GENDF section ordering**: Interleaved MF23/MF26 per MT matching Fortran mtlst/mflst arrays. No FEND between interleaved sections. Trap 151.
+
+4. **MF26 format**: Added flux as position 1 in LIST records. Coherent (MT=502) now ng2=2. Below-threshold skip for MF23/MT=516. Traps 153-155.
+
+5. **_dpend thinning state machine**: Implemented full 5-state machine (Fortran computed GOTO, states 0-5: sort and keep extremes). Plot tape 1627 → 1711 (structural match). Trap 152.
+
+**Results:**
+```
+tape33 (GENDF): 688 → 632 (target: 604, diff: +28)
+tape36 (plot):  1627 → 1711 (target: 1711) ✓ STRUCTURAL MATCH
+tape37 (PS):    9038 → 9110 (target: 9274)
+MT=621 g1:      7.9 → 4488 (target: 4488) ✓ EXACT
+MT=621 g12:     59k → 463k (target: 413k, 12% off)
+```
+
+**Remaining for T03 1e-5** (see `worklog/T03_phase3_handoff.md`):
+1. Port Fortran gtff incoherent integration (Lobatto over p' panels, gaminr.f90:1341-1464) to replace 20-pt midpoint. This fixes both the 12% heating error and the -14 line GENDF format diff.
+2. Fix pair production MF26 format (NL=1 not NL=5, Fortran line 300)
+3. Fix MAT=92 MT=621 (form factor loading)
+4. Apply igzero skip to MF26 sections
+
+**Trap 148-158**: See worklog/T03_phase3_handoff.md for full trap descriptions.
+
+**Files changed**: `src/orchestration/modules/gaminr.jl` (heating accumulation, incoherent normalization, section ordering, MF26 writer), `src/orchestration/modules/dtfr.jl` (_dpend state machine)
