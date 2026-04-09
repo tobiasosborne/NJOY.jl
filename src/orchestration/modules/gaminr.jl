@@ -220,8 +220,11 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
                 # Scattering matrix
                 energies, xs_vals = mf23_data[mtd]
                 ff_tab = get(ff_mat, mtd, nothing)
+                # Fortran NL: nl=lord+1 for MF26, BUT nl=1 for MT=516 (pair prod isotropic)
+                # gaminr.f90:298-300: nl=1; if(mfd.eq.26) nl=lord+1; if(mtd.eq.516) nl=1
+                nl_mt = (mtd == 516) ? 1 : nl
                 scat_matrix = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
-                                                     nl, mtd, ff_tab)
+                                                     nl_mt, mtd, ff_tab)
                 # Accumulate heating from scattering matrix (Fortran lines 388-395)
                 # Condition: ng2 != 2 AND mtd != 502 (coherent excluded)
                 # Compute flux once for this MT
@@ -234,12 +237,13 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
                         toth[l+2] += heating_kerma * mt_flux[g]
                     end
                     # MT=504: strip total AND heating; MT=516: strip heating only
-                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl, scat_matrix,
+                    # MT=504: strip total AND heating; MT=516: also strip total (only yield remains)
+                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
                                               mt_flux;
-                                              strip_heating=true, strip_total=(mtd == 504))
+                                              strip_heating=true, strip_total=(mtd == 504 || mtd == 516))
                 else
                     # MT=502: no heating, no total/heating columns
-                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl, scat_matrix,
+                    _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
                                               mt_flux;
                                               strip_heating=true, strip_total=true)
                 end
@@ -522,21 +526,18 @@ function _interp_ff(q::Float64, q_vals::Vector{Float64}, ff_vals::Vector{Float64
     q <= 0 && return ff_vals[1]
     q <= q_vals[1] && return ff_vals[1]
     q >= q_vals[end] && return ff_vals[end]
-
-    for i in 1:length(q_vals)-1
-        if q <= q_vals[i+1]
-            q1 = q_vals[i]; q2 = q_vals[i+1]
-            f1 = ff_vals[i]; f2 = ff_vals[i+1]
-            if q1 > 0 && q2 > 0 && f1 > 0 && f2 > 0
-                frac = log(q / q1) / log(q2 / q1)
-                return f1 * (f2 / f1)^frac
-            else
-                frac = (q - q1) / (q2 - q1)
-                return max(f1 + frac * (f2 - f1), 0.0)
-            end
-        end
+    # Binary search for O(log N)
+    i = searchsortedlast(q_vals, q)
+    i = clamp(i, 1, length(q_vals) - 1)
+    q1 = q_vals[i]; q2 = q_vals[i+1]
+    f1 = ff_vals[i]; f2 = ff_vals[i+1]
+    if q1 > 0 && q2 > 0 && f1 > 0 && f2 > 0
+        frac = log(q / q1) / log(q2 / q1)
+        return f1 * (f2 / f1)^frac
+    else
+        frac = q2 > q1 ? (q - q1) / (q2 - q1) : 0.0
+        return max(f1 + frac * (f2 - f1), 0.0)
     end
-    return ff_vals[end]
 end
 
 # =========================================================================
@@ -586,11 +587,24 @@ end
 # Matches Fortran gaminr.f90 gtff coherent/incoherent/pair production
 # =========================================================================
 
-# Physical constants from gaminr.f90 lines 1198-1202
-const _GAMINR_C1 = 57.03156e-6   # momentum transfer conversion
+# Physical constants from gaminr.f90 lines 1198-1210
+const _GAMINR_C1 = 57.03156e-6   # momentum transfer conversion (coherent)
 const _GAMINR_C2 = 0.249467      # Klein-Nishina r_e^2/2
-const _GAMINR_C3 = 1.95693e-6    # E/(m_e c^2)
-const _GAMINR_EPAIR = 0.511e6    # electron rest mass in eV
+const _GAMINR_C3 = 1.95693e-6    # E/(m_e c^2) — converts eV to dimensionless alpha
+const _GAMINR_C4 = 0.0485262     # form factor x → q conversion
+const _GAMINR_C5 = 20.60744      # dimensionless → x [A^-1] conversion
+const _GAMINR_EPAIR = 0.511e6    # electron rest mass in eV (phys.f90 epair)
+const _GAMINR_RNDOFF = 1.0000001 # nudge past breakpoint (gaminr.f90:1204)
+const _GAMINR_CLOSE = 0.99999    # backward scatter threshold (gaminr.f90:1208)
+
+# Gauss-Lobatto 6-point quadrature (gaminr.f90:1183-1188)
+const _GL6_PTS = Float64[-1.0, -0.76505532, -0.28523152, 0.28523152, 0.76505532, 1.0]
+const _GL6_WTS = Float64[0.06666667, 0.37847496, 0.55485838, 0.55485838, 0.37847496, 0.06666667]
+# 10-point (gaminr.f90:1189-1197)
+const _GL10_PTS = Float64[-1.0, -0.9195339082, -0.7387738651, -0.4779249498,
+    -0.1652789577, 0.1652789577, 0.4779249498, 0.7387738651, 0.9195339082, 1.0]
+const _GL10_WTS = Float64[0.0222222222, 0.1333059908, 0.2248893420, 0.2920426836,
+    0.3275397612, 0.3275397612, 0.2920426836, 0.2248893420, 0.1333059908, 0.0222222222]
 
 """Compute Legendre polynomials P_l(x) for l=0..nl-1."""
 function _legndr!(pl::Vector{Float64}, x::Float64, nl::Int)
@@ -707,107 +721,159 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
     end
 end
 
-"""Incoherent (Compton) scattering matrix — energy loss by recoil.
-Matches Fortran gtff MT=504 (gaminr.f90:1341-1464) + gpanel integration.
-The Fortran normalizes the angular distribution by siginc (total KN×S integral),
-then gpanel multiplies by σ_MF23. Heating = (E - <E'>) × σ_MF23."""
+"""Incoherent (Compton) scattering matrix — Gauss-Lobatto in p-space.
+Faithful port of Fortran gtff MT=504 (gaminr.f90:1338-1464).
+Integrates in scattered-photon momentum p-space with adaptive panels
+at group boundaries + form-factor breakpoints. ~23-31 panels per energy."""
 function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     ngg = length(egg) - 1
     pl = zeros(Float64, nl)
-    q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[1,1])
-    c3 = _GAMINR_C3
+    q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[0,1])
+    c2 = _GAMINR_C2; c3 = _GAMINR_C3; c4 = _GAMINR_C4; c5 = _GAMINR_C5
+    rndoff = _GAMINR_RNDOFF; close_val = _GAMINR_CLOSE; emax_val = 1.0e12
+    # zz = S(x→∞) = Z for incoherent (line 1240: zz=pff(l+1)=C2=Z)
+    zz = isempty(ff_vals) ? 1.0 : ff_vals[end]
+    nq = nl > 6 ? 10 : 6
+    qp = nq == 6 ? _GL6_PTS : _GL10_PTS
+    qw = nq == 6 ? _GL6_WTS : _GL10_WTS
+    ff_work = zeros(Float64, nl, ngg)
+    arg = zeros(Float64, nl)
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
-
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
-
             emid = (ea + eb) / 2.0
             smid = s1 + (emid - e1) / max(e2 - e1, 1e-30) * (s2 - s1)
             wmid = _gaminr_weight(iwt, emid)
             de = eb - ea
-            enow = c3 * emid
 
-            # Compute normalized angular distribution at this energy
-            # matching Fortran gtff: integrate KN×S(q) over all angles,
-            # then normalize each sink group fraction by siginc.
-            # ff_raw[ig_sink] = Σ KN×S(q)×P_l × dμ (unnormalized)
-            # siginc = Σ KN×S(q) × dμ (total)
-            # ebar_raw = Σ KN×S(q)×E' × dμ (energy-weighted)
-            ff_raw = zeros(Float64, nl, ngg)
-            siginc = 0.0
-            ebar_raw = 0.0
+            # === gtff MT=504 (gaminr.f90:1338-1464) ===
+            enow = c3 * emid; enowi = 1.0/enow; enow2 = enow*enow
+            xzz = c5 * sqrt(enow / 500.0)
+            q2m = (2.0*enow*(1.0+enow)/(1.0+2.0*enow))^2
 
-            n_mu = 20
-            for j in 1:n_mu
-                mu = -1.0 + (2.0 * j - 1.0) / n_mu
-                dmu = 2.0 / n_mu
+            # Find source group (line 1339-1342)
+            igp = 1
+            while igp < ngg && emid >= egg[igp+1]; igp += 1; end
+            ig_src = igp
 
-                ep = emid / (1.0 + enow * (1.0 - mu))
-                ep <= 0 && continue
+            # Init p-space integration (lines 1346-1367)
+            pnow = enow; xnow = 0.0
+            fill!(ff_work, 0.0); fill!(arg, 0.0)
+            siginc = 0.0; ebar_acc = 0.0
 
-                q = _GAMINR_C1 * sqrt(emid^2 + ep^2 - 2.0 * emid * ep * mu)
-                ff_val = _interp_ff(q, q_vals, ff_vals)
+            # Form factor init (lines 1350-1357)
+            # terpa state: ip tracks position in q_vals table
+            ff_ip = 2  # terpa pointer: next entry to check
+            if xzz <= zz
+                snow = _interp_ff(0.0, q_vals, ff_vals)
+                xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+            else
+                snow = zz; xnext = emax_val
+            end
+            if emid == egg[igp]; igp -= 1; end
 
-                ratio = ep / emid
-                kn = 0.5 * _GAMINR_C2 * ratio^2 * (ratio + 1.0/ratio + mu^2 - 1.0)
-                dsig = kn * ff_val  # S(q) used linearly (not squared)
-
-                _legndr!(pl, mu, nl)
-
-                ig_sink = 0
-                for gs in 1:ngg
-                    if ep >= egg[gs] && ep < egg[gs+1]
-                        ig_sink = gs; break
+            # Panel loop (lines 1372-1441)
+            ifini = false
+            while !ifini
+                # Inner loop: advance through FF breakpoints (lines 1373-1388)
+                idone = false
+                unext = -1.0
+                while !idone
+                    q2 = (c4 * xnext)^2
+                    unext = -1.0
+                    if q2 > q2m
+                        idone = true
+                    else
+                        denom = q2 - enow2 - 2.0*enow
+                        abs(denom) < 1e-30 && (idone = true; continue)
+                        unext = 1.0 - ((1.0-q2*enowi) - sqrt(1.0+q2)) / denom
+                        unext < -1.0 && (unext = -1.0)
+                        if unext < close_val
+                            idone = true
+                        else
+                            # Advance past near-forward breakpoint (lines 1385-1386)
+                            xnow = xnext * rndoff
+                            xzz <= zz && (snow = _interp_ff(xnow, q_vals, ff_vals))
+                            ff_ip += 1
+                            xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+                        end
                     end
                 end
-                ep >= egg[ngg+1] && (ig_sink = ngg)
-                ep < egg[1] && (ig_sink = 0)
 
-                siginc += dsig * dmu
-                ebar_raw += dsig * ep * dmu
+                # Panel boundaries in p-space (lines 1389-1393)
+                pnext = enow / (1.0 + 2.0*enow)
+                igp > 0 && (pnext = c3 * egg[igp])
+                px = enow / (1.0 + enow*(1.0 - unext))
+                px > pnext && (pnext = px)
+                pnext > pnow/rndoff && (pnext = pnow/rndoff)
 
-                if ig_sink > 0
-                    for il in 1:nl
-                        ff_raw[il, ig_sink] += dsig * pl[il] * dmu
+                # GL quadrature over [pnext, pnow] (lines 1394-1433)
+                aq = (pnext + pnow) / 2.0; bq = (pnext - pnow) / 2.0
+                unow = 1.0
+                for iq in 1:nq
+                    uq = aq + bq*qp[iq]; wq = -c2*bq*qw[iq]
+                    pnow = uq  # line 1406
+                    if iq > 1
+                        pnowi = 1.0/pnow
+                        unow = 1.0 + enowi - pnowi
+                        unow > 1.0 && (unow = 1.0)
+                        if xzz <= zz
+                            rm2 = max((1.0-unow)/2.0, 0.0); rm = sqrt(rm2)
+                            rt = 1.0 + 2.0*enow*rm2
+                            xnow = c5*2.0*enow*rm*sqrt(max(rt+enow2*rm2,0.0))/rt
+                            xnow *= rndoff
+                            snow = _interp_ff(xnow, q_vals, ff_vals)
+                            # Advance ff_ip to match terpa cursor (line 1417)
+                            while ff_ip <= length(q_vals) && q_vals[ff_ip] < xnow
+                                ff_ip += 1
+                            end
+                            xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+                        end
+                        _legndr!(pl, unow, nl)
+                        dk = unow - 1.0
+                        fact = snow*(enow*pnowi + pnow*enowi + dk*(2.0+dk))/enow2
+                        for il in 1:nl; arg[il] = fact*pl[il]; end
                     end
+                    if igp > 0
+                        for il in 1:nl; ff_work[il, igp] += wq*arg[il]; end
+                    end
+                    siginc += wq*arg[1]
+                    ebar_acc += wq*arg[1]*pnow/c3
+                end
+
+                # Termination (lines 1434-1441)
+                if unow < -close_val
+                    ifini = true
+                else
+                    igp > 0 && pnext <= c3*egg[igp] && (igp -= 1)
                 end
             end
 
-            # Normalize by siginc (Fortran lines 1456-1464)
+            # Post-processing: normalize by siginc (lines 1443-1464)
             if siginc > 0
-                ebar = ebar_raw / siginc  # average scattered photon energy
-                # heating = (E - <E'>) per interaction (Fortran line 1458)
-                heating_per_interaction = emid - ebar
-
-                # Accumulate into ans: σ_MF23 × W × (normalized_fraction) × dE
-                # Matching Fortran gpanel: rr = σ × W × dE, ans += rr × ff_normalized
+                ebar = ebar_acc / siginc
+                heating_per = emid - ebar
+                for gs in 1:ngg; for il in 1:nl
+                    ff_work[il, gs] /= siginc
+                end; end
                 wt = smid * wmid * de
-                for gs in 1:ngg
-                    for il in 1:nl
-                        ans[il, ig, gs] += wt * (ff_raw[il, gs] / siginc)
-                    end
-                end
-                # Total column = σ_MF23 (since fractions sum to ~1)
-                ans[1, ig, ngg+1] += wt * 1.0
-                # Heating column = σ_MF23 × (E - <E'>)
-                ans[1, ig, ngg+2] += wt * heating_per_interaction
+                for gs in 1:ngg; for il in 1:nl
+                    ans[il, ig, gs] += wt * ff_work[il, gs]
+                end; end
+                ans[1, ig, ngg+1] += wt
+                ans[1, ig, ngg+2] += wt * heating_per
             end
         end
-
-        # Normalize by flux (matching dspla)
-        for ig_sink in 1:ngg+2
-            for il in 1:nl
-                if flux[ig] > 0
-                    ans[il, ig, ig_sink] /= flux[ig]
-                end
-            end
-        end
+        # Normalize by flux (dspla)
+        for ig_sink in 1:ngg+2; for il in 1:nl
+            flux[ig] > 0 && (ans[il, ig, ig_sink] /= flux[ig])
+        end; end
     end
 end
 
@@ -829,16 +895,19 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
-        # Pair production threshold: E > 2 * m_e c^2 = 1.022 MeV
-        elo < 2.0 * epair && continue
+        # Skip groups entirely below threshold
+        ehi <= 2.0 * epair && continue
         flux[ig] <= 0 && continue
 
-        # Group-averaged pair production XS
+        # Group-averaged pair production XS (per-energy threshold check)
         num = 0.0; den = 0.0
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
             ea = max(e1, elo); eb = min(e2, ehi)
+            ea >= eb && continue
+            # Per-energy threshold: only include panels above pair threshold
+            ea < 2.0 * epair && (ea = 2.0 * epair)
             ea >= eb && continue
             if e2 > e1
                 fa = (ea - e1) / (e2 - e1); fb = (eb - e1) / (e2 - e1)
@@ -891,6 +960,7 @@ function _write_gaminr_mf6_section(io::IO, za::Float64, awr::Float64,
     # For now, use the group flux from the parent computation.
     # The flux values are repeated for all NL Legendre orders in the Fortran output.
 
+    igzero_seen = false  # Fortran igzero flag: have we seen any nonzero data?
     for ig in 1:ngg
         # Find non-zero sink group range
         iglo = ngg + 1; ighi = 0
@@ -905,6 +975,14 @@ function _write_gaminr_mf6_section(io::IO, za::Float64, awr::Float64,
         if n_scatter == 0
             iglo = ig
         end
+
+        # Fortran igzero skip (dspla line 1072, output line 400):
+        # only write when igzero!=0 (nonzero data found) OR ig==ngg (last group)
+        # Fortran dspla checks NORMALIZED values: ans(il,1,i)/ans(il,1,1) >= 1e-9
+        # We check the un-normalized scatter values (already flux-divided)
+        has_data = n_scatter > 0 || any(abs(ans[il, ig, gs]) > 0 for il in 1:nl for gs in 1:ngg)
+        if has_data; igzero_seen = true; end
+        if !igzero_seen && ig < ngg; continue; end
 
         # ng2 = 1(flux) + n_scatter + 1(total) + 1(heating) [before stripping]
         # But Fortran computes ng2 from gpanel's ng which counts scatter+total+heating
