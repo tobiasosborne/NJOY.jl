@@ -354,47 +354,61 @@ function _read_za_awr_mf23(pendf_path::String, mat::Int)
 end
 
 """Compute group-averaged cross sections matching Fortran gpanel.
-Uses Gauss-Lobatto quadrature (10-point) with linear interpolation and 1/E weight."""
+Trapezoidal integration with sub-panel splitting at weight function breakpoints.
+Matches Fortran gpanel energy integration for MF23 (nq=2 trapezoidal).
+Weight function breakpoints from gtflx/terpa ensure panels don't span
+regions where W(E) changes interpolation slope."""
 function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float64},
                                 egg::Vector{Float64}, iwt::Int)
     ngg = length(egg) - 1
-    # For each group: integrate sigma(E) * w(E) dE / integral w(E) dE
-    # Using trapezoidal over the PENDF panel grid (matching Fortran)
     avg = Vector{Float64}(undef, ngg)
     flux = Vector{Float64}(undef, ngg)
 
+    # Weight function breakpoints for iwt=3 (the only tabulated weight)
+    # From Fortran gnwtf TAB1: 4 points at [1e3, 1e5, 1e7, 3e7]
+    # Panels that span these energies should be split there.
+    wt_breaks = iwt == 3 ? _GAMINR_WT1_E : Float64[]
+
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
-        num = 0.0  # integral sigma*w dE
-        den = 0.0  # integral w dE
+        num = 0.0; den = 0.0
 
-        # Find PENDF points within [elo, ehi]
-        # Use trapezoidal integration on the PENDF grid
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
 
-            # Clip to group bounds
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
 
-            # Interpolate XS at clipped boundaries
-            if e2 > e1
-                frac_a = (ea - e1) / (e2 - e1)
-                frac_b = (eb - e1) / (e2 - e1)
-            else
-                frac_a = 0.0; frac_b = 0.0
+            # Build sub-panel boundaries: [ea, ...breakpoints..., eb]
+            # Insert weight function breakpoints that fall within (ea, eb)
+            sub_bounds = Float64[ea]
+            for bp in wt_breaks
+                if bp > ea && bp < eb
+                    push!(sub_bounds, bp)
+                end
             end
-            sa = s1 + frac_a * (s2 - s1)
-            sb = s1 + frac_b * (s2 - s1)
+            push!(sub_bounds, eb)
 
-            # Trapezoidal with weight function
-            wa = _gaminr_weight(iwt, ea)
-            wb = _gaminr_weight(iwt, eb)
+            for k in 1:length(sub_bounds)-1
+                pa, pb = sub_bounds[k], sub_bounds[k+1]
+                # Linear interpolation of σ on PENDF panel
+                if e2 > e1
+                    fa = (pa - e1) / (e2 - e1)
+                    fb = (pb - e1) / (e2 - e1)
+                else
+                    fa = 0.0; fb = 0.0
+                end
+                spa = s1 + fa * (s2 - s1)
+                spb = s1 + fb * (s2 - s1)
 
-            de = eb - ea
-            num += (sa * wa + sb * wb) * de / 2.0
-            den += (wa + wb) * de / 2.0
+                wa = _gaminr_weight(iwt, pa)
+                wb = _gaminr_weight(iwt, pb)
+
+                dp = pb - pa
+                num += (spa * wa + spb * wb) * dp / 2.0
+                den += (wa + wb) * dp / 2.0
+            end
         end
 
         avg[g] = den > 0 ? num / den : 0.0
@@ -545,12 +559,13 @@ end
 # =========================================================================
 
 """Compute heating KERMA group averages: ∫E·σ·W dE / ∫W dE per group.
-Matches Fortran gaminr heating calculation."""
+Matches Fortran gaminr heating calculation with weight function breakpoint splitting."""
 function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Float64},
                                   egg::Vector{Float64}, iwt::Int)
     ngg = length(egg) - 1
     avg = Vector{Float64}(undef, ngg)
     flux = Vector{Float64}(undef, ngg)
+    wt_breaks = iwt == 3 ? _GAMINR_WT1_E : Float64[]
 
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
@@ -562,18 +577,25 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
 
-            if e2 > e1
-                fa = (ea - e1) / (e2 - e1); fb = (eb - e1) / (e2 - e1)
-            else
-                fa = 0.0; fb = 0.0
+            sub_bounds = Float64[ea]
+            for bp in wt_breaks
+                bp > ea && bp < eb && push!(sub_bounds, bp)
             end
-            sa = s1 + fa * (s2 - s1); sb = s1 + fb * (s2 - s1)
-            wa = _gaminr_weight(iwt, ea); wb = _gaminr_weight(iwt, eb)
+            push!(sub_bounds, eb)
 
-            de = eb - ea
-            # Heating: integrate E * sigma * W
-            num += (ea * sa * wa + eb * sb * wb) * de / 2.0
-            den += (wa + wb) * de / 2.0
+            for k in 1:length(sub_bounds)-1
+                pa, pb = sub_bounds[k], sub_bounds[k+1]
+                if e2 > e1
+                    fa = (pa - e1) / (e2 - e1); fb = (pb - e1) / (e2 - e1)
+                else
+                    fa = 0.0; fb = 0.0
+                end
+                spa = s1 + fa * (s2 - s1); spb = s1 + fb * (s2 - s1)
+                wa = _gaminr_weight(iwt, pa); wb = _gaminr_weight(iwt, pb)
+                dp = pb - pa
+                num += (pa * spa * wa + pb * spb * wb) * dp / 2.0
+                den += (wa + wb) * dp / 2.0
+            end
         end
 
         avg[g] = den > 0 ? num / den : 0.0
@@ -631,7 +653,10 @@ function _gaminr_scatter_matrix(energies::Vector{Float64}, xs_vals::Vector{Float
     ans = zeros(Float64, nl, ngg, ngg + 2)
     flux = zeros(Float64, ngg)
 
-    # Compute group fluxes first
+    # Compute group fluxes on raw PENDF panels — matching Fortran gpanel
+    # which computes flux trapezoidal on the SAME panels as reaction rate.
+    # No wt breakpoint splitting here — must match the panels used by the
+    # scatter matrix functions below.
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
         for i in 1:length(energies)-1
@@ -653,22 +678,114 @@ function _gaminr_scatter_matrix(energies::Vector{Float64}, xs_vals::Vector{Float
     ans
 end
 
-"""Coherent scattering matrix — no energy loss, only angular redistribution.
+"""Compute coherent angular distribution Legendre moments at a single energy.
+Faithful port of Fortran gtff MT=502 (gaminr.f90:1259-1334).
+Uses Gauss-Lobatto quadrature in x-space (momentum transfer variable)
+with panels at form factor table breakpoints.
+Returns normalized moments[il] and sigcoh (total coherent XS)."""
+function _coherent_feed_at_energy!(moments::Vector{Float64},
+                                    e::Float64, nl::Int,
+                                    q_vals::Vector{Float64}, ff_vals::Vector{Float64})
+    c1 = _GAMINR_C1; c2 = _GAMINR_C2
+    rndoff = _GAMINR_RNDOFF
+
+    fill!(moments, 0.0)
+    pl = zeros(Float64, nl)
+    arg = zeros(Float64, nl)
+
+    # Fortran gtff MT=502 (lines 1274-1276)
+    fact = 2.0 * c2 / (c1 * c1 * e * e)
+    xlim = sqrt(2.0) * c1 * e   # x at θ=π (maximum momentum transfer)
+    c1e = 1.0 / (c1 * e)^2
+
+    # Init at x=0: u=cos(0)=1, (1+u²)=2, P_l(1)=1 for all l
+    snow = _interp_ff(0.0, q_vals, ff_vals)
+    for il in 1:nl
+        arg[il] = 2.0 * snow * snow
+    end
+    stest = 1.0e-6 * snow  # tolerance for early termination (Fortran: toler*snow)
+
+    xnow = 0.0
+    unow = 1.0
+    # Walk through form factor table breakpoints as panel boundaries
+    ip = 2  # next table point index
+    xnext = ip <= length(q_vals) ? min(q_vals[ip], xlim) : xlim
+
+    nq_a = nl > 4 ? 10 : 6  # angular GL order (line 1287-1288)
+    qp_a = nq_a == 6 ? _GL6_PTS : _GL10_PTS
+    qw_a = nq_a == 6 ? _GL6_WTS : _GL10_WTS
+
+    # Panel loop over form factor breakpoints (lines 1282-1326)
+    idone = false
+    while !idone
+        aq = (xnext + xnow) / 2.0
+        bq = (xnext - xnow) / 2.0
+
+        for iq in 1:nq_a
+            xq = aq + bq * qp_a[iq]
+            wq = bq * qw_a[iq]
+            xnow = xq * rndoff
+
+            if iq > 1
+                unow = 1.0 - c1e * xnow * xnow  # cos θ from x (line 1299)
+                unow < -1.0 && (unow = -1.0)
+                snow = _interp_ff(xnow, q_vals, ff_vals)
+                _legndr!(pl, unow, nl)
+                for il in 1:nl
+                    arg[il] = (1.0 + unow * unow) * snow * snow * pl[il]  # line 1305
+                end
+            end
+            for il in 1:nl
+                moments[il] += wq * fact * xnow * arg[il]  # line 1309
+            end
+        end
+
+        # Advance to next form factor breakpoint (matching terpa cursor advance)
+        while ip <= length(q_vals) && q_vals[ip] <= xnow
+            ip += 1
+        end
+        xnext = ip <= length(q_vals) ? min(q_vals[ip], xlim) : xlim
+
+        # Termination checks (lines 1312-1325)
+        if unow <= -1.0
+            idone = true
+        elseif xnow >= xlim
+            idone = true
+        elseif snow < stest
+            idone = true
+        end
+    end
+
+    # Normalize by total coherent XS (lines 1327-1330)
+    sigcoh = moments[1]
+    if sigcoh > 0
+        for il in 1:nl
+            moments[il] /= sigcoh
+        end
+    else
+        moments[1] = 1.0
+    end
+    return sigcoh
+end
+
+"""Coherent scattering matrix — GL-6 energy quadrature.
 For coherent: scattered photon has same energy → ig_sink = ig_source.
-The Legendre moments come from the coherent form factor F(q)."""
+The Legendre moments come from the coherent form factor F(q).
+Fortran uses nq=2 (trapezoidal) for coherent but with very fine sub-panels (1.05 step).
+Julia's PENDF panels are wider, so GL-6 is needed for adequate accuracy."""
 function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     ngg = length(egg) - 1
-    pl = zeros(Float64, nl)
     q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[1,1])
+
+    moments_q = zeros(Float64, nl)
+    # GL-6 energy quadrature
+    nq_e = 6
+    qp_e = _GL6_PTS
+    qw_e = _GL6_WTS
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
-
-        # Compute Legendre moments of coherent angular distribution
-        # averaged over the source group
-        moments = zeros(Float64, nl)
-        norm = 0.0
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
@@ -676,35 +793,41 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
 
-            # Midpoint integration for the Legendre moments
-            emid = (ea + eb) / 2.0
-            smid = s1 + (emid - e1) / max(e2 - e1, 1e-30) * (s2 - s1)
-            wmid = _gaminr_weight(iwt, emid)
-            de = eb - ea
-
-            # Angular integration using Gauss-Legendre quadrature
-            # For coherent: dσ/dΩ ∝ (1+cos²θ) |F(q)|² where q = 2E sin(θ/2) / (ħc)
-            c1e_sq = 1.0 / (_GAMINR_C1 * emid)^2
-            fact = 2.0 * _GAMINR_C2 * c1e_sq
-
-            # Integrate over cos(θ) using the form factor
-            n_mu = 16  # quadrature points for angular integration
-            for j in 1:n_mu
-                mu = -1.0 + (2.0 * j - 1.0) / n_mu  # midpoint rule
-                q = _GAMINR_C1 * emid * sqrt(max(2.0 * (1.0 - mu), 0.0))
-                ff_val = _interp_ff(q, q_vals, ff_vals)
-                ang_weight = (1.0 + mu * mu) * ff_val * ff_val * fact
-                _legndr!(pl, mu, nl)
-                for il in 1:nl
-                    moments[il] += ang_weight * pl[il] * (2.0 / n_mu)
-                end
-                norm += ang_weight * (2.0 / n_mu)
+            # σ at clipped endpoints (for linear interpolation within panel)
+            if e2 > e1
+                frac_a = (ea - e1) / (e2 - e1)
+                frac_b = (eb - e1) / (e2 - e1)
+            else
+                frac_a = 0.0; frac_b = 0.0
             end
+            sa = s1 + frac_a * (s2 - s1)
+            sb = s1 + frac_b * (s2 - s1)
 
-            # Weight by XS * flux * panel width
-            wt = smid * wmid * de
-            for il in 1:nl
-                ans[il, ig, ig] += wt * (norm > 0 ? moments[il] / norm : (il == 1 ? 1.0 : 0.0))
+            # W at panel endpoints — linear interp of product σ×W (matching gpanel)
+            wa_e = _gaminr_weight(iwt, ea)
+            wb_e = _gaminr_weight(iwt, eb)
+            rr_lo = sa * wa_e
+            rr_hi = sb * wb_e
+
+            # GL-6 energy quadrature
+            aq_e = (ea + eb) / 2.0
+            bq_e = (eb - ea) / 2.0
+
+            for iq_e in 1:nq_e
+                eq = aq_e + bq_e * qp_e[iq_e]
+                wq_e = bq_e * qw_e[iq_e]
+
+                # Linear interpolation of reaction rate σ×W (matching gpanel)
+                t1 = (eq - ea) / max(eb - ea, 1e-30)
+                rr = rr_lo + (rr_hi - rr_lo) * t1
+
+                # Angular distribution at this energy
+                _coherent_feed_at_energy!(moments_q, eq, nl, q_vals, ff_vals)
+
+                wt = rr * wq_e
+                for il in 1:nl
+                    ans[il, ig, ig] += wt * moments_q[il]
+                end
             end
         end
 
@@ -714,162 +837,217 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
                 ans[il, ig, ig] /= flux[ig]
             end
         end
-        # Total (column ngg+1) = sum over sink groups = same as diagonal
+        # Total (column ngg+1) = same as diagonal for coherent
         for il in 1:nl
             ans[il, ig, ngg+1] = ans[il, ig, ig]
         end
     end
 end
 
-"""Incoherent (Compton) scattering matrix — Gauss-Lobatto in p-space.
-Faithful port of Fortran gtff MT=504 (gaminr.f90:1338-1464).
-Integrates in scattered-photon momentum p-space with adaptive panels
-at group boundaries + form-factor breakpoints. ~23-31 panels per energy."""
-function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
-    ngg = length(egg) - 1
-    pl = zeros(Float64, nl)
-    q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[0,1])
+"""Compute incoherent scattering angular distribution at a single energy.
+Port of Fortran gtff MT=504 (gaminr.f90:1338-1464).
+Fills ff_out[il, ig] with normalized Legendre moments for each sink group.
+Returns (heating_per, siginc) where heating = E - <E'>, siginc = total KN integral."""
+function _incoherent_feed_at_energy!(ff_out::Matrix{Float64},
+                                      e::Float64, egg::Vector{Float64},
+                                      ngg::Int, nl::Int,
+                                      q_vals::Vector{Float64}, ff_vals::Vector{Float64},
+                                      zz::Float64, nq_p::Int,
+                                      qp::Vector{Float64}, qw::Vector{Float64})
     c2 = _GAMINR_C2; c3 = _GAMINR_C3; c4 = _GAMINR_C4; c5 = _GAMINR_C5
     rndoff = _GAMINR_RNDOFF; close_val = _GAMINR_CLOSE; emax_val = 1.0e12
+
+    enow = c3 * e; enowi = 1.0/enow; enow2 = enow*enow
+    xzz = c5 * sqrt(enow / 500.0)
+    q2m = (2.0*enow*(1.0+enow)/(1.0+2.0*enow))^2
+
+    # Find source group (line 1339-1342)
+    igp = 1
+    while igp < ngg && e >= egg[igp+1]; igp += 1; end
+
+    # Init p-space integration
+    pnow = enow; xnow = 0.0
+    fill!(ff_out, 0.0)
+    arg = zeros(Float64, nl)
+    pl = zeros(Float64, nl)
+    siginc = 0.0; ebar_acc = 0.0
+
+    # Form factor init (terpa state)
+    ff_ip = 2
+    if xzz <= zz
+        snow = _interp_ff(0.0, q_vals, ff_vals)
+        xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+    else
+        snow = zz; xnext = emax_val
+    end
+    if e == egg[igp]; igp -= 1; end
+
+    # Panel loop in p-space (lines 1372-1441)
+    ifini = false
+    while !ifini
+        # Advance through FF breakpoints (lines 1373-1388)
+        idone = false
+        unext = -1.0
+        while !idone
+            q2 = (c4 * xnext)^2
+            unext = -1.0
+            if q2 > q2m
+                idone = true
+            else
+                denom = q2 - enow2 - 2.0*enow
+                abs(denom) < 1e-30 && (idone = true; continue)
+                unext = 1.0 - ((1.0-q2*enowi) - sqrt(1.0+q2)) / denom
+                unext < -1.0 && (unext = -1.0)
+                if unext < close_val
+                    idone = true
+                else
+                    xnow = xnext * rndoff
+                    xzz <= zz && (snow = _interp_ff(xnow, q_vals, ff_vals))
+                    ff_ip += 1
+                    xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+                end
+            end
+        end
+
+        # Panel boundaries in p-space (lines 1389-1393)
+        pnext = enow / (1.0 + 2.0*enow)
+        igp > 0 && (pnext = c3 * egg[igp])
+        px = enow / (1.0 + enow*(1.0 - unext))
+        px > pnext && (pnext = px)
+        pnext > pnow/rndoff && (pnext = pnow/rndoff)
+
+        # GL quadrature over [pnext, pnow] (lines 1394-1433)
+        aq = (pnext + pnow) / 2.0; bq = (pnext - pnow) / 2.0
+        unow = 1.0
+        for iq in 1:nq_p
+            uq = aq + bq*qp[iq]; wq = -c2*bq*qw[iq]
+            pnow = uq
+            if iq > 1
+                pnowi = 1.0/pnow
+                unow = 1.0 + enowi - pnowi
+                unow > 1.0 && (unow = 1.0)
+                if xzz <= zz
+                    rm2 = max((1.0-unow)/2.0, 0.0); rm = sqrt(rm2)
+                    rt = 1.0 + 2.0*enow*rm2
+                    xnow = c5*2.0*enow*rm*sqrt(max(rt+enow2*rm2,0.0))/rt
+                    xnow *= rndoff
+                    snow = _interp_ff(xnow, q_vals, ff_vals)
+                    while ff_ip <= length(q_vals) && q_vals[ff_ip] < xnow
+                        ff_ip += 1
+                    end
+                    xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+                end
+                _legndr!(pl, unow, nl)
+                dk = unow - 1.0
+                fact = snow*(enow*pnowi + pnow*enowi + dk*(2.0+dk))/enow2
+                for il in 1:nl; arg[il] = fact*pl[il]; end
+            end
+            if igp > 0
+                for il in 1:nl; ff_out[il, igp] += wq*arg[il]; end
+            end
+            siginc += wq*arg[1]
+            ebar_acc += wq*arg[1]*pnow/c3
+        end
+
+        # Termination (lines 1434-1441)
+        if unow < -close_val
+            ifini = true
+        else
+            igp > 0 && pnext <= c3*egg[igp] && (igp -= 1)
+        end
+    end
+
+    # Post-processing: normalize by siginc (lines 1443-1464)
+    heating_per = 0.0
+    if siginc > 0
+        ebar = ebar_acc / siginc
+        heating_per = e - ebar
+        for gs in 1:ngg; for il in 1:nl
+            ff_out[il, gs] /= siginc
+        end; end
+    end
+
+    return (heating_per, siginc)
+end
+
+"""Incoherent (Compton) scattering matrix — GL energy quadrature + GL p-space.
+Matches Fortran gpanel + gtff MT=504 architecture:
+- gpanel (gaminr.f90:874-1010): GL-6 energy quadrature within each PENDF panel
+- gtff (gaminr.f90:1338-1464): GL p-space angular integration at each energy point
+The feed function (angular distribution) is evaluated at 6 energy points per PENDF
+panel, matching Fortran's approach of evaluating gtff at each gpanel quadrature point."""
+function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
+    ngg = length(egg) - 1
+    q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[0,1])
     # zz = S(x→∞) = Z for incoherent (line 1240: zz=pff(l+1)=C2=Z)
     zz = isempty(ff_vals) ? 1.0 : ff_vals[end]
-    nq = nl > 6 ? 10 : 6
-    qp = nq == 6 ? _GL6_PTS : _GL10_PTS
-    qw = nq == 6 ? _GL6_WTS : _GL10_WTS
+    nq_p = nl > 6 ? 10 : 6  # p-space GL order (angular quadrature)
+    qp = nq_p == 6 ? _GL6_PTS : _GL10_PTS
+    qw = nq_p == 6 ? _GL6_WTS : _GL10_WTS
+
+    # Energy GL quadrature: match Fortran gpanel nq=6 for incoherent
+    nq_e = 6
+    qp_e = _GL6_PTS
+    qw_e = _GL6_WTS
+
     ff_work = zeros(Float64, nl, ngg)
-    arg = zeros(Float64, nl)
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
+
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
-            emid = (ea + eb) / 2.0
-            smid = s1 + (emid - e1) / max(e2 - e1, 1e-30) * (s2 - s1)
-            wmid = _gaminr_weight(iwt, emid)
-            de = eb - ea
 
-            # === gtff MT=504 (gaminr.f90:1338-1464) ===
-            enow = c3 * emid; enowi = 1.0/enow; enow2 = enow*enow
-            xzz = c5 * sqrt(enow / 500.0)
-            q2m = (2.0*enow*(1.0+enow)/(1.0+2.0*enow))^2
-
-            # Find source group (line 1339-1342)
-            igp = 1
-            while igp < ngg && emid >= egg[igp+1]; igp += 1; end
-            ig_src = igp
-
-            # Init p-space integration (lines 1346-1367)
-            pnow = enow; xnow = 0.0
-            fill!(ff_work, 0.0); fill!(arg, 0.0)
-            siginc = 0.0; ebar_acc = 0.0
-
-            # Form factor init (lines 1350-1357)
-            # terpa state: ip tracks position in q_vals table
-            ff_ip = 2  # terpa pointer: next entry to check
-            if xzz <= zz
-                snow = _interp_ff(0.0, q_vals, ff_vals)
-                xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
+            # σ at clipped PENDF panel endpoints (linear interp on PENDF grid)
+            if e2 > e1
+                frac_a = (ea - e1) / (e2 - e1)
+                frac_b = (eb - e1) / (e2 - e1)
             else
-                snow = zz; xnext = emax_val
+                frac_a = 0.0; frac_b = 0.0
             end
-            if emid == egg[igp]; igp -= 1; end
+            sa = s1 + frac_a * (s2 - s1)
+            sb = s1 + frac_b * (s2 - s1)
 
-            # Panel loop (lines 1372-1441)
-            ifini = false
-            while !ifini
-                # Inner loop: advance through FF breakpoints (lines 1373-1388)
-                idone = false
-                unext = -1.0
-                while !idone
-                    q2 = (c4 * xnext)^2
-                    unext = -1.0
-                    if q2 > q2m
-                        idone = true
-                    else
-                        denom = q2 - enow2 - 2.0*enow
-                        abs(denom) < 1e-30 && (idone = true; continue)
-                        unext = 1.0 - ((1.0-q2*enowi) - sqrt(1.0+q2)) / denom
-                        unext < -1.0 && (unext = -1.0)
-                        if unext < close_val
-                            idone = true
-                        else
-                            # Advance past near-forward breakpoint (lines 1385-1386)
-                            xnow = xnext * rndoff
-                            xzz <= zz && (snow = _interp_ff(xnow, q_vals, ff_vals))
-                            ff_ip += 1
-                            xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
-                        end
-                    end
+            # W at panel endpoints — Fortran gpanel linearly interpolates
+            # the PRODUCT σ×W (reaction rate), not σ and W separately
+            wa_e = _gaminr_weight(iwt, ea)
+            wb_e = _gaminr_weight(iwt, eb)
+            rr_lo = sa * wa_e   # reaction rate at lower boundary (Fortran b = slst*flst)
+            rr_hi = sb * wb_e   # reaction rate at upper boundary (Fortran a = sig*flux)
+
+            # GL-6 energy quadrature (matching Fortran gpanel)
+            aq_e = (ea + eb) / 2.0
+            bq_e = (eb - ea) / 2.0
+
+            for iq_e in 1:nq_e
+                eq = aq_e + bq_e * qp_e[iq_e]
+                wq_e = bq_e * qw_e[iq_e]
+
+                # Linear interpolation of reaction rate σ×W within panel
+                # Matches Fortran gpanel: rr = b + (a-b)*t1
+                t1 = (eq - ea) / max(eb - ea, 1e-30)
+                rr = rr_lo + (rr_hi - rr_lo) * t1
+
+                # Angular distribution at this energy (gtff call)
+                fill!(ff_work, 0.0)
+                heating_per, siginc = _incoherent_feed_at_energy!(
+                    ff_work, eq, egg, ngg, nl, q_vals, ff_vals, zz, nq_p, qp, qw)
+
+                if siginc > 0
+                    wt = rr * wq_e
+                    for gs in 1:ngg; for il in 1:nl
+                        ans[il, ig, gs] += wt * ff_work[il, gs]
+                    end; end
+                    ans[1, ig, ngg+1] += wt
+                    ans[1, ig, ngg+2] += wt * heating_per
                 end
-
-                # Panel boundaries in p-space (lines 1389-1393)
-                pnext = enow / (1.0 + 2.0*enow)
-                igp > 0 && (pnext = c3 * egg[igp])
-                px = enow / (1.0 + enow*(1.0 - unext))
-                px > pnext && (pnext = px)
-                pnext > pnow/rndoff && (pnext = pnow/rndoff)
-
-                # GL quadrature over [pnext, pnow] (lines 1394-1433)
-                aq = (pnext + pnow) / 2.0; bq = (pnext - pnow) / 2.0
-                unow = 1.0
-                for iq in 1:nq
-                    uq = aq + bq*qp[iq]; wq = -c2*bq*qw[iq]
-                    pnow = uq  # line 1406
-                    if iq > 1
-                        pnowi = 1.0/pnow
-                        unow = 1.0 + enowi - pnowi
-                        unow > 1.0 && (unow = 1.0)
-                        if xzz <= zz
-                            rm2 = max((1.0-unow)/2.0, 0.0); rm = sqrt(rm2)
-                            rt = 1.0 + 2.0*enow*rm2
-                            xnow = c5*2.0*enow*rm*sqrt(max(rt+enow2*rm2,0.0))/rt
-                            xnow *= rndoff
-                            snow = _interp_ff(xnow, q_vals, ff_vals)
-                            # Advance ff_ip to match terpa cursor (line 1417)
-                            while ff_ip <= length(q_vals) && q_vals[ff_ip] < xnow
-                                ff_ip += 1
-                            end
-                            xnext = ff_ip <= length(q_vals) ? q_vals[ff_ip] : emax_val
-                        end
-                        _legndr!(pl, unow, nl)
-                        dk = unow - 1.0
-                        fact = snow*(enow*pnowi + pnow*enowi + dk*(2.0+dk))/enow2
-                        for il in 1:nl; arg[il] = fact*pl[il]; end
-                    end
-                    if igp > 0
-                        for il in 1:nl; ff_work[il, igp] += wq*arg[il]; end
-                    end
-                    siginc += wq*arg[1]
-                    ebar_acc += wq*arg[1]*pnow/c3
-                end
-
-                # Termination (lines 1434-1441)
-                if unow < -close_val
-                    ifini = true
-                else
-                    igp > 0 && pnext <= c3*egg[igp] && (igp -= 1)
-                end
-            end
-
-            # Post-processing: normalize by siginc (lines 1443-1464)
-            if siginc > 0
-                ebar = ebar_acc / siginc
-                heating_per = emid - ebar
-                for gs in 1:ngg; for il in 1:nl
-                    ff_work[il, gs] /= siginc
-                end; end
-                wt = smid * wmid * de
-                for gs in 1:ngg; for il in 1:nl
-                    ans[il, ig, gs] += wt * ff_work[il, gs]
-                end; end
-                ans[1, ig, ngg+1] += wt
-                ans[1, ig, ngg+2] += wt * heating_per
             end
         end
+
         # Normalize by flux (dspla)
         for ig_sink in 1:ngg+2; for il in 1:nl
             flux[ig] > 0 && (ans[il, ig, ig_sink] /= flux[ig])
