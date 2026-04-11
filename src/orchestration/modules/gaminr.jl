@@ -147,6 +147,18 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
         (23, 602), (23, 621),
     ]
 
+    # Free-KN mechanism for incoherent scattering (gaminr.f90:311-393).
+    # At high energies, S(q)→Z, so the angular distribution for any Z
+    # is just Z times the hydrogen (or lowest-Z reference) result.
+    # The first material processed saves its MT=504/MF=26 results to akn,
+    # and subsequent higher-Z materials reuse them for groups above the
+    # KN transition energy (Z * ekn).
+    ekn = 12.4e3  # gaminr.f90:126
+    akn = nothing           # akn[il, column, ig] — saved reference results / Z_ref
+    akn_zref = Inf          # Z of the reference material
+    akn_ng2s = nothing      # saved ng2 per group
+    akn_ig2s = nothing      # saved ig2lo per group
+
     for (matd, reactions) in params.materials
         mf23_data = _read_pendf_mf23(pendf_path, matd)
         isempty(mf23_data) && continue
@@ -173,6 +185,14 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
         # toth[2*g]   = accumulated (heating_kerma × flux) for group g
         toth = zeros(Float64, 2 * ngg)
 
+        # Precompute group fluxes from MT=501 (total XS — covers full energy range).
+        # Fortran gpanel computes the same flux for all MTs regardless of threshold
+        # coverage because it walks all breakpoints (including gtflx weight points).
+        base_flux = let (e501, s501) = mf23_data[501]
+            _, f = _gaminr_group_average(e501, s501, egg, params.iwt)
+            f
+        end
+
         for (mfd, mtd) in reaction_sequence
             # Skip MTs not requested
             if mtd != 621 && !(mtd in mts_to_process)
@@ -195,13 +215,15 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
             elseif mfd == 23
                 # Scalar group-averaged cross section
                 energies, xs_vals = mf23_data[mtd]
-                avg, flux = _gaminr_group_average(energies, xs_vals, egg, params.iwt)
+                avg, flux = _gaminr_group_average(energies, xs_vals, egg, params.iwt;
+                                                   base_flux=base_flux)
 
                 # For MT=602/522: gtff sets ff(1,2)=E → ng=2 feed columns
                 # → ans has 3 columns: flux, XS, heating
                 # Compute heating column: ∫E·σ·W dE / ∫W dE
                 if mtd in (602, 522)
-                    heat_avg, _ = _gaminr_heating_average(energies, xs_vals, egg, params.iwt)
+                    heat_avg, _ = _gaminr_heating_average(energies, xs_vals, egg, params.iwt;
+                                                          base_flux=base_flux)
                     # Write MF23 section with ng2=3 (flux + XS + heating)
                     # dspla normalizes: XS = ∫σW/∫W, heating = ∫EσW/∫W
                     # Then heating accumulation: toth += heating_kerma * flux
@@ -224,27 +246,58 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
                 # gaminr.f90:298-300: nl=1; if(mfd.eq.26) nl=lord+1; if(mtd.eq.516) nl=1
                 nl_mt = (mtd == 516) ? 1 : nl
                 scat_matrix = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
-                                                     nl_mt, mtd, ff_tab)
+                                                     nl_mt, mtd, ff_tab;
+                                                     base_flux=base_flux)
+
+                # Free-KN mechanism for MT=504 (gaminr.f90:311-393)
+                if mtd == 504
+                    z_mat = round(Int, za / 1000)
+                    if z_mat <= akn_zref
+                        # This is the reference material — save normalized results
+                        akn_zref = z_mat
+                        akn = zeros(Float64, nl_mt, ngg + 3, ngg)
+                        akn_ng2s = zeros(Int, ngg)
+                        akn_ig2s = zeros(Int, ngg)
+                        for ig in 1:ngg
+                            for icol in 1:ngg+2; for il in 1:nl_mt
+                                akn[il, icol+1, ig] = scat_matrix[il, ig, icol]
+                            end; end
+                            # flux column (column 1)
+                            akn[1, 1, ig] = base_flux[ig]
+                            # Normalize by Z (lines 388-389: akn /= abs(znow))
+                            for icol in 2:ngg+3; for il in 1:nl_mt
+                                akn[il, icol, ig] /= z_mat
+                            end; end
+                        end
+                    else
+                        # Higher-Z material — use saved akn for high-energy groups
+                        for ig in 1:ngg
+                            if egg[ig] >= z_mat * ekn && akn !== nothing
+                                # Replace with scaled reference (lines 357-361)
+                                for icol in 1:ngg+2; for il in 1:nl_mt
+                                    scat_matrix[il, ig, icol] = akn[il, icol+1, ig] * z_mat
+                                end; end
+                            end
+                        end
+                    end
+                end
+
                 # Accumulate heating from scattering matrix (Fortran lines 388-395)
                 # Condition: ng2 != 2 AND mtd != 502 (coherent excluded)
-                # Compute flux once for this MT
-                _, mt_flux = _gaminr_group_average(energies, xs_vals, egg, params.iwt)
                 if mtd != 502
                     for g in 1:ngg
                         l = 2 * (g - 1)
                         heating_kerma = scat_matrix[1, g, ngg + 2]
-                        toth[l+1] = mt_flux[g]
-                        toth[l+2] += heating_kerma * mt_flux[g]
+                        toth[l+1] = base_flux[g]
+                        toth[l+2] += heating_kerma * base_flux[g]
                     end
-                    # MT=504: strip total AND heating; MT=516: strip heating only
-                    # MT=504: strip total AND heating; MT=516: also strip total (only yield remains)
                     _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
-                                              mt_flux;
+                                              base_flux;
                                               strip_heating=true, strip_total=(mtd == 504 || mtd == 516))
                 else
                     # MT=502: no heating, no total/heating columns
                     _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
-                                              mt_flux;
+                                              base_flux;
                                               strip_heating=true, strip_total=true)
                 end
             end
@@ -359,7 +412,8 @@ Matches Fortran gpanel energy integration for MF23 (nq=2 trapezoidal).
 Weight function breakpoints from gtflx/terpa ensure panels don't span
 regions where W(E) changes interpolation slope."""
 function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float64},
-                                egg::Vector{Float64}, iwt::Int)
+                                egg::Vector{Float64}, iwt::Int;
+                                base_flux::Union{Nothing,Vector{Float64}}=nothing)
     ngg = length(egg) - 1
     avg = Vector{Float64}(undef, ngg)
     flux = Vector{Float64}(undef, ngg)
@@ -372,6 +426,7 @@ function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float6
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
         num = 0.0; den = 0.0
+        is_first_subpanel = true
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
@@ -392,6 +447,20 @@ function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float6
 
             for k in 1:length(sub_bounds)-1
                 pa, pb = sub_bounds[k], sub_bounds[k+1]
+
+                # Fortran gpanel boundary nudges (gaminr.f90:907-937)
+                # First sub-panel of group: nudge lower bound up
+                if is_first_subpanel
+                    if pa * _GPANEL_RNDOFF < ehi
+                        pa *= _GPANEL_RNDOFF
+                    end
+                    is_first_subpanel = false
+                end
+                # Last sub-panel of group: nudge upper bound down
+                if pb == ehi
+                    pb *= _GPANEL_DELTA
+                end
+
                 # Linear interpolation of σ on PENDF panel
                 if e2 > e1
                     fa = (pa - e1) / (e2 - e1)
@@ -411,8 +480,15 @@ function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float6
             end
         end
 
-        avg[g] = den > 0 ? num / den : 0.0
-        flux[g] = den
+        # Use base_flux (from MT=501 full-range) if provided — Fortran gpanel
+        # computes the same flux for all MTs regardless of threshold coverage.
+        if base_flux !== nothing
+            avg[g] = base_flux[g] > 0 ? num / base_flux[g] : 0.0
+            flux[g] = base_flux[g]
+        else
+            avg[g] = den > 0 ? num / den : 0.0
+            flux[g] = den
+        end
     end
 
     avg, flux
@@ -561,7 +637,8 @@ end
 """Compute heating KERMA group averages: ∫E·σ·W dE / ∫W dE per group.
 Matches Fortran gaminr heating calculation with weight function breakpoint splitting."""
 function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Float64},
-                                  egg::Vector{Float64}, iwt::Int)
+                                  egg::Vector{Float64}, iwt::Int;
+                                  base_flux::Union{Nothing,Vector{Float64}}=nothing)
     ngg = length(egg) - 1
     avg = Vector{Float64}(undef, ngg)
     flux = Vector{Float64}(undef, ngg)
@@ -570,6 +647,7 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
         num = 0.0; den = 0.0
+        is_first_subpanel = true
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
@@ -585,6 +663,18 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
 
             for k in 1:length(sub_bounds)-1
                 pa, pb = sub_bounds[k], sub_bounds[k+1]
+
+                # Fortran gpanel boundary nudges (gaminr.f90:907-937)
+                if is_first_subpanel
+                    if pa * _GPANEL_RNDOFF < ehi
+                        pa *= _GPANEL_RNDOFF
+                    end
+                    is_first_subpanel = false
+                end
+                if pb == ehi
+                    pb *= _GPANEL_DELTA
+                end
+
                 if e2 > e1
                     fa = (pa - e1) / (e2 - e1); fb = (pb - e1) / (e2 - e1)
                 else
@@ -598,8 +688,13 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
             end
         end
 
-        avg[g] = den > 0 ? num / den : 0.0
-        flux[g] = den
+        if base_flux !== nothing
+            avg[g] = base_flux[g] > 0 ? num / base_flux[g] : 0.0
+            flux[g] = base_flux[g]
+        else
+            avg[g] = den > 0 ? num / den : 0.0
+            flux[g] = den
+        end
     end
     avg, flux
 end
@@ -618,6 +713,9 @@ const _GAMINR_C5 = 20.60744      # dimensionless → x [A^-1] conversion
 const _GAMINR_EPAIR = 0.511e6    # electron rest mass in eV (phys.f90 epair)
 const _GAMINR_RNDOFF = 1.0000001 # nudge past breakpoint (gaminr.f90:1204)
 const _GAMINR_CLOSE = 0.99999    # backward scatter threshold (gaminr.f90:1208)
+# gpanel boundary nudges (gaminr.f90:907-908) — applied to elo/ehi of integration panels
+const _GPANEL_RNDOFF = 1.000002   # lower boundary nudge (first sub-panel of each group)
+const _GPANEL_DELTA  = 0.999995   # upper boundary nudge (last sub-panel of each group)
 
 # Gauss-Lobatto 6-point quadrature (gaminr.f90:1183-1188)
 const _GL6_PTS = Float64[-1.0, -0.76505532, -0.28523152, 0.28523152, 0.76505532, 1.0]
@@ -645,7 +743,8 @@ For incoherent: ig_sink <= ig_source (Compton downscatter).
 For pair production: ig_sink = group containing 0.511 MeV."""
 function _gaminr_scatter_matrix(energies::Vector{Float64}, xs_vals::Vector{Float64},
                                  egg::Vector{Float64}, iwt::Int, nl::Int, mt::Int,
-                                 ff_tab)
+                                 ff_tab;
+                                 base_flux::Union{Nothing,Vector{Float64}}=nothing)
     ngg = length(egg) - 1
 
     # ans[il, ig_source, ig_sink] = transfer cross section Legendre moment
@@ -653,18 +752,32 @@ function _gaminr_scatter_matrix(energies::Vector{Float64}, xs_vals::Vector{Float
     ans = zeros(Float64, nl, ngg, ngg + 2)
     flux = zeros(Float64, ngg)
 
-    # Compute group fluxes on raw PENDF panels — matching Fortran gpanel
-    # which computes flux trapezoidal on the SAME panels as reaction rate.
-    # No wt breakpoint splitting here — must match the panels used by the
-    # scatter matrix functions below.
+    # Compute group fluxes on PENDF panels with Fortran gpanel boundary
+    # nudges (gaminr.f90:907-937): rndoff on first, delta on last sub-panel.
     for g in 1:ngg
         elo, ehi = egg[g], egg[g+1]
+        is_first = true
         for i in 1:length(energies)-1
             ea = max(energies[i], elo); eb = min(energies[i+1], ehi)
             ea >= eb && continue
+            if is_first
+                if ea * _GPANEL_RNDOFF < ehi
+                    ea *= _GPANEL_RNDOFF
+                end
+                is_first = false
+            end
+            if eb == ehi
+                eb *= _GPANEL_DELTA
+            end
             wa = _gaminr_weight(iwt, ea); wb = _gaminr_weight(iwt, eb)
             flux[g] += (wa + wb) * (eb - ea) / 2.0
         end
+    end
+
+    # Override with base_flux (from MT=501 full-range) if provided —
+    # Fortran gpanel computes the same flux for all MTs.
+    if base_flux !== nothing
+        copyto!(flux, base_flux)
     end
 
     if mt == 502
@@ -786,12 +899,20 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
+        is_first = true
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
+
+            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
+            if is_first
+                if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
+                is_first = false
+            end
+            if eb == ehi; eb *= _GPANEL_DELTA; end
 
             # σ at clipped endpoints (for linear interpolation within panel)
             if e2 > e1
@@ -995,12 +1116,20 @@ function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
+        is_first = true
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
+
+            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
+            if is_first
+                if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
+                is_first = false
+            end
+            if eb == ehi; eb *= _GPANEL_DELTA; end
 
             # σ at clipped PENDF panel endpoints (linear interp on PENDF grid)
             if e2 > e1
@@ -1077,8 +1206,12 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
         ehi <= 2.0 * epair && continue
         flux[ig] <= 0 && continue
 
-        # Group-averaged pair production XS (per-energy threshold check)
-        num = 0.0; den = 0.0
+        # Group-averaged pair production XS and heating (per-energy threshold)
+        # Fortran gtff MT=516 returns ff(1,1)=yield=2, ff(1,ng)=E (heating feed).
+        # gpanel integrates: ∫σ×W×dE (yield), ∫E×σ×W×dE (heating feed).
+        # After dspla normalization: yield_avg = 2×∫σW/∫W, heating = ∫EσW/∫W.
+        num = 0.0; heat_num = 0.0
+        is_first = true
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
             s1, s2 = xs_vals[i], xs_vals[i+1]
@@ -1087,6 +1220,13 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
             # Per-energy threshold: only include panels above pair threshold
             ea < 2.0 * epair && (ea = 2.0 * epair)
             ea >= eb && continue
+
+            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
+            if is_first
+                if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
+                is_first = false
+            end
+            if eb == ehi; eb *= _GPANEL_DELTA; end
             if e2 > e1
                 fa = (ea - e1) / (e2 - e1); fb = (eb - e1) / (e2 - e1)
             else
@@ -1096,15 +1236,16 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
             wa = _gaminr_weight(iwt, ea); wb = _gaminr_weight(iwt, eb)
             de = eb - ea
             num += (sa * wa + sb * wb) * de / 2.0
-            den += (wa + wb) * de / 2.0
+            heat_num += (ea * sa * wa + eb * sb * wb) * de / 2.0
         end
 
-        sig_avg = den > 0 ? num / den : 0.0
+        # Use full-range flux for denominator (matching Fortran gpanel)
+        sig_avg = flux[ig] > 0 ? num / flux[ig] : 0.0
+        heat_avg = flux[ig] > 0 ? heat_num / flux[ig] : 0.0
         # Yield = 2 (two annihilation photons), isotropic
         ans[1, ig, ig_pair] += sig_avg * 2.0
-        # Heating = E - 2*m_e c^2
-        emid = (elo + ehi) / 2.0
-        ans[1, ig, ngg+2] += sig_avg * (emid - 2.0 * epair)
+        # Heating = ∫(E-2me)σW/∫W = ∫EσW/∫W - 2me×∫σW/∫W
+        ans[1, ig, ngg+2] += heat_avg - 2.0 * epair * sig_avg
         # Total
         ans[1, ig, ngg+1] += sig_avg
     end
