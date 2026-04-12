@@ -245,7 +245,7 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
                 # Fortran NL: nl=lord+1 for MF26, BUT nl=1 for MT=516 (pair prod isotropic)
                 # gaminr.f90:298-300: nl=1; if(mfd.eq.26) nl=lord+1; if(mtd.eq.516) nl=1
                 nl_mt = (mtd == 516) ? 1 : nl
-                scat_matrix = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
+                scat_matrix, scat_flux = _gaminr_scatter_matrix(energies, xs_vals, egg, params.iwt,
                                                      nl_mt, mtd, ff_tab;
                                                      base_flux=base_flux)
 
@@ -288,16 +288,15 @@ function _write_gaminr_tape(io::IO, pendf_path::String, endf_path::String,
                     for g in 1:ngg
                         l = 2 * (g - 1)
                         heating_kerma = scat_matrix[1, g, ngg + 2]
-                        toth[l+1] = base_flux[g]
-                        toth[l+2] += heating_kerma * base_flux[g]
+                        toth[l+1] = scat_flux[g]
+                        toth[l+2] += heating_kerma * scat_flux[g]
                     end
                     _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
-                                              base_flux;
+                                              scat_flux;
                                               strip_heating=true, strip_total=(mtd == 504 || mtd == 516))
                 else
-                    # MT=502: no heating, no total/heating columns
                     _write_gaminr_mf6_section(io, za, awr, matd, mtd, ngg, nl_mt, scat_matrix,
-                                              base_flux;
+                                              scat_flux;
                                               strip_heating=true, strip_total=true)
                 end
             end
@@ -449,19 +448,17 @@ function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float6
                 pa, pb = sub_bounds[k], sub_bounds[k+1]
 
                 # Fortran gpanel boundary nudges (gaminr.f90:907-937)
-                # First sub-panel of group: nudge lower bound up
                 if is_first_subpanel
                     if pa * _GPANEL_RNDOFF < ehi
                         pa *= _GPANEL_RNDOFF
                     end
                     is_first_subpanel = false
                 end
-                # Last sub-panel of group: nudge upper bound down
-                if pb == ehi
+                is_last_of_group = (pb == ehi)
+                if is_last_of_group
                     pb *= _GPANEL_DELTA
                 end
 
-                # Linear interpolation of σ on PENDF panel
                 if e2 > e1
                     fa = (pa - e1) / (e2 - e1)
                     fb = (pb - e1) / (e2 - e1)
@@ -474,8 +471,19 @@ function _gaminr_group_average(energies::Vector{Float64}, xs_vals::Vector{Float6
                 wa = _gaminr_weight(iwt, pa)
                 wb = _gaminr_weight(iwt, pb)
 
+                b = spa * wa
+                a = spb * wb
                 dp = pb - pa
-                num += (spa * wa + spb * wb) * dp / 2.0
+                # Fortran gpanel (gaminr.f90:980-982): rr(eq) = b + (a-b)*(eq-elo)/(ehi-elo)
+                # where ehi is shortened to enext for middle panels (t1=1, rr(pb)=a → standard trap),
+                # but stays as group upper bound on the last panel (t1<1, rr(pb)<a).
+                if is_last_of_group
+                    t1_pb = dp / (ehi - pa)
+                    rr_pb = b + (a - b) * t1_pb
+                    num += (b + rr_pb) * dp / 2.0
+                else
+                    num += (b + a) * dp / 2.0
+                end
                 den += (wa + wb) * dp / 2.0
             end
         end
@@ -664,14 +672,14 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
             for k in 1:length(sub_bounds)-1
                 pa, pb = sub_bounds[k], sub_bounds[k+1]
 
-                # Fortran gpanel boundary nudges (gaminr.f90:907-937)
                 if is_first_subpanel
                     if pa * _GPANEL_RNDOFF < ehi
                         pa *= _GPANEL_RNDOFF
                     end
                     is_first_subpanel = false
                 end
-                if pb == ehi
+                is_last_of_group = (pb == ehi)
+                if is_last_of_group
                     pb *= _GPANEL_DELTA
                 end
 
@@ -682,8 +690,18 @@ function _gaminr_heating_average(energies::Vector{Float64}, xs_vals::Vector{Floa
                 end
                 spa = s1 + fa * (s2 - s1); spb = s1 + fb * (s2 - s1)
                 wa = _gaminr_weight(iwt, pa); wb = _gaminr_weight(iwt, pb)
+                b = spa * wa
+                a = spb * wb
                 dp = pb - pa
-                num += (pa * spa * wa + pb * spb * wb) * dp / 2.0
+                # Fortran gpanel heating: ans(1,1,3) += rr*wq*ff(1,2) where ff(1,2)=eq.
+                # iq=1 (eq=pa): contrib = b*bq*pa. iq=2 (eq=pb): contrib = rr*bq*pb.
+                # For middle panels t1=1 so rr=a; for last panel rr = b + (a-b)*(pb-pa)/(ehi-pa).
+                if is_last_of_group
+                    rr_pb = b + (a - b) * dp / (ehi - pa)
+                    num += (pa * b + pb * rr_pb) * dp / 2.0
+                else
+                    num += (pa * b + pb * a) * dp / 2.0
+                end
                 den += (wa + wb) * dp / 2.0
             end
         end
@@ -780,15 +798,19 @@ function _gaminr_scatter_matrix(energies::Vector{Float64}, xs_vals::Vector{Float
         copyto!(flux, base_flux)
     end
 
+    mt_flux = copy(flux)
     if mt == 502
-        _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
+        _gaminr_coherent_matrix!(ans, mt_flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     elseif mt == 504
-        _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
+        # Incoherent walks kinematic breakpoints → its flux integral differs
+        # slightly from MT=501's base flux. _gaminr_incoherent_matrix! overwrites
+        # mt_flux with the MT=504-specific integral for later writing.
+        _gaminr_incoherent_matrix!(ans, mt_flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     elseif mt == 516
-        _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl)
+        _gaminr_pair_production_matrix!(ans, mt_flux, energies, xs_vals, egg, iwt, nl)
     end
 
-    ans
+    (ans, mt_flux)
 end
 
 """Compute coherent angular distribution Legendre moments at a single energy.
@@ -881,20 +903,19 @@ function _coherent_feed_at_energy!(moments::Vector{Float64},
     return sigcoh
 end
 
-"""Coherent scattering matrix — GL-6 energy quadrature.
+"""Coherent scattering matrix — Lobatto-2 (trapezoidal) energy quadrature.
 For coherent: scattered photon has same energy → ig_sink = ig_source.
 The Legendre moments come from the coherent form factor F(q).
-Fortran uses nq=2 (trapezoidal) for coherent but with very fine sub-panels (1.05 step).
-Julia's PENDF panels are wider, so GL-6 is needed for adequate accuracy."""
+Fortran gpanel uses nq=0+2=2 (trapezoidal) for coherent because gtff MT=502 returns nq=0."""
 function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff_tab)
     ngg = length(egg) - 1
     q_vals, ff_vals = ff_tab !== nothing ? ff_tab : (Float64[0,1], Float64[1,1])
 
     moments_q = zeros(Float64, nl)
-    # GL-6 energy quadrature
-    nq_e = 6
-    qp_e = _GL6_PTS
-    qw_e = _GL6_WTS
+    # Lobatto-2 energy quadrature (matches Fortran gpanel nq=2 for coherent)
+    nq_e = 2
+    qp_e = Float64[-1.0, 1.0]
+    qw_e = Float64[1.0, 1.0]
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
@@ -907,14 +928,13 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
 
-            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
             if is_first
                 if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
                 is_first = false
             end
-            if eb == ehi; eb *= _GPANEL_DELTA; end
+            is_last = (eb == ehi)
+            if is_last; eb *= _GPANEL_DELTA; end
 
-            # σ at clipped endpoints (for linear interpolation within panel)
             if e2 > e1
                 frac_a = (ea - e1) / (e2 - e1)
                 frac_b = (eb - e1) / (e2 - e1)
@@ -924,25 +944,25 @@ function _gaminr_coherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, ff
             sa = s1 + frac_a * (s2 - s1)
             sb = s1 + frac_b * (s2 - s1)
 
-            # W at panel endpoints — linear interp of product σ×W (matching gpanel)
             wa_e = _gaminr_weight(iwt, ea)
             wb_e = _gaminr_weight(iwt, eb)
             rr_lo = sa * wa_e
             rr_hi = sb * wb_e
 
-            # GL-6 energy quadrature
             aq_e = (ea + eb) / 2.0
             bq_e = (eb - ea) / 2.0
+            # Fortran gpanel (gaminr.f90:980-982) uses t1=(eq-elo)/(ehi_local-elo) where
+            # ehi_local is shortened to enext for middle panels (→ eb here) but stays at
+            # the group upper bound for the last panel (→ original ehi, before delta nudge).
+            ehi_for_t1 = is_last ? ehi : eb
 
             for iq_e in 1:nq_e
                 eq = aq_e + bq_e * qp_e[iq_e]
                 wq_e = bq_e * qw_e[iq_e]
 
-                # Linear interpolation of reaction rate σ×W (matching gpanel)
-                t1 = (eq - ea) / max(eb - ea, 1e-30)
+                t1 = (eq - ea) / max(ehi_for_t1 - ea, 1e-30)
                 rr = rr_lo + (rr_hi - rr_lo) * t1
 
-                # Angular distribution at this energy
                 _coherent_feed_at_energy!(moments_q, eq, nl, q_vals, ff_vals)
 
                 wt = rr * wq_e
@@ -1106,17 +1126,32 @@ function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, 
     qp = nq_p == 6 ? _GL6_PTS : _GL10_PTS
     qw = nq_p == 6 ? _GL6_WTS : _GL10_WTS
 
-    # Energy GL quadrature: match Fortran gpanel nq=6 for incoherent
-    nq_e = 6
-    qp_e = _GL6_PTS
-    qw_e = _GL6_WTS
+    # Fortran gpanel energy quadrature for MF26 MT=504: gtff returns nq=8 (inner
+    # nq=6 for nl<=6, then `nq=nq+2` at gaminr.f90:1495). gpanel adds 2 (line 927)
+    # → 10, capped at 10. So Lobatto-10 is used unconditionally for incoherent.
+    nq_e = 10
+    qp_e = _GL10_PTS
+    qw_e = _GL10_WTS
 
     ff_work = zeros(Float64, nl, ngg)
+
+    # Fortran gtff MT=504 (gaminr.f90:1477-1495) returns kinematic breakpoints
+    # at the Compton-edge energies egg[i]/(1-2·c3·egg[i]) for egg[i]<1/c3.
+    # These split panels within groups where c3·elo < 0.5.
+    kin_breaks = Float64[]
+    for j in 1:length(egg)
+        c3e = _GAMINR_C3 * egg[j]
+        (c3e >= 1.0 || c3e <= 0.0) && continue
+        denom = 1.0 - 2.0 * c3e
+        denom > 0 && push!(kin_breaks, egg[j] / denom)
+    end
+    sort!(kin_breaks)
 
     for ig in 1:ngg
         elo, ehi = egg[ig], egg[ig+1]
         flux[ig] <= 0 && continue
         is_first = true
+        flux_mt504 = 0.0
 
         for i in 1:length(energies)-1
             e1, e2 = energies[i], energies[i+1]
@@ -1124,60 +1159,93 @@ function _gaminr_incoherent_matrix!(ans, flux, energies, xs_vals, egg, iwt, nl, 
             ea = max(e1, elo); eb = min(e2, ehi)
             ea >= eb && continue
 
-            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
-            if is_first
-                if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
-                is_first = false
+            # Walk sub-panels: kinematic breakpoints are discontinuities
+            # (idisc=1 from gtff MT=504), so Fortran applies delta on approach
+            # and rndoff after — like group boundaries.
+            pa_next = ea
+            kp_idx = 1
+            while kp_idx <= length(kin_breaks) && kin_breaks[kp_idx] <= pa_next
+                kp_idx += 1
             end
-            if eb == ehi; eb *= _GPANEL_DELTA; end
 
-            # σ at clipped PENDF panel endpoints (linear interp on PENDF grid)
-            if e2 > e1
-                frac_a = (ea - e1) / (e2 - e1)
-                frac_b = (eb - e1) / (e2 - e1)
-            else
-                frac_a = 0.0; frac_b = 0.0
-            end
-            sa = s1 + frac_a * (s2 - s1)
-            sb = s1 + frac_b * (s2 - s1)
+            while pa_next < eb
+                # Determine sub-panel upper bound before any nudge
+                pb_raw = eb
+                hit_kin = false
+                if kp_idx <= length(kin_breaks) && kin_breaks[kp_idx] < eb
+                    pb_raw = kin_breaks[kp_idx]
+                    hit_kin = true
+                end
 
-            # W at panel endpoints — Fortran gpanel linearly interpolates
-            # the PRODUCT σ×W (reaction rate), not σ and W separately
-            wa_e = _gaminr_weight(iwt, ea)
-            wb_e = _gaminr_weight(iwt, eb)
-            rr_lo = sa * wa_e   # reaction rate at lower boundary (Fortran b = slst*flst)
-            rr_hi = sb * wb_e   # reaction rate at upper boundary (Fortran a = sig*flux)
+                pa = pa_next
+                pb = pb_raw
 
-            # GL-6 energy quadrature (matching Fortran gpanel)
-            aq_e = (ea + eb) / 2.0
-            bq_e = (eb - ea) / 2.0
+                if is_first
+                    if pa * _GPANEL_RNDOFF < ehi; pa *= _GPANEL_RNDOFF; end
+                    is_first = false
+                end
+                is_last_of_group = (pb == ehi)
+                if is_last_of_group
+                    pb *= _GPANEL_DELTA
+                elseif hit_kin
+                    # Fortran: idisc>0 discontinuity → ehigh = ehi*delta (line 935)
+                    pb *= _GPANEL_DELTA
+                end
 
-            for iq_e in 1:nq_e
-                eq = aq_e + bq_e * qp_e[iq_e]
-                wq_e = bq_e * qw_e[iq_e]
+                if e2 > e1
+                    frac_a = (pa - e1) / (e2 - e1)
+                    frac_b = (pb - e1) / (e2 - e1)
+                else
+                    frac_a = 0.0; frac_b = 0.0
+                end
+                sa = s1 + frac_a * (s2 - s1)
+                sb = s1 + frac_b * (s2 - s1)
 
-                # Linear interpolation of reaction rate σ×W within panel
-                # Matches Fortran gpanel: rr = b + (a-b)*t1
-                t1 = (eq - ea) / max(eb - ea, 1e-30)
-                rr = rr_lo + (rr_hi - rr_lo) * t1
+                wa_e = _gaminr_weight(iwt, pa)
+                wb_e = _gaminr_weight(iwt, pb)
+                rr_lo = sa * wa_e
+                rr_hi = sb * wb_e
 
-                # Angular distribution at this energy (gtff call)
-                fill!(ff_work, 0.0)
-                heating_per, siginc = _incoherent_feed_at_energy!(
-                    ff_work, eq, egg, ngg, nl, q_vals, ff_vals, zz, nq_p, qp, qw)
+                aq_e = (pa + pb) / 2.0
+                bq_e = (pb - pa) / 2.0
+                # Fortran t1 uses ehi_local = pb_raw (pre-nudge): for hit_kin pb_raw is
+                # the kin bp (group upper via idisc=1 logic); for last-of-group pb_raw=ehi.
+                ehi_for_t1 = hit_kin ? pb_raw : (is_last_of_group ? ehi : pb)
 
-                if siginc > 0
-                    wt = rr * wq_e
-                    for gs in 1:ngg; for il in 1:nl
-                        ans[il, ig, gs] += wt * ff_work[il, gs]
-                    end; end
-                    ans[1, ig, ngg+1] += wt
-                    ans[1, ig, ngg+2] += wt * heating_per
+                flux_mt504 += (wa_e + wb_e) * (pb - pa) / 2.0
+
+                for iq_e in 1:nq_e
+                    eq = aq_e + bq_e * qp_e[iq_e]
+                    wq_e = bq_e * qw_e[iq_e]
+
+                    t1 = (eq - pa) / max(ehi_for_t1 - pa, 1e-30)
+                    rr = rr_lo + (rr_hi - rr_lo) * t1
+
+                    fill!(ff_work, 0.0)
+                    heating_per, siginc = _incoherent_feed_at_energy!(
+                        ff_work, eq, egg, ngg, nl, q_vals, ff_vals, zz, nq_p, qp, qw)
+
+                    if siginc > 0
+                        wt = rr * wq_e
+                        for gs in 1:ngg; for il in 1:nl
+                            ans[il, ig, gs] += wt * ff_work[il, gs]
+                        end; end
+                        ans[1, ig, ngg+1] += wt
+                        ans[1, ig, ngg+2] += wt * heating_per
+                    end
+                end
+
+                if hit_kin
+                    # After crossing kin bp, Fortran applies rndoff on entry to next panel
+                    pa_next = pb_raw * _GPANEL_RNDOFF
+                    kp_idx += 1
+                else
+                    pa_next = eb
                 end
             end
         end
 
-        # Normalize by flux (dspla)
+        flux[ig] = flux_mt504
         for ig_sink in 1:ngg+2; for il in 1:nl
             flux[ig] > 0 && (ans[il, ig, ig_sink] /= flux[ig])
         end; end
@@ -1221,12 +1289,12 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
             ea < 2.0 * epair && (ea = 2.0 * epair)
             ea >= eb && continue
 
-            # Fortran gpanel boundary nudges (gaminr.f90:907-937)
             if is_first
                 if ea * _GPANEL_RNDOFF < ehi; ea *= _GPANEL_RNDOFF; end
                 is_first = false
             end
-            if eb == ehi; eb *= _GPANEL_DELTA; end
+            is_last = (eb == ehi)
+            if is_last; eb *= _GPANEL_DELTA; end
             if e2 > e1
                 fa = (ea - e1) / (e2 - e1); fb = (eb - e1) / (e2 - e1)
             else
@@ -1234,9 +1302,18 @@ function _gaminr_pair_production_matrix!(ans, flux, energies, xs_vals, egg, iwt,
             end
             sa = s1 + fa * (s2 - s1); sb = s1 + fb * (s2 - s1)
             wa = _gaminr_weight(iwt, ea); wb = _gaminr_weight(iwt, eb)
+            b = sa * wa; a = sb * wb
             de = eb - ea
-            num += (sa * wa + sb * wb) * de / 2.0
-            heat_num += (ea * sa * wa + eb * sb * wb) * de / 2.0
+            # Fortran gpanel linear-rate rr(eq)=b+(a-b)*(eq-ea)/(ehi_local-ea).
+            # Last panel: ehi_local = ehi (group upper, before delta nudge); middle: ehi_local = eb.
+            if is_last
+                rr_pb = b + (a - b) * de / (ehi - ea)
+                num += (b + rr_pb) * de / 2.0
+                heat_num += (ea * b + eb * rr_pb) * de / 2.0
+            else
+                num += (b + a) * de / 2.0
+                heat_num += (ea * b + eb * a) * de / 2.0
+            end
         end
 
         # Use full-range flux for denominator (matching Fortran gpanel)
