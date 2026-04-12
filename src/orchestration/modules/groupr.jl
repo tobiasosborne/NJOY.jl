@@ -291,23 +291,19 @@ function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
         _write_data_line(io, buf, mat, 1, 451, seq); seq += 1
     end
 
-    # FEND for MF1
+    # Fortran groupr (see referenceTape24): MF1/MT451 goes straight to FEND,
+    # no SEND. MF3 sections use SEND=99999 but skip FEND; MEND follows directly.
     _write_fend_line(io, mat)
 
-    # MF3 sections for each MT
     for res in mt_results
         mt = res.mt
         records = res.records
         seq = 1
 
-        # HEAD: ZA, 0, NL=1, NG2=1, NZ=0, NGN
         _write_cont_line(io, za, 0.0, 1, 1, 0, ngn, mat, 3, mt, seq); seq += 1
 
-        # One record per group: CONT + data
         for (g, rec) in enumerate(records)
-            # CONT: 0, 0, NW=3, NG2=1, NW=3, IG
             _write_cont_line(io, 0.0, 0.0, 3, 1, 3, g, mat, 3, mt, seq); seq += 1
-            # Data: v1, v2, v3
             buf = format_endf_float(rec[1]) *
                   format_endf_float(rec[2]) *
                   format_endf_float(rec[3])
@@ -316,8 +312,8 @@ function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
 
         _write_send_line(io, mat, 3)
     end
-    _write_fend_line(io, mat)
 
-    # MEND
+    # MEND + TEND
     _write_fend_line(io, 0)
+    @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
 end

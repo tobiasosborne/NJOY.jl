@@ -30,11 +30,10 @@ end
 
 # Block expansion: LB=0/1/2 (diagonal), LB=5 (matrix), LB=6 (asymmetric)
 
-"Expand LB=0/1/2: diagonal covariance on energy intervals."
+"Expand LB=0/1: diagonal covariance on energy intervals."
 function expand_lb1(block::CovarianceBlock, egrid::AbstractVector{<:Real})
     ne = length(egrid) - 1; C = zeros(Float64, ne, ne)
     ek, fk = block.energies, block.data
-    # ENDF (E,F) pairs: F[k] applies over interval [E[k], E[k+1])
     nk = min(length(fk), length(ek)) - 1
     for k in 1:nk
         elo, ehi = ek[k], ek[k+1]
@@ -43,6 +42,28 @@ function expand_lb1(block::CovarianceBlock, egrid::AbstractVector{<:Real})
             emid >= elo && emid < ehi && (C[i,i] = fk[k])
         end
     end; C
+end
+
+"""Expand LB=2: fully correlated fractional variance, C[i,j] = F_k * F_l where
+intervals are looked up by the group's LOWER bound (Fortran `un(jg)`/`un(jh)`
+are lower bounds of union intervals; see errorr.f90:2087-2090)."""
+function expand_lb2(block::CovarianceBlock, egrid::AbstractVector{<:Real})
+    ne = length(egrid) - 1; C = zeros(Float64, ne, ne)
+    ek, fk = block.energies, block.data
+    nk = min(length(fk), length(ek)) - 1
+    f_lo = zeros(Float64, ne)
+    for i in 1:ne
+        e_lo = egrid[i]
+        for k in 1:nk
+            if e_lo >= ek[k] && e_lo < ek[k+1]
+                f_lo[i] = fk[k]; break
+            end
+        end
+    end
+    for i in 1:ne, j in 1:ne
+        C[i,j] = f_lo[i] * f_lo[j]
+    end
+    C
 end
 
 "Expand LB=5, LT=1: symmetric upper-triangular covariance."
@@ -98,7 +119,8 @@ end
 
 """Dispatch on LB flag to expand a CovarianceBlock into a matrix on `egrid`."""
 function expand_covariance_block(block::CovarianceBlock, egrid::AbstractVector{<:Real})
-    block.lb in (0,1,2) && return expand_lb1(block, egrid)
+    block.lb in (0,1) && return expand_lb1(block, egrid)
+    block.lb == 2 && return expand_lb2(block, egrid)
     block.lb == 5 && return block.lt == 1 ? expand_lb5_symmetric(block, egrid) :
                                             expand_lb5_full(block, egrid)
     block.lb == 6 && return expand_lb5_full(block, egrid)

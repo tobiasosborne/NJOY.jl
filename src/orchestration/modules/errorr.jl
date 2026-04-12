@@ -351,9 +351,13 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
         nubar_values = _read_gendf_nubar(gendf_path, mat, egn2)
     end
 
-    # Read MF31 covariance from ENDF and expand onto second group grid
-    cov_mt = 452  # nubar
+    # Read MF31 covariance from ENDF and collapse onto second group grid.
+    # Fortran errorr's covcal works on a UNION grid (all block breakpoints +
+    # group boundaries) then collapses — direct per-group expansion skips
+    # sub-group structure from finer blocks and diverges from Fortran.
+    cov_mt = 452
     cov_matrix = zeros(Float64, ngn2, ngn2)
+    blocks = CovarianceBlock[]
     try
         open(endf_path) do io
             seekstart(io)
@@ -365,23 +369,34 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
                 for _ in 1:nc
                     try; read_list(io); catch; break; end
                 end
-                nc > 0 && continue  # Skip derived sub-sections
+                nc > 0 && continue
                 for _ in 1:ni
                     try
                         lst = read_list(io)
-                        lb = Int(lst.L2)
-                        # For MF31, use only LB=5 (symmetric matrix) blocks.
-                        # LB=1/2 diagonal corrections require full ERRORR covcal
-                        # treatment with union-grid expansion and are skipped here.
-                        lb == 5 || continue
-                        ne = Int(lst.N2); np = Int(lst.N1)
-                        block = CovarianceBlock(cov_mt, cov_mt, lb, Int(lst.L1),
-                            lst.data[1:ne], lst.data[ne+1:np])
-                        cov_matrix .+= expand_covariance_block(block, egn2)
+                        lb = Int(lst.L2); lt = Int(lst.L1)
+                        np = Int(lst.N1); ne = Int(lst.N2)
+                        block = if lb in (0,1,2,3,4)
+                            nk = div(np, 2)
+                            CovarianceBlock(cov_mt, cov_mt, lb, lt,
+                                lst.data[1:2:2nk], lst.data[2:2:2nk])
+                        elseif lb == 5
+                            CovarianceBlock(cov_mt, cov_mt, lb, lt,
+                                lst.data[1:ne], lst.data[ne+1:np])
+                        elseif lb == 6
+                            CovarianceBlock(cov_mt, cov_mt, lb, lt,
+                                lst.data[1:ne+lt], lst.data[ne+lt+1:np])
+                        else
+                            nothing
+                        end
+                        block !== nothing && push!(blocks, block)
                     catch; end
                 end
-                break  # Only first standalone sub-section
+                break
             end
+        end
+        if !isempty(blocks)
+            cm = multigroup_covariance(blocks, egn2)
+            cov_matrix = cm.matrix
         end
     catch e
         @warn "errorr: MF$mfcov/MT$cov_mt read failed: $e"
@@ -399,35 +414,32 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
     end
 
     open(nout_path, "w") do io
-        # 1. Copy nin content (previous errorr output) with continuous seq numbers
+        # Phase A (continuous seq): TPID + copied nin content + MEND separator
+        # + 2nd material's MF1/MT451. Matches referenceTape25 lines 0-84.
         seq = 0
         for i in 1:last_content
             p = rpad(nin_lines[i], 80)
-            seq += 1
             @printf(io, "%s%5d\n", p[1:75], seq)
+            seq += 1
         end
+        @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, seq); seq += 1  # MEND separator
 
-        # MEND only (FEND already included in copied nin content)
-        seq += 1; @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, seq)
-
-        # 2. Second material: MF1/MT451 with new group structure
-        seq += 1
-        _write_cont_line(io, za, awr, 5, 0, -length(egn2), 0, mat, 1, 451, seq)
-        seq += 1
-        _write_cont_line(io, 0.0, 0.0, ngn2, 0, length(egn2), 0, mat, 1, 451, seq)
+        _write_cont_line(io, za, awr, 5, 0, -11, 0, mat, 1, 451, seq); seq += 1
+        _write_cont_line(io, 0.0, 0.0, ngn2, 0, length(egn2), 0, mat, 1, 451, seq); seq += 1
         idx = 1
         while idx <= length(egn2)
-            seq += 1; buf = ""
+            buf = ""
             for col in 1:6
                 idx > length(egn2) && break
                 buf *= format_endf_float(egn2[idx]); idx += 1
             end
-            _write_data_line(io, buf, mat, 1, 451, seq)
+            _write_data_line(io, buf, mat, 1, 451, seq); seq += 1
         end
+
+        # Phase B (standard ENDF seq): SEND=99999, FEND=0, section seq resets to 1.
         _write_send_line(io, mat, 1)
         _write_fend_line(io, mat)
 
-        # 3. MF3/MT452: group-averaged nubar
         seq = 1
         _write_cont_line(io, za, 0.0, 0, 0, ngn2, 0, mat, 3, cov_mt, seq); seq += 1
         idx_v = 1
@@ -442,7 +454,6 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
         _write_send_line(io, mat, 3)
         _write_fend_line(io, mat)
 
-        # 4. MF33/MT452: nubar covariance matrix
         seq = 1
         _write_cont_line(io, za, awr, 0, 0, 0, 1, mat, 33, cov_mt, seq); seq += 1
         _write_cont_line(io, 0.0, 0.0, 0, cov_mt, 0, ngn2, mat, 33, cov_mt, seq); seq += 1
@@ -461,7 +472,6 @@ function _errorr_second_call(tapes::TapeManager, params::ErrorrParams,
         _write_send_line(io, mat, 33)
         _write_fend_line(io, mat)
 
-        # MEND + TEND
         _write_fend_line(io, 0)
         @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
     end
@@ -619,10 +629,10 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
 
     # MF1/MT451 — directory with group boundaries
+    # N1=-11 is the errorr convention (errorr.f90:5927), not a computed count.
     seq = 1
-    _write_cont_line(io, za, awr, 5, 0, -nw, 0, mat, 1, 451, seq); seq += 1
+    _write_cont_line(io, za, awr, 5, 0, -11, 0, mat, 1, 451, seq); seq += 1
     _write_cont_line(io, 0.0, 0.0, ngn, 0, nw, 0, mat, 1, 451, seq); seq += 1
-    # Write group boundaries (6 per line)
     idx = 1
     while idx <= nw
         buf = ""
@@ -636,10 +646,12 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     _write_fend_line(io, mat)
 
     # MF3 — group-averaged cross sections for each reaction
+    # Sequence resets to 1 at each SEND (new MT within same MF).
     for mt in reaction_mts
         haskey(group_xs, mt) || continue
         xs = group_xs[mt]
         length(xs) == ngn || continue
+        seq = 1
         _write_cont_line(io, za, 0.0, 0, 0, ngn, 0, mat, 3, mt, seq); seq += 1
         idx_v = 1
         while idx_v <= length(xs)
@@ -656,10 +668,7 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
 
     # MFcov — covariance matrices
     for mt in reaction_mts
-        # Build list of sub-sections: self-covariance + cross-covariances
         sub_keys = [(mt, mt2) for (mt1, mt2) in keys(cov_matrices) if mt1 == mt]
-        # Add zero cross-covariances for other reactions with HIGHER MT numbers
-        # (cross-correlations are stored only once, in the lower-MT section)
         for mt2 in reaction_mts
             mt2 <= mt && continue
             (mt, mt2) in sub_keys || push!(sub_keys, (mt, mt2))
@@ -668,15 +677,14 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
 
         isempty(sub_keys) && continue
         nl = length(sub_keys)
+        seq = 1
         _write_cont_line(io, za, awr, 0, 0, 0, nl, mat, mfcov, mt, seq); seq += 1
 
         for (mt1, mt2) in sub_keys
             matrix = get(cov_matrices, (mt1, mt2), nothing)
-            # Sub-section header: 0, 0, 0, MT2, 0, NG
             _write_cont_line(io, 0.0, 0.0, 0, mt2, 0, ngn, mat, mfcov, mt, seq); seq += 1
 
             if matrix !== nothing && any(!iszero, matrix)
-                # Full covariance matrix: each row as an NI-type block
                 for row in 1:ngn
                     _write_cont_line(io, 0.0, 0.0, ngn, 1, ngn, row, mat, mfcov, mt, seq); seq += 1
                     idx_v = 1
@@ -690,7 +698,6 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
                     end
                 end
             else
-                # Zero cross-covariance: single LIST with LB=9, NP=1, value=0
                 _write_cont_line(io, 0.0, 0.0, 1, 9, 1, ngn, mat, mfcov, mt, seq); seq += 1
                 _write_data_line(io, format_endf_float(0.0), mat, mfcov, mt, seq); seq += 1
             end
