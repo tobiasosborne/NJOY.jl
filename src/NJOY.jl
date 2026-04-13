@@ -145,6 +145,7 @@ include("orchestration/modules/gaminr.jl")
 include("orchestration/modules/dtfr.jl")
 include("orchestration/modules/matxsr.jl")
 include("orchestration/modules/viewr.jl")
+include("orchestration/modules/acer.jl")
 include("orchestration/pipeline.jl")
 
 # Public API -- constants

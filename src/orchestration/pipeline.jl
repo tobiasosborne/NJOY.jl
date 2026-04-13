@@ -207,6 +207,10 @@ function run_njoy(input_path::AbstractString;
             params = parse_viewr(mc)
             viewr_module(tapes, params)
 
+        elseif mc.name == :acer
+            params = parse_acer(mc)
+            acer_module(tapes, params)
+
         elseif mc.name == :plotr
             @info "plotr: skipped (visualization)"
         else
