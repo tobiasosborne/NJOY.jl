@@ -41,6 +41,7 @@ function tape_status_symbol(tr::NamedTuple, tolerances::Vector{Float64})
 end
 
 function test_status_symbol(r::NamedTuple, tolerances::Vector{Float64})
+    get(r, :timed_out, false)        && return :TIMEOUT
     !r.run_ok                        && return :CRASH
     isempty(r.tape_results)          && return :NO_REFERENCE
     ts = [tape_status_symbol(tr, tolerances) for tr in r.tape_results]
@@ -54,7 +55,7 @@ end
 function run_sweep(nums::Vector{Int}; tolerances::Vector{Float64}=[1e-9, 1e-7, 1e-5, 1e-3],
                     clear_cache_per_test::Bool=false,
                     heartbeat_sec::Float64=10.0,
-                    timeout_warn_sec::Float64=600.0)
+                    timeout_hard_sec::Float64=300.0)
 
     mkpath(REPORT_DIR)
     mkpath(joinpath(REPORT_DIR, "sweep_logs"))
@@ -87,12 +88,12 @@ function run_sweep(nums::Vector{Int}; tolerances::Vector{Float64}=[1e-9, 1e-7, 1
                                    tolerances=tolerances,
                                    verbose=true,
                                    heartbeat_sec=heartbeat_sec,
-                                   timeout_warn_sec=timeout_warn_sec)
+                                   timeout_hard_sec=timeout_hard_sec)
         catch ex
             msg = first(split(sprint(showerror, ex), '\n'))
             @printf("║ %s SWEEP-LEVEL CRASH: %s\n", test_id, msg)
             r = (; test=n, input="", work_dir="", run_ok=false,
-                   run_error=msg, elapsed=0.0,
+                   run_error=msg, elapsed=0.0, timed_out=false,
                    tape_results=NamedTuple[], summary="CRASH: $msg",
                    all_pass=false)
         end
@@ -134,7 +135,7 @@ function write_report(results, tolerances::Vector{Float64}, sweep_elapsed::Float
     println(io)
     println(io, "| Status | Count |")
     println(io, "|--------|-------|")
-    for s in [:BIT_IDENTICAL, :NUMERIC_PASS, :DIFFS, :STRUCTURAL_FAIL, :MISSING_TAPE, :NO_REFERENCE, :CRASH]
+    for s in [:BIT_IDENTICAL, :NUMERIC_PASS, :DIFFS, :STRUCTURAL_FAIL, :MISSING_TAPE, :NO_REFERENCE, :CRASH, :TIMEOUT]
         @printf(io, "| `%s` | %d |\n", s, get(status_counts, s, 0))
     end
     @printf(io, "| **Total** | **%d** |\n", length(results))
@@ -153,7 +154,7 @@ function write_report(results, tolerances::Vector{Float64}, sweep_elapsed::Float
         test_id = @sprintf("T%02d", r.test)
         status  = test_status_symbol(r, tolerances)
 
-        run_col = r.run_ok ? "ok" : "CRASH"
+        run_col = r.run_ok ? "ok" : (get(r, :timed_out, false) ? "TIMEOUT" : "CRASH")
 
         if isempty(r.tape_results)
             tape_col = r.run_ok ? "no referenceTape*" : "—"
@@ -177,13 +178,14 @@ function write_report(results, tolerances::Vector{Float64}, sweep_elapsed::Float
     end
     println(io)
 
-    # Crash details
-    crashes = [r for r in results if !r.run_ok]
-    if !isempty(crashes)
-        println(io, "## Crash details")
+    # Crash / timeout details
+    bad = [r for r in results if !r.run_ok]
+    if !isempty(bad)
+        println(io, "## Crashes and timeouts")
         println(io)
-        for r in crashes
-            @printf(io, "- **T%02d**: %s\n", r.test, r.run_error)
+        for r in bad
+            label = get(r, :timed_out, false) ? "TIMEOUT" : "CRASH"
+            @printf(io, "- **T%02d** [%s]: %s\n", r.test, label, r.run_error)
         end
         println(io)
     end
@@ -233,7 +235,7 @@ function print_terminal_summary(results, tolerances::Vector{Float64})
     println(repeat("═", 60))
     println("Sweep Summary")
     println(repeat("═", 60))
-    for s in [:BIT_IDENTICAL, :NUMERIC_PASS, :DIFFS, :STRUCTURAL_FAIL, :MISSING_TAPE, :NO_REFERENCE, :CRASH]
+    for s in [:BIT_IDENTICAL, :NUMERIC_PASS, :DIFFS, :STRUCTURAL_FAIL, :MISSING_TAPE, :NO_REFERENCE, :CRASH, :TIMEOUT]
         c = get(status_counts, s, 0)
         c == 0 && continue
         @printf("  %-18s  %d\n", s, c)

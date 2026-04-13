@@ -57,7 +57,7 @@ mutable struct RunProgress
     last_message::String       # free-form last-activity note
 end
 
-RunProgress() = RunProgress(:idle, 0.0, time(), :idle, "")
+RunProgress() = (t = time(); RunProgress(:idle, t, t, :idle, "initializing"))
 
 @inline function _progress_start!(p::Union{Nothing,RunProgress}, name::Symbol, verbose::Bool)
     if p !== nothing

@@ -142,50 +142,86 @@ end
 # =========================================================================
 
 """
-    with_heartbeat(f, progress; test_id="", heartbeat_sec=10.0, timeout_warn_sec=600.0) -> f()
+    with_heartbeat_and_timeout(f, progress; test_id="", heartbeat_sec=10.0,
+                                timeout_hard_sec=300.0) -> (result, :ok | :timeout)
 
-Run `f()` while a background Timer watches `progress::RunProgress`. Every
-`heartbeat_sec` seconds, if the current module has not changed (i.e. it's been
-running for more than `heartbeat_sec`), print a heartbeat line.
+Run `f()` in an `@async` task while a background `Timer` watches
+`progress::RunProgress`. Every `heartbeat_sec` seconds, if the current module
+has been running ≥ `heartbeat_sec`, print a heartbeat line.
 
-At `timeout_warn_sec` the heartbeat gets loud ("⚠ SOFT TIMEOUT EXCEEDED").
-Does NOT kill — Ctrl-C to stop. Cache safety requires in-process execution.
+At `timeout_hard_sec`, throw an `InterruptException` into the task via
+`schedule(task, exn; error=true)`. The exception fires at the task's next
+yield point (file I/O, `@info` log, GC trigger — frequent in practice for
+NJOY modules). The caller gets back `(nothing, :timeout)`; a normal finish
+yields `(f_result, :ok)`.
+
+Hard-kill is deliberately at-next-yield rather than signal-level — cache
+safety mandates staying in-process. Tests stuck in truly tight CPU loops
+with zero yields will not respond to the interrupt; manual Ctrl-C escalation
+is the fallback.
 """
-function with_heartbeat(f, progress::NJOY.RunProgress;
-                         test_id::AbstractString="",
-                         heartbeat_sec::Float64=10.0,
-                         timeout_warn_sec::Float64=600.0)
+function with_heartbeat_and_timeout(f, progress::NJOY.RunProgress;
+                                     test_id::AbstractString="",
+                                     heartbeat_sec::Float64=10.0,
+                                     timeout_hard_sec::Float64=300.0)
     run_start = time()
-    last_heartbeat = Ref(run_start)
-    warned_timeout = Ref(false)
+    timed_out = Ref(false)
+
+    task = @async try
+        f()
+    catch ex
+        # InterruptException scheduled by the timeout Timer bubbles up here.
+        rethrow(ex)
+    end
 
     hb = Timer(heartbeat_sec; interval=heartbeat_sec) do _
         now = time()
         elapsed_total  = now - run_start
         elapsed_module = now - progress.module_start
-        # Only heartbeat if a module is running AND has been >= heartbeat_sec
-        if progress.status == :running && elapsed_module >= heartbeat_sec
-            prefix = isempty(test_id) ? "" : "[$test_id] "
-            if elapsed_total >= timeout_warn_sec && !warned_timeout[]
-                @printf("%s⚠ SOFT TIMEOUT at %.0fs — still in %s (%.1fs)  last: %s\n",
-                        prefix, elapsed_total, progress.current_module,
-                        elapsed_module, progress.last_message)
-                warned_timeout[] = true
-            else
-                @printf("%s… still in %s (%.1fs, total %.1fs)  last: %s\n",
-                        prefix, progress.current_module,
-                        elapsed_module, elapsed_total, progress.last_message)
-            end
+        prefix = isempty(test_id) ? "" : "[$test_id] "
+
+        if elapsed_total >= timeout_hard_sec && !timed_out[]
+            timed_out[] = true
+            @printf("%s⚠ HARD TIMEOUT at %.0fs — killing (current: %s for %.1fs)  last: %s\n",
+                    prefix, elapsed_total, progress.current_module,
+                    elapsed_module, progress.last_message)
             flush(stdout)
-            last_heartbeat[] = now
+            # Schedule InterruptException for next yield point. Task may overshoot
+            # by seconds if it's in a tight no-I/O loop; no way to hard-kill without
+            # subprocess. Overshoot shows up in the elapsed time.
+            try
+                schedule(task, InterruptException(); error=true)
+            catch
+                # Task may have already finished — race, ignore.
+            end
+        elseif elapsed_total >= heartbeat_sec
+            # Unconditional heartbeat once we're past the grace period — prints
+            # even if no module has started yet, so stalled init is visible.
+            @printf("%s… %s for %.1fs (total %.1fs)  last: %s\n",
+                    prefix, progress.current_module,
+                    elapsed_module, elapsed_total, progress.last_message)
+            flush(stdout)
         end
     end
 
+    result = nothing
+    status = :ok
     try
-        return f()
+        result = fetch(task)
+    catch ex
+        # InterruptException propagated — timed out OR user hit Ctrl-C.
+        if timed_out[] || ex isa InterruptException ||
+           (ex isa TaskFailedException && ex.task.exception isa InterruptException)
+            status = :timeout
+        else
+            close(hb)
+            rethrow(ex)
+        end
     finally
         close(hb)
     end
+
+    (result, status)
 end
 
 # =========================================================================
@@ -211,7 +247,7 @@ function run_reference_test(n::Int;
                              work_dir::Union{Nothing,String} = nothing,
                              verbose::Bool = true,
                              heartbeat_sec::Float64 = 10.0,
-                             timeout_warn_sec::Float64 = 600.0,
+                             timeout_hard_sec::Float64 = 300.0,
                              max_show::Int = 3)
     test_id   = @sprintf("T%02d", n)
     test_dir  = joinpath(TESTS_ROOT, lpad(n, 2, '0'))
@@ -233,14 +269,22 @@ function run_reference_test(n::Int;
 
     run_ok    = false
     run_error = ""
+    timed_out = false
     t0        = time()
     try
-        with_heartbeat(progress; test_id=test_id,
-                       heartbeat_sec=heartbeat_sec,
-                       timeout_warn_sec=timeout_warn_sec) do
+        _, run_status = with_heartbeat_and_timeout(progress;
+                                test_id=test_id,
+                                heartbeat_sec=heartbeat_sec,
+                                timeout_hard_sec=timeout_hard_sec) do
             NJOY.run_njoy(input_pth; work_dir=wdir, verbose=verbose, progress=progress)
         end
-        run_ok = true
+        if run_status == :timeout
+            timed_out = true
+            run_error = "TIMEOUT after $(timeout_hard_sec)s (last module: $(progress.current_module))"
+            verbose && (@printf("║ %s TIMEOUT: %s\n", test_id, run_error); flush(stdout))
+        else
+            run_ok = true
+        end
     catch ex
         run_error = first(split(sprint(showerror, ex), '\n'))
         verbose && (@printf("║ %s CRASH: %s\n", test_id, run_error); flush(stdout))
@@ -316,7 +360,9 @@ function run_reference_test(n::Int;
     # Overall summary
     all_pass_strict = run_ok && !isempty(tape_results) &&
                       all(tr -> get(tr.tolerance_pass, first(tolerances), false), tape_results)
-    summary = if !run_ok
+    summary = if timed_out
+        "TIMEOUT: $run_error"
+    elseif !run_ok
         "CRASH: $run_error"
     elseif isempty(ref_files)
         "NO_REFERENCE"
@@ -330,7 +376,7 @@ function run_reference_test(n::Int;
     verbose && (@printf("╚ %s done  %.1fs  %s\n\n", test_id, elapsed, summary); flush(stdout))
 
     (; test=n, input=input_pth, work_dir=wdir, run_ok, run_error, elapsed,
-       tape_results, summary, all_pass=all_pass_strict)
+       timed_out, tape_results, summary, all_pass=all_pass_strict)
 end
 
 # Script entry: `julia --project=. test/validation/reference_test.jl NN [NN ...]`
