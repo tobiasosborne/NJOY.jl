@@ -286,7 +286,13 @@ function run_reference_test(n::Int;
             run_ok = true
         end
     catch ex
-        run_error = first(split(sprint(showerror, ex), '\n'))
+        # Unwrap TaskFailedException (from @async) so we see the actual
+        # module-level error, not "TaskFailedException".
+        inner = ex
+        while inner isa TaskFailedException
+            inner = inner.task.exception
+        end
+        run_error = first(split(sprint(showerror, inner), '\n'))
         verbose && (@printf("║ %s CRASH: %s\n", test_id, run_error); flush(stdout))
     end
     elapsed = time() - t0

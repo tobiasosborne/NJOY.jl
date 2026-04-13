@@ -76,8 +76,9 @@ equivalence semantics identical to `njoy-reference/tests/execute.py`.
 - `test/runtests.jl` — `@testset "Reference Tests (Fortran-faithful)"` at end, invoked by `Pkg.test()`.
 
 Verbose output + 10s heartbeat (`[Txx] … still in <module> (Xs) last: …`) means
-hangs are visible immediately. Single process, sequential — cache safety. No
-hard-kill (Ctrl-C to abort). Soft-timeout warning at 600s.
+hangs are visible immediately. Single process, sequential — cache safety.
+Hard timeout at 1800s per test (throws `InterruptException` into the task; may
+overshoot if task has no yield points, but flags `:TIMEOUT` cleanly).
 
 See `worklog/T08_reference_test_framework.md` for full design notes.
 
@@ -86,6 +87,39 @@ julia --project=. test/validation/reference_test.jl 3        # single test
 julia --project=. test/validation/sweep_reference_tests.jl   # all 84
 julia --project=. -e 'using Pkg; Pkg.test()'                 # full suite
 ```
+
+### Sweep baseline (2026-04-13, 2h 13m, full 84 tests)
+
+`reports/REFERENCE_SWEEP.md`. Numbers are **from the first clean sweep** run
+after Phase 8 framework landed:
+
+| Status | Count | Tests |
+|--------|-------|-------|
+| `BIT_IDENTICAL`  | 1  | T03 |
+| `NUMERIC_PASS`   | 1  | T01 (tape25 @ 1e-5) |
+| `DIFFS`          | 12 | T02, T04, T29, T30, T44, T45, T46, T73, T81, T83, T84, T85 |
+| `MISSING_TAPE`   | 14 | T07, T10, T11, T19, T22, T23, T31, T33, T48, T59, T61, T75, T80, T82 |
+| `NO_REFERENCE`   | 1  | T76 |
+| `CRASH`          | 55 | see report for details |
+
+**Interpretation:**
+- BIT_IDENTICAL = 1 is the floor after Phase 7 regression-safe work. T03 full
+  photon pipeline (reconr→gaminr→dtfr→matxsr→viewr) holds byte-for-byte.
+- 55 crashes cluster into a few categories:
+  - **`acer` not dispatched** (T05, T08, T14, T24, T25, T50–54, T59, T61, T62, T71 — 15 tests). acer is in the module pool but `run_njoy`'s dispatcher doesn't call it. Tests that need ACE file output crash when downstream modules try to read missing tapes.
+  - **`purr` not dispatched** (T35–T42 — 8 tests). Same pattern: tests expect tape34/44 from purr.
+  - **Photonuclear chains** (T55–T58, T64, T66, T78 — 7 tests). Need `gaspr` dispatch + MF23 photonuclear handling.
+  - **`leapr` not dispatched** (T22/T23/T33/T80 run but produce nothing; T09/T25/T43/T49/T67–T70/T74 crash because thermr tries to consume leapr output).
+  - **Dense-resonance natural crashes** (T15/T16/T17 U-238 JENDL + T27 Pu-239 + T34 Pu-240 + T65 U-235). These run 500–2000s of reconr+broadr then hit genuine precision/format bugs. Historically the longest tests.
+- 12 DIFFS: mostly small tapes with a handful of failing lines — usually FP precision at tolerance boundaries.
+- 14 MISSING_TAPE: pipeline ran but expected output tape wasn't produced — usually because a module call chain depends on an undispatched upstream.
+
+**Priority follow-ups ranked by tests-unblocked-per-effort:**
+1. **Dispatch `acer`** in `run_njoy` → potentially unblocks 15 tests.
+2. **Dispatch `purr`** → 8 tests.
+3. **Dispatch `leapr`** → ~10 tests (T22/T23/T33/T80 immediate; several thermr chains downstream).
+4. Fix `UndefVarError: h` in heatr (T08, T13) — real bug, surfaced by the sweep.
+5. The 12 DIFFS cases — per-tape bisection to push them toward bit-identical.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
