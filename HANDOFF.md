@@ -63,7 +63,31 @@ Launch multiple **research** subagents in parallel for maximum efficiency:
 
 ## Test Infrastructure
 
-### Oracle system
+### Fortran-faithful reference test framework (Phase 8 — 2026-04-13)
+
+**Primary test harness.** For each Fortran reference test NN, runs the
+**real input deck** `njoy-reference/tests/NN/input` through `run_njoy(…)` and
+compares every produced `tape{U}` against `referenceTape{U}` using line-
+equivalence semantics identical to `njoy-reference/tests/execute.py`.
+
+- `test/validation/reference_test.jl` — `run_reference_test(N)` generic runner.
+- `test/validation/sweep_reference_tests.jl` — loops all 84, writes `reports/REFERENCE_SWEEP.md`.
+- `test/validation/module_coverage.jl` — writes `MODULE_COVERAGE.md` (which Fortran tests cover each Julia port).
+- `test/runtests.jl` — `@testset "Reference Tests (Fortran-faithful)"` at end, invoked by `Pkg.test()`.
+
+Verbose output + 10s heartbeat (`[Txx] … still in <module> (Xs) last: …`) means
+hangs are visible immediately. Single process, sequential — cache safety. No
+hard-kill (Ctrl-C to abort). Soft-timeout warning at 600s.
+
+See `worklog/T08_reference_test_framework.md` for full design notes.
+
+```bash
+julia --project=. test/validation/reference_test.jl 3        # single test
+julia --project=. test/validation/sweep_reference_tests.jl   # all 84
+julia --project=. -e 'using Pkg; Pkg.test()'                 # full suite
+```
+
+### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
 - `after_reconr.pendf` — ASCII PENDF after reconr (the main comparison target)
 - `after_broadr.pendf` — ASCII PENDF after broadr (if the test chain includes broadr)

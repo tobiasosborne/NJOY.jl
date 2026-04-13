@@ -42,6 +42,47 @@ RunContext() = RunContext(
     0, 0.0, 0.0, "")
 
 """
+    RunProgress
+
+Live progress marker updated by `run_njoy` as each module runs. Readable from
+another task (e.g. a heartbeat `Timer`) to detect hangs without subprocess
+isolation. Concurrent reads are safe — fields are small primitives and writes
+happen only at module boundaries.
+"""
+mutable struct RunProgress
+    current_module::Symbol     # :idle | :reconr | :broadr | … | :done
+    module_start::Float64      # time() when current_module started
+    run_start::Float64         # time() when run_njoy was called
+    status::Symbol             # :idle | :running | :done
+    last_message::String       # free-form last-activity note
+end
+
+RunProgress() = RunProgress(:idle, 0.0, time(), :idle, "")
+
+@inline function _progress_start!(p::Union{Nothing,RunProgress}, name::Symbol, verbose::Bool)
+    if p !== nothing
+        p.current_module = name
+        p.module_start = time()
+        p.status = :running
+        p.last_message = "$(name) starting"
+    end
+    if verbose
+        println("  ", rpad(String(name), 8), " … start"); flush(stdout)
+    end
+end
+
+@inline function _progress_end!(p::Union{Nothing,RunProgress}, name::Symbol, verbose::Bool)
+    dt = p !== nothing ? time() - p.module_start : 0.0
+    if p !== nothing
+        p.last_message = "$(name) done"
+        p.status = :idle
+    end
+    if verbose
+        @printf("  %-8s … done %7.2fs\n", String(name), dt); flush(stdout)
+    end
+end
+
+"""
     run_njoy(input_path::AbstractString; work_dir::AbstractString = mktempdir())
 
 Execute an NJOY input deck end-to-end. Parses the deck, resolves tape
@@ -66,7 +107,9 @@ tapes = run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01")
 ```
 """
 function run_njoy(input_path::AbstractString;
-                  work_dir::AbstractString = mktempdir())
+                  work_dir::AbstractString = mktempdir(),
+                  verbose::Bool = false,
+                  progress::Union{Nothing,RunProgress} = nothing)
 
     # 1. Parse input deck
     deck = parse_njoy_input(input_path)
@@ -78,11 +121,15 @@ function run_njoy(input_path::AbstractString;
     ctx = RunContext()
 
     @info "run_njoy: $(length(deck.calls)) module calls, work_dir=$work_dir"
+    if verbose
+        println("run_njoy: $(length(deck.calls)) module calls"); flush(stdout)
+    end
 
     # 4. Dispatch loop — matches Fortran main.f90 select-case
     last_moder_out = 0  # track final moder output unit for assembly
 
     for mc in deck.calls
+        _progress_start!(progress, mc.name, verbose)
         if mc.name == :moder
             card1 = mc.raw_cards
             if !isempty(card1) && !isempty(card1[1])
@@ -165,6 +212,7 @@ function run_njoy(input_path::AbstractString;
         else
             @warn "Module $(mc.name) not yet implemented"
         end
+        _progress_end!(progress, mc.name, verbose)
     end
 
     # 5. Final assembly: produce complete output tape via write_full_pendf
@@ -182,6 +230,12 @@ function run_njoy(input_path::AbstractString;
     end
 
     @info "run_njoy: complete"
+    if progress !== nothing
+        progress.current_module = :done
+        progress.status = :done
+        progress.last_message = "complete"
+    end
+    verbose && (println("run_njoy: complete"); flush(stdout))
     tapes
 end
 

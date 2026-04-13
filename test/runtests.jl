@@ -7367,3 +7367,50 @@ include("integration_tests.jl")
 
 # Full NJOY validation pipeline (85 tests against NJOY2016 reference tapes)
 include("validation/run_all_tests.jl")
+
+# =========================================================================
+# Reference tests — Fortran-faithful (mirror njoy-reference/tests/execute.py)
+#
+# For each covered test, runs the real Fortran input deck through
+# run_njoy(…) and compares every produced tape{U} against referenceTape{U}
+# using execute.py-equivalent line semantics (date wildcarded; floats
+# compared with rtol/atol; non-numeric residue must match).
+#
+# Adding a test here = "this module chain has achieved this tolerance level
+# and will not regress." Tapes listed in `broken_tapes` are tracked as
+# @test_broken (known ongoing work). Bump the tolerance up when a tape
+# improves; move a tape out of broken_tapes when it reaches usable
+# tolerance.
+# =========================================================================
+include("validation/reference_test.jl")
+
+const REFERENCE_TEST_STATE = [
+    (test=1, tolerance=1e-5, broken_tapes=Int[],
+     note="reconr→broadr→heatr→thermr×2 full pipeline (C-nat)"),
+    (test=2, tolerance=1e-5, broken_tapes=[29],
+     note="reconr→broadr×3→unresr→groupr→ccccr (Pu-238); tape29 needs groupr MF6"),
+    (test=3, tolerance=1e-9, broken_tapes=Int[],
+     note="reconr→gaminr→dtfr→matxsr→viewr bit-identical (photon 12-group)"),
+    (test=4, tolerance=1e-5, broken_tapes=[25],
+     note="moder→reconr→errorr→groupr→errorr (U-235 cov); tape25 has 11 MF33 lines @ 3-6%"),
+]
+
+@testset "Reference Tests (Fortran-faithful)" begin
+    for s in REFERENCE_TEST_STATE
+        @testset "T$(lpad(s.test,2,'0')) — $(s.note)" begin
+            r = run_reference_test(s.test;
+                                    tolerances=[s.tolerance],
+                                    verbose=true)
+            @test r.run_ok                                  # must not crash
+            @test !isempty(r.tape_results)                  # must produce at least one tape
+            for tr in r.tape_results
+                @test tr.exists                             # tape must be produced
+                if tr.unit in s.broken_tapes
+                    @test_broken get(tr.tolerance_pass, s.tolerance, false)
+                else
+                    @test get(tr.tolerance_pass, s.tolerance, false)
+                end
+            end
+        end
+    end
+end
