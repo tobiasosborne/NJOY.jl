@@ -7,7 +7,7 @@ compares every produced `tape{U}` against the corresponding `referenceTape{U}`
 using `execute.py`-equivalent line semantics (date wildcarded, floats with
 `rtol/atol` tolerance, non-numeric residue must match).
 
-Sweep duration: **7997.3s** (133.3 min)
+Sweep duration: **7964.2s** (132.7 min)
 
 ## Summary
 
@@ -29,61 +29,61 @@ Per-tape pass at each tolerance: `1.0e-9` / `1.0e-7` / `1.0e-5` / `0.001`
 
 | Test | Status | Run | Time | Reference tape results |
 |------|--------|-----|------|------------------------|
-| T01 | `NUMERIC_PASS` | ok | 72.4s | tape25:✗/✗/✓/✓ 32812/32962 |
-| T02 | `DIFFS` | ok | 4.6s | tape28:✗/✗/✓/✓ 12519/13873 · tape29:✗/✗/✗/✗ 1/627 |
+| T01 | `NUMERIC_PASS` | ok | 70.4s | tape25:✗/✗/✓/✓ 32812/32962 |
+| T02 | `DIFFS` | ok | 4.5s | tape28:✗/✗/✓/✓ 12519/13873 · tape29:✗/✗/✗/✗ 1/627 |
 | T03 | `BIT_IDENTICAL` | ok | 0.7s | tape37:✓/✓/✓/✓ 9274/9274 |
-| T04 | `DIFFS` | ok | 1.4s | tape23:✗/✓/✓/✓ 80/82 · tape24:✗/✗/✓/✓ 56/74 · tape25:✗/✗/✗/✗ 106/119 |
-| T05 | `CRASH` | CRASH | 2.5s | tape33:✗/✗/✗/✗ 19/21471 · tape34:MISSING · tape35:✗/✗/✗/✗ 0/0 |
+| T04 | `DIFFS` | ok | 1.3s | tape23:✗/✓/✓/✓ 80/82 · tape24:✗/✗/✓/✓ 56/74 · tape25:✗/✗/✗/✗ 106/119 |
+| T05 | `CRASH` | CRASH | 0.8s | tape33:✗/✗/✗/✗ 19/21471 · tape34:MISSING · tape35:✗/✗/✗/✗ 0/0 |
 | T06 | `CRASH` | CRASH | 0.0s | tape32:✗/✗/✗/✗ 0/0 |
 | T07 | `MISSING_TAPE` | ok | 5.5s | tape26:MISSING · tape28:✗/✗/✗/✗ 16/17897 |
-| T08 | `CRASH` | CRASH | 4.9s | tape25:MISSING · tape28:MISSING |
+| T08 | `CRASH` | CRASH | 4.8s | tape25:MISSING · tape28:MISSING |
 | T09 | `CRASH` | CRASH | 0.2s | tape24:MISSING |
-| T10 | `MISSING_TAPE` | ok | 2.2s | tape26:MISSING · tape28:MISSING |
-| T11 | `MISSING_TAPE` | ok | 6.0s | tape27:MISSING · tape28:✗/✗/✗/✗ 0/10379 |
-| T12 | `CRASH` | CRASH | 0.3s | tape22:MISSING · tape24:✗/✗/✗/✗ 0/0 |
-| T13 | `CRASH` | CRASH | 1.3s | tape26:MISSING · tape28:MISSING · tape36:MISSING |
+| T10 | `MISSING_TAPE` | ok | 2.1s | tape26:MISSING · tape28:MISSING |
+| T11 | `MISSING_TAPE` | ok | 5.7s | tape27:MISSING · tape28:✗/✗/✗/✗ 0/10379 |
+| T12 | `CRASH` | CRASH | 0.2s | tape22:MISSING · tape24:✗/✗/✗/✗ 0/0 |
+| T13 | `CRASH` | CRASH | 1.2s | tape26:MISSING · tape28:MISSING · tape36:MISSING |
 | T14 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape36:✗/✗/✗/✗ 0/0 |
-| T15 | `CRASH` | CRASH | 1109.4s | tape25:MISSING · tape26:MISSING · tape27:MISSING · tape35:MISSING · tape36:MISSING · tape37:MISSING · tape45:MISSING · tape46:MISSING · tape47:MISSING · tape91:MISSING |
-| T16 | `CRASH` | CRASH | 1173.4s | tape26:✗/✗/✗/✗ 1/5958 · tape27:✗/✗/✗/✗ 1/41 · tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING |
-| T17 | `CRASH` | CRASH | 1937.5s | tape26:MISSING · tape91:MISSING · tape92:MISSING · tape93:MISSING · tape99:MISSING |
-| T18 | `CRASH` | CRASH | 5.6s | tape28:✗/✗/✗/✗ 1/22 · tape38:MISSING · tape39:✗/✗/✗/✗ 0/0 · tape91:✗/✗/✗/✗ 2/12 |
-| T19 | `MISSING_TAPE` | ok | 4.9s | tape27:MISSING · tape29:✗/✗/✗/✗ 1/9793 |
+| T15 | `CRASH` | CRASH | 1097.9s | tape25:MISSING · tape26:MISSING · tape27:MISSING · tape35:MISSING · tape36:MISSING · tape37:MISSING · tape45:MISSING · tape46:MISSING · tape47:MISSING · tape91:MISSING |
+| T16 | `CRASH` | CRASH | 1165.0s | tape26:✗/✗/✗/✗ 1/5958 · tape27:✗/✗/✗/✗ 1/41 · tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING |
+| T17 | `CRASH` | CRASH | 1931.7s | tape26:MISSING · tape91:MISSING · tape92:MISSING · tape93:MISSING · tape99:MISSING |
+| T18 | `CRASH` | CRASH | 5.8s | tape28:✗/✗/✗/✗ 1/22 · tape38:MISSING · tape39:✗/✗/✗/✗ 0/0 · tape91:✗/✗/✗/✗ 2/12 |
+| T19 | `MISSING_TAPE` | ok | 5.0s | tape27:MISSING · tape29:✗/✗/✗/✗ 1/9793 |
 | T20 | `CRASH` | CRASH | 0.0s | tape23:MISSING · tape27:MISSING |
-| T21 | `CRASH` | CRASH | 29.8s | tape24:MISSING |
+| T21 | `CRASH` | CRASH | 29.6s | tape24:MISSING |
 | T22 | `MISSING_TAPE` | ok | 0.0s | tape20:MISSING |
 | T23 | `MISSING_TAPE` | ok | 0.0s | tape20:MISSING |
 | T24 | `CRASH` | CRASH | 0.0s | tape34:MISSING |
 | T25 | `CRASH` | CRASH | 3.7s | tape70:MISSING · tape71:MISSING · tape72:MISSING |
 | T26 | `CRASH` | CRASH | 1.2s | tape40:MISSING |
-| T27 | `CRASH` | CRASH | 521.1s | tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING · tape56:MISSING · tape57:MISSING |
-| T28 | `CRASH` | CRASH | 27.8s | tape34:MISSING · tape44:MISSING · tape54:MISSING |
-| T29 | `DIFFS` | ok | 28.7s | tape35:✗/✗/✗/✗ 9/12 · tape45:✗/✗/✗/✗ 9/12 · tape55:✗/✗/✗/✗ 9/12 |
+| T27 | `CRASH` | CRASH | 519.6s | tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING · tape56:MISSING · tape57:MISSING |
+| T28 | `CRASH` | CRASH | 27.5s | tape34:MISSING · tape44:MISSING · tape54:MISSING |
+| T29 | `DIFFS` | ok | 28.3s | tape35:✗/✗/✗/✗ 9/12 · tape45:✗/✗/✗/✗ 9/12 · tape55:✗/✗/✗/✗ 9/12 |
 | T30 | `DIFFS` | ok | 3.0s | tape43:✗/✗/✗/✗ 930/1391 · tape44:✗/✗/✗/✗ 5/88 · tape45:✗/✗/✗/✗ 2/4237 |
-| T31 | `MISSING_TAPE` | ok | 478.9s | tape30:MISSING |
-| T32 | `CRASH` | CRASH | 4.3s | tape34:MISSING · tape35:MISSING |
+| T31 | `MISSING_TAPE` | ok | 475.4s | tape30:MISSING |
+| T32 | `CRASH` | CRASH | 4.4s | tape34:MISSING · tape35:MISSING |
 | T33 | `MISSING_TAPE` | ok | 0.0s | tape24:MISSING · tape34:MISSING |
-| T34 | `CRASH` | CRASH | 483.2s | tape33:MISSING · tape43:✗/✗/✗/✗ 0/0 |
-| T35 | `CRASH` | CRASH | 153.1s | tape34:MISSING · tape44:MISSING |
-| T36 | `CRASH` | CRASH | 3.2s | tape34:MISSING · tape44:MISSING |
+| T34 | `CRASH` | CRASH | 478.0s | tape33:MISSING · tape43:✗/✗/✗/✗ 0/0 |
+| T35 | `CRASH` | CRASH | 150.8s | tape34:MISSING · tape44:MISSING |
+| T36 | `CRASH` | CRASH | 3.5s | tape34:MISSING · tape44:MISSING |
 | T37 | `CRASH` | CRASH | 1.3s | tape34:MISSING · tape44:MISSING |
 | T38 | `CRASH` | CRASH | 0.4s | tape34:MISSING · tape44:MISSING |
 | T39 | `CRASH` | CRASH | 0.7s | tape34:MISSING · tape44:MISSING |
-| T40 | `CRASH` | CRASH | 13.3s | tape34:MISSING · tape44:MISSING |
-| T41 | `CRASH` | CRASH | 1.9s | tape34:MISSING · tape44:MISSING |
-| T42 | `CRASH` | CRASH | 69.2s | tape34:MISSING · tape44:MISSING |
+| T40 | `CRASH` | CRASH | 13.0s | tape34:MISSING · tape44:MISSING |
+| T41 | `CRASH` | CRASH | 1.3s | tape34:MISSING · tape44:MISSING |
+| T42 | `CRASH` | CRASH | 68.8s | tape34:MISSING · tape44:MISSING |
 | T43 | `CRASH` | CRASH | 0.1s | tape35:MISSING |
 | T44 | `DIFFS` | ok | 0.1s | tape35:✗/✗/✗/✗ 1/319 |
-| T45 | `DIFFS` | ok | 0.8s | tape40:✗/✗/✗/✗ 3/5870 |
-| T46 | `DIFFS` | ok | 54.5s | tape34:✗/✗/✗/✗ 0/62 |
-| T47 | `CRASH` | CRASH | 527.0s | tape45:✗/✗/✗/✗ 9/12 · tape46:MISSING · tape47:✗/✗/✗/✗ 0/0 · tape48:MISSING · tape55:✗/✗/✗/✗ 2/12 · tape56:MISSING · tape57:MISSING · tape58:MISSING |
+| T45 | `DIFFS` | ok | 0.6s | tape40:✗/✗/✗/✗ 3/5870 |
+| T46 | `DIFFS` | ok | 54.2s | tape34:✗/✗/✗/✗ 0/62 |
+| T47 | `CRASH` | CRASH | 520.4s | tape45:✗/✗/✗/✗ 9/12 · tape46:MISSING · tape47:✗/✗/✗/✗ 0/0 · tape48:MISSING · tape55:✗/✗/✗/✗ 2/12 · tape56:MISSING · tape57:MISSING · tape58:MISSING |
 | T48 | `MISSING_TAPE` | ok | 0.0s | tape27:MISSING · tape28:MISSING |
-| T49 | `CRASH` | CRASH | 5.0s | tape71:MISSING |
+| T49 | `CRASH` | CRASH | 4.9s | tape71:MISSING |
 | T50 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
 | T51 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
 | T52 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
 | T53 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
 | T54 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T55 | `CRASH` | CRASH | 39.5s | tape31:MISSING · tape34:MISSING · tape40:MISSING |
+| T55 | `CRASH` | CRASH | 40.1s | tape31:MISSING · tape34:MISSING · tape40:MISSING |
 | T56 | `CRASH` | CRASH | 0.1s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
 | T57 | `CRASH` | CRASH | 0.2s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
 | T58 | `CRASH` | CRASH | 0.3s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
@@ -91,86 +91,86 @@ Per-tape pass at each tolerance: `1.0e-9` / `1.0e-7` / `1.0e-5` / `0.001`
 | T60 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape32:MISSING |
 | T61 | `MISSING_TAPE` | ok | 0.0s | tape71:MISSING · tape72:MISSING |
 | T62 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T63 | `CRASH` | CRASH | 151.9s | tape34:MISSING · tape44:MISSING |
+| T63 | `CRASH` | CRASH | 153.0s | tape34:MISSING · tape44:MISSING |
 | T64 | `CRASH` | CRASH | 0.3s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T65 | `CRASH` | CRASH | 503.9s | tape41:✗/✗/✗/✗ 0/205 |
-| T66 | `CRASH` | CRASH | 0.5s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T67 | `CRASH` | CRASH | 1.2s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T68 | `CRASH` | CRASH | 2.9s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T69 | `CRASH` | CRASH | 4.2s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T70 | `CRASH` | CRASH | 3.2s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
+| T65 | `CRASH` | CRASH | 512.1s | tape41:✗/✗/✗/✗ 0/205 |
+| T66 | `CRASH` | CRASH | 0.4s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
+| T67 | `CRASH` | CRASH | 0.5s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
+| T68 | `CRASH` | CRASH | 3.0s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
+| T69 | `CRASH` | CRASH | 4.5s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
+| T70 | `CRASH` | CRASH | 3.9s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
 | T71 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T72 | `CRASH` | CRASH | 115.0s | tape41:MISSING · tape44:MISSING · tape54:✗/✗/✗/✗ 0/0 |
-| T73 | `DIFFS` | ok | 4.3s | tape30:✗/✗/✗/✗ 2/12 |
+| T72 | `CRASH` | CRASH | 117.2s | tape41:MISSING · tape44:MISSING · tape54:✗/✗/✗/✗ 0/0 |
+| T73 | `DIFFS` | ok | 4.4s | tape30:✗/✗/✗/✗ 2/12 |
 | T74 | `CRASH` | CRASH | 0.6s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T75 | `MISSING_TAPE` | ok | 224.8s | tape26:MISSING |
+| T75 | `MISSING_TAPE` | ok | 227.0s | tape26:MISSING |
 | T76 | `NO_REFERENCE` | ok | 0.0s | no referenceTape* |
 | T78 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape34:MISSING |
-| T79 | `CRASH` | CRASH | 3.6s | tape30:MISSING |
+| T79 | `CRASH` | CRASH | 3.8s | tape30:MISSING |
 | T80 | `MISSING_TAPE` | ok | 0.0s | tape24:MISSING |
 | T81 | `DIFFS` | ok | 18.7s | tape30:✗/✗/✗/✗ 2/45369 |
-| T82 | `MISSING_TAPE` | ok | 6.5s | tape26:MISSING · tape27:MISSING · tape28:MISSING · tape29:MISSING · tape36:MISSING · tape37:MISSING · tape38:MISSING · tape39:MISSING · tape46:MISSING · tape47:MISSING · tape48:MISSING · tape49:MISSING · tape56:MISSING · tape57:MISSING · tape58:MISSING · tape59:MISSING |
-| T83 | `DIFFS` | ok | 84.6s | tape50:✗/✗/✗/✗ 1/71928 |
+| T82 | `MISSING_TAPE` | ok | 7.4s | tape26:MISSING · tape27:MISSING · tape28:MISSING · tape29:MISSING · tape36:MISSING · tape37:MISSING · tape38:MISSING · tape39:MISSING · tape46:MISSING · tape47:MISSING · tape48:MISSING · tape49:MISSING · tape56:MISSING · tape57:MISSING · tape58:MISSING · tape59:MISSING |
+| T83 | `DIFFS` | ok | 85.4s | tape50:✗/✗/✗/✗ 1/71928 |
 | T84 | `DIFFS` | ok | 0.0s | tape100:✗/✗/✗/✗ 2/849 |
-| T85 | `DIFFS` | ok | 0.5s | tape50:✗/✗/✗/✗ 2/7616 |
+| T85 | `DIFFS` | ok | 0.6s | tape50:✗/✗/✗/✗ 2/7616 |
 
 ## Crashes and timeouts
 
-- **T05** [CRASH]: TaskFailedException
-- **T06** [CRASH]: TaskFailedException
-- **T08** [CRASH]: TaskFailedException
-- **T09** [CRASH]: TaskFailedException
-- **T12** [CRASH]: TaskFailedException
-- **T13** [CRASH]: TaskFailedException
-- **T14** [CRASH]: TaskFailedException
-- **T15** [CRASH]: TaskFailedException
-- **T16** [CRASH]: TaskFailedException
-- **T17** [CRASH]: TaskFailedException
-- **T18** [CRASH]: TaskFailedException
-- **T20** [CRASH]: TaskFailedException
-- **T21** [CRASH]: TaskFailedException
-- **T24** [CRASH]: TaskFailedException
-- **T25** [CRASH]: TaskFailedException
-- **T26** [CRASH]: TaskFailedException
-- **T27** [CRASH]: TaskFailedException
-- **T28** [CRASH]: TaskFailedException
-- **T32** [CRASH]: TaskFailedException
-- **T34** [CRASH]: TaskFailedException
-- **T35** [CRASH]: TaskFailedException
-- **T36** [CRASH]: TaskFailedException
-- **T37** [CRASH]: TaskFailedException
-- **T38** [CRASH]: TaskFailedException
-- **T39** [CRASH]: TaskFailedException
-- **T40** [CRASH]: TaskFailedException
-- **T41** [CRASH]: TaskFailedException
-- **T42** [CRASH]: TaskFailedException
-- **T43** [CRASH]: TaskFailedException
-- **T47** [CRASH]: TaskFailedException
-- **T49** [CRASH]: TaskFailedException
-- **T50** [CRASH]: TaskFailedException
-- **T51** [CRASH]: TaskFailedException
-- **T52** [CRASH]: TaskFailedException
-- **T53** [CRASH]: TaskFailedException
-- **T54** [CRASH]: TaskFailedException
-- **T55** [CRASH]: TaskFailedException
-- **T56** [CRASH]: TaskFailedException
-- **T57** [CRASH]: TaskFailedException
-- **T58** [CRASH]: TaskFailedException
-- **T60** [CRASH]: TaskFailedException
-- **T62** [CRASH]: TaskFailedException
-- **T63** [CRASH]: TaskFailedException
-- **T64** [CRASH]: TaskFailedException
-- **T65** [CRASH]: TaskFailedException
-- **T66** [CRASH]: TaskFailedException
-- **T67** [CRASH]: TaskFailedException
-- **T68** [CRASH]: TaskFailedException
-- **T69** [CRASH]: TaskFailedException
-- **T70** [CRASH]: TaskFailedException
-- **T71** [CRASH]: TaskFailedException
-- **T72** [CRASH]: TaskFailedException
-- **T74** [CRASH]: TaskFailedException
-- **T78** [CRASH]: TaskFailedException
-- **T79** [CRASH]: TaskFailedException
+- **T05** [CRASH]: SystemError: opening file "/tmp/njoy_T05_OXS69J/tape34": No such file or directory
+- **T06** [CRASH]: SystemError: opening file "/tmp/njoy_T06_uRImL0/tape31": No such file or directory
+- **T08** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T09** [CRASH]: SystemError: opening file "/tmp/njoy_T09_pxZRvK/tape24": No such file or directory
+- **T12** [CRASH]: SystemError: opening file "/tmp/njoy_T12_I06iym/tape23": No such file or directory
+- **T13** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T14** [CRASH]: SystemError: opening file "/tmp/njoy_T14_NNJoeH/tape33": No such file or directory
+- **T15** [CRASH]: ArgumentError: invalid value for Enum InterpolationLaw: 0
+- **T16** [CRASH]: SystemError: opening file "/tmp/njoy_T16_WmfDdY/tape36": No such file or directory
+- **T17** [CRASH]: ArgumentError: invalid value for Enum InterpolationLaw: 0
+- **T18** [CRASH]: SystemError: opening file "/tmp/njoy_T18_gHPnpf/tape38": No such file or directory
+- **T20** [CRASH]: tape unit 0 is invalid
+- **T21** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T24** [CRASH]: SystemError: opening file "/tmp/njoy_T24_2FsxLa/tape21": No such file or directory
+- **T25** [CRASH]: No Bragg lattice parameters for MAT=1. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T26** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T27** [CRASH]: SystemError: opening file "/tmp/njoy_T27_A9Siwi/tape36": No such file or directory
+- **T28** [CRASH]: SystemError: opening file "/tmp/njoy_T28_FfjvWk/tape33": No such file or directory
+- **T32** [CRASH]: No Bragg lattice parameters for MAT=58. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T34** [CRASH]: SystemError: opening file "/tmp/njoy_T34_xaBcSK/tape33": No such file or directory
+- **T35** [CRASH]: SystemError: opening file "/tmp/njoy_T35_liSDzl/tape43": No such file or directory
+- **T36** [CRASH]: SystemError: opening file "/tmp/njoy_T36_oXYiPO/tape43": No such file or directory
+- **T37** [CRASH]: SystemError: opening file "/tmp/njoy_T37_T8Glju/tape43": No such file or directory
+- **T38** [CRASH]: SystemError: opening file "/tmp/njoy_T38_zucha4/tape43": No such file or directory
+- **T39** [CRASH]: SystemError: opening file "/tmp/njoy_T39_CbzDsa/tape43": No such file or directory
+- **T40** [CRASH]: SystemError: opening file "/tmp/njoy_T40_bw3iYf/tape43": No such file or directory
+- **T41** [CRASH]: SystemError: opening file "/tmp/njoy_T41_QUc6gX/tape43": No such file or directory
+- **T42** [CRASH]: SystemError: opening file "/tmp/njoy_T42_FaqTFn/tape43": No such file or directory
+- **T43** [CRASH]: InexactError: Int64(NaN)
+- **T47** [CRASH]: SystemError: opening file "/tmp/njoy_T47_FR9dLC/tape46": No such file or directory
+- **T49** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T50** [CRASH]: SystemError: opening file "/tmp/njoy_T50_wWiaTQ/tape33": No such file or directory
+- **T51** [CRASH]: SystemError: opening file "/tmp/njoy_T51_LDzaYz/tape33": No such file or directory
+- **T52** [CRASH]: SystemError: opening file "/tmp/njoy_T52_80xMJW/tape33": No such file or directory
+- **T53** [CRASH]: SystemError: opening file "/tmp/njoy_T53_9GGuVo/tape33": No such file or directory
+- **T54** [CRASH]: SystemError: opening file "/tmp/njoy_T54_Fe3KVU/tape33": No such file or directory
+- **T55** [CRASH]: SystemError: opening file "/tmp/njoy_T55_AP6MB6/tape33": No such file or directory
+- **T56** [CRASH]: SystemError: opening file "/tmp/njoy_T56_OANl7G/tape33": No such file or directory
+- **T57** [CRASH]: SystemError: opening file "/tmp/njoy_T57_P5GgHE/tape33": No such file or directory
+- **T58** [CRASH]: SystemError: opening file "/tmp/njoy_T58_Uz3w7E/tape33": No such file or directory
+- **T60** [CRASH]: broadr: MT=1 (total) not found on input PENDF
+- **T62** [CRASH]: SystemError: opening file "/tmp/njoy_T62_ofbv1K/tape33": No such file or directory
+- **T63** [CRASH]: SystemError: opening file "/tmp/njoy_T63_NaPtQf/tape43": No such file or directory
+- **T64** [CRASH]: SystemError: opening file "/tmp/njoy_T64_7RqUNA/tape33": No such file or directory
+- **T65** [CRASH]: SystemError: opening file "/tmp/njoy_T65_RIeheY/tape51": No such file or directory
+- **T66** [CRASH]: SystemError: opening file "/tmp/njoy_T66_FhUGm1/tape33": No such file or directory
+- **T67** [CRASH]: No Bragg lattice parameters for MAT=15. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T68** [CRASH]: No Bragg lattice parameters for MAT=1. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T69** [CRASH]: No Bragg lattice parameters for MAT=58. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T70** [CRASH]: No Bragg lattice parameters for MAT=53. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T71** [CRASH]: SystemError: opening file "/tmp/njoy_T71_w4SleN/tape33": No such file or directory
+- **T72** [CRASH]: SystemError: opening file "/tmp/njoy_T72_J2Gbz3/tape43": No such file or directory
+- **T74** [CRASH]: No Bragg lattice parameters for MAT=7. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
+- **T78** [CRASH]: SystemError: opening file "/tmp/njoy_T78_shjoLF/tape33": No such file or directory
+- **T79** [CRASH]: UndefVarError: `h` not defined in local scope
 
 ## First diff per failing tape
 

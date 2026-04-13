@@ -102,24 +102,32 @@ after Phase 8 framework landed:
 | `NO_REFERENCE`   | 1  | T76 |
 | `CRASH`          | 55 | see report for details |
 
-**Interpretation:**
-- BIT_IDENTICAL = 1 is the floor after Phase 7 regression-safe work. T03 full
-  photon pipeline (reconr→gaminr→dtfr→matxsr→viewr) holds byte-for-byte.
-- 55 crashes cluster into a few categories:
-  - **`acer` not dispatched** (T05, T08, T14, T24, T25, T50–54, T59, T61, T62, T71 — 15 tests). acer is in the module pool but `run_njoy`'s dispatcher doesn't call it. Tests that need ACE file output crash when downstream modules try to read missing tapes.
-  - **`purr` not dispatched** (T35–T42 — 8 tests). Same pattern: tests expect tape34/44 from purr.
-  - **Photonuclear chains** (T55–T58, T64, T66, T78 — 7 tests). Need `gaspr` dispatch + MF23 photonuclear handling.
-  - **`leapr` not dispatched** (T22/T23/T33/T80 run but produce nothing; T09/T25/T43/T49/T67–T70/T74 crash because thermr tries to consume leapr output).
-  - **Dense-resonance natural crashes** (T15/T16/T17 U-238 JENDL + T27 Pu-239 + T34 Pu-240 + T65 U-235). These run 500–2000s of reconr+broadr then hit genuine precision/format bugs. Historically the longest tests.
-- 12 DIFFS: mostly small tapes with a handful of failing lines — usually FP precision at tolerance boundaries.
-- 14 MISSING_TAPE: pipeline ran but expected output tape wasn't produced — usually because a module call chain depends on an undispatched upstream.
+**Crash taxonomy (55 total)** — `/reports/REFERENCE_SWEEP.md` has per-test detail:
+
+| Count | Exception | Root cause |
+|-------|-----------|-----------|
+| 37    | `SystemError: opening file ".../tapeNN"` | Downstream module tries to read an upstream tape that was never produced. The undispatched upstream is usually `acer` (tape33/34), `purr` (tape43), or `leapr` (tape24/51). |
+| 7     | `No Bragg lattice parameters for MAT=N` | Missing entries in `src/orchestration/auto_params.jl::BRAGG_LATTICE_PARAMS`. MATs: 1, 7, 15, 53, 58. |
+| 6     | `UndefVarError: h not defined in local scope` | Real heatr bug — scope leak or missing var. T08, T13, T21, T26, T49, T79. |
+| 2     | `ArgumentError: invalid value for Enum InterpolationLaw: 0` | Real MF parser bug — rejects `INT=0` which JENDL-3.3 U-238 produces (T15, T17). |
+| 1     | `tape unit 0 is invalid` | T20 moder card has 0 in tape-unit slot. |
+| 1     | `broadr: MT=1 (total) not found on input PENDF` | T60 Fe-nat IRDFF-II dosimetry: no MF3/MT1 in input. broadr assumes it. |
+| 1     | `InexactError: Int64(NaN)` | T43 broadr at T=0 — NaN→Int conversion. |
+
+**Tests that pass or near-pass:**
+- BIT_IDENTICAL: T03 (photon pipeline)
+- NUMERIC_PASS @ 1e-5: T01 (thermr full pipeline)
+- DIFFS with small tape failures: T02, T04, T29, T30, T44, T45, T46, T73, T81, T83, T84, T85
+- MISSING_TAPE (pipeline ran but output tape missing): T07, T10, T11, T19, T22, T23, T31, T33, T48, T59, T61, T75, T80, T82
 
 **Priority follow-ups ranked by tests-unblocked-per-effort:**
-1. **Dispatch `acer`** in `run_njoy` → potentially unblocks 15 tests.
-2. **Dispatch `purr`** → 8 tests.
-3. **Dispatch `leapr`** → ~10 tests (T22/T23/T33/T80 immediate; several thermr chains downstream).
-4. Fix `UndefVarError: h` in heatr (T08, T13) — real bug, surfaced by the sweep.
-5. The 12 DIFFS cases — per-tape bisection to push them toward bit-identical.
+1. **Dispatch `acer`** in `pipeline.jl` → unblocks ~15 tests in the `SystemError` bucket (T05, T14, T24, T50–54, T55–T58, T62, T64, T66, T78).
+2. **Dispatch `purr`** → unblocks ~10 tests (T28, T34, T35–T42, T63, T65, T71, T72).
+3. **Dispatch `leapr`** → fixes T09, T22, T23, T33, T80 and several thermr-downstream chains.
+4. **Fix `UndefVarError: h` in heatr** → 6 tests cleanly resolved. Low effort — single variable scope bug.
+5. **Add Bragg lattice entries** (MAT 1, 7, 15, 53, 58) to `BRAGG_LATTICE_PARAMS` → 7 tests.
+6. **Accept INT=0 in MF3/MF4 reader** → T15, T17 (U-238 JENDL) unblock.
+7. The 12 DIFFS cases — per-tape bisection once the above widens the pass set.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
