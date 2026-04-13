@@ -121,13 +121,15 @@ after Phase 8 framework landed:
 - MISSING_TAPE (pipeline ran but output tape missing): T07, T10, T11, T19, T22, T23, T31, T33, T48, T59, T61, T75, T80, T82
 
 **Priority follow-ups ranked by tests-unblocked-per-effort:**
-1. **Dispatch `acer`** in `pipeline.jl` → unblocks ~15 tests in the `SystemError` bucket (T05, T14, T24, T50–54, T55–T58, T62, T64, T66, T78).
-2. **Dispatch `purr`** → unblocks ~10 tests (T28, T34, T35–T42, T63, T65, T71, T72).
-3. **Dispatch `leapr`** → fixes T09, T22, T23, T33, T80 and several thermr-downstream chains.
-4. **Fix `UndefVarError: h` in heatr** → 6 tests cleanly resolved. Low effort — single variable scope bug.
+1. ~~**Dispatch `acer`**~~ — **DONE in Phase 9** (commit `9a544ae`). T14, T50 verified CRASH→DIFFS. See `worklog/T09_acer_dispatch.md`.
+2. **Dispatch `purr`** → unblocks ~10 tests (T28, T34, T35–T42, T63, T65, T71, T72). Next up.
+3. **Dispatch `leapr`** → fixes T09, T22, T23, T33, T80 and several thermr-downstream chains. Check if core algorithm is ported (`src/processing/leapr_*`) before writing a stub.
+4. **Fix `UndefVarError: h` in heatr** → 6 tests cleanly resolved. Low effort — single variable scope bug. T08, T13, T21, T26, T49, T79.
 5. **Add Bragg lattice entries** (MAT 1, 7, 15, 53, 58) to `BRAGG_LATTICE_PARAMS` → 7 tests.
 6. **Accept INT=0 in MF3/MF4 reader** → T15, T17 (U-238 JENDL) unblock.
 7. The 12 DIFFS cases — per-tape bisection once the above widens the pass set.
+
+**Recommended batching for next sweep:** land #2 (purr) + #3 (leapr) + #4 (heatr `h` bug) + #5 (Bragg entries) + #6 (INT=0) before re-sweeping. That's ~5 small changes that together should convert **~30+ tests from CRASH** to DIFFS/STRUCTURAL_FAIL/MISSING_TAPE. One 2h sweep then gives the measured impact. See `worklog/T09_acer_dispatch.md` §Recommendations for step-by-step.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
