@@ -1174,6 +1174,8 @@ function compute_kerma(pendf::PointwiseMaterial;
             sigma = pendf.cross_sections[ie, icol]
             sigma <= 0.0 && continue
 
+            h = 0.0  # contribution if no branch matches (e.g. MT=22-29, 41-45)
+
             if mt == 2
                 mu = if mu_bar_data !== nothing
                     _interp_mubar(mu_bar_data, E)

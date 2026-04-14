@@ -90,46 +90,73 @@ julia --project=. -e 'using Pkg; Pkg.test()'                 # full suite
 
 ### Sweep baseline (2026-04-13, 2h 13m, full 84 tests)
 
-`reports/REFERENCE_SWEEP.md`. Numbers are **from the first clean sweep** run
-after Phase 8 framework landed:
+First clean sweep after Phase 8 framework landed. Superseded by the
+Phase 10 sweep below — kept here for Δ tracking.
 
-| Status | Count | Tests |
-|--------|-------|-------|
-| `BIT_IDENTICAL`  | 1  | T03 |
-| `NUMERIC_PASS`   | 1  | T01 (tape25 @ 1e-5) |
-| `DIFFS`          | 12 | T02, T04, T29, T30, T44, T45, T46, T73, T81, T83, T84, T85 |
-| `MISSING_TAPE`   | 14 | T07, T10, T11, T19, T22, T23, T31, T33, T48, T59, T61, T75, T80, T82 |
-| `NO_REFERENCE`   | 1  | T76 |
-| `CRASH`          | 55 | see report for details |
+| Status           | Count |
+|------------------|-------|
+| `BIT_IDENTICAL`  | 1     |
+| `NUMERIC_PASS`   | 1     |
+| `DIFFS`          | 12    |
+| `MISSING_TAPE`   | 14    |
+| `NO_REFERENCE`   | 1     |
+| `CRASH`          | 55    |
 
-**Crash taxonomy (55 total)** — `/reports/REFERENCE_SWEEP.md` has per-test detail:
+### Post-Phase-10 sweep (2026-04-14, 2h 43m, full 84 tests) — **CURRENT**
 
-| Count | Exception | Root cause |
-|-------|-----------|-----------|
-| 37    | `SystemError: opening file ".../tapeNN"` | Downstream module tries to read an upstream tape that was never produced. The undispatched upstream is usually `acer` (tape33/34), `purr` (tape43), or `leapr` (tape24/51). |
-| 7     | `No Bragg lattice parameters for MAT=N` | Missing entries in `src/orchestration/auto_params.jl::BRAGG_LATTICE_PARAMS`. MATs: 1, 7, 15, 53, 58. |
-| 6     | `UndefVarError: h not defined in local scope` | Real heatr bug — scope leak or missing var. T08, T13, T21, T26, T49, T79. |
-| 2     | `ArgumentError: invalid value for Enum InterpolationLaw: 0` | Real MF parser bug — rejects `INT=0` which JENDL-3.3 U-238 produces (T15, T17). |
-| 1     | `tape unit 0 is invalid` | T20 moder card has 0 in tape-unit slot. |
-| 1     | `broadr: MT=1 (total) not found on input PENDF` | T60 Fe-nat IRDFF-II dosimetry: no MF3/MT1 in input. broadr assumes it. |
-| 1     | `InexactError: Int64(NaN)` | T43 broadr at T=0 — NaN→Int conversion. |
+`reports/REFERENCE_SWEEP.md`. Numbers are from the sweep run immediately
+after Phase 10's five dispatch/fix items landed:
 
-**Tests that pass or near-pass:**
-- BIT_IDENTICAL: T03 (photon pipeline)
-- NUMERIC_PASS @ 1e-5: T01 (thermr full pipeline)
-- DIFFS with small tape failures: T02, T04, T29, T30, T44, T45, T46, T73, T81, T83, T84, T85
-- MISSING_TAPE (pipeline ran but output tape missing): T07, T10, T11, T19, T22, T23, T31, T33, T48, T59, T61, T75, T80, T82
+| Status           | Pre-P10 | Post-P10 | Δ      |
+|------------------|---------|----------|--------|
+| `BIT_IDENTICAL`  | 1       | 1        | =      |
+| `NUMERIC_PASS`   | 1       | 1        | =      |
+| `DIFFS`          | 12      | **48**   | **+36**|
+| `MISSING_TAPE`   | 14      | 17       | +3     |
+| `NO_REFERENCE`   | 1       | 1        | =      |
+| `CRASH`          | **55**  | **16**   | **−39**|
 
-**Priority follow-ups ranked by tests-unblocked-per-effort:**
-1. ~~**Dispatch `acer`**~~ — **DONE in Phase 9** (commit `9a544ae`). T14, T50 verified CRASH→DIFFS. See `worklog/T09_acer_dispatch.md`.
-2. **Dispatch `purr`** → unblocks ~10 tests (T28, T34, T35–T42, T63, T65, T71, T72). Next up.
-3. **Dispatch `leapr`** → fixes T09, T22, T23, T33, T80 and several thermr-downstream chains. Check if core algorithm is ported (`src/processing/leapr_*`) before writing a stub.
-4. **Fix `UndefVarError: h` in heatr** → 6 tests cleanly resolved. Low effort — single variable scope bug. T08, T13, T21, T26, T49, T79.
-5. **Add Bragg lattice entries** (MAT 1, 7, 15, 53, 58) to `BRAGG_LATTICE_PARAMS` → 7 tests.
-6. **Accept INT=0 in MF3/MF4 reader** → T15, T17 (U-238 JENDL) unblock.
-7. The 12 DIFFS cases — per-tape bisection once the above widens the pass set.
+**39 tests moved CRASH → DIFFS.** Pipeline runs end-to-end on 68 of 84.
 
-**Recommended batching for next sweep:** land #2 (purr) + #3 (leapr) + #4 (heatr `h` bug) + #5 (Bragg entries) + #6 (INT=0) before re-sweeping. That's ~5 small changes that together should convert **~30+ tests from CRASH** to DIFFS/STRUCTURAL_FAIL/MISSING_TAPE. One 2h sweep then gives the measured impact. See `worklog/T09_acer_dispatch.md` §Recommendations for step-by-step.
+**Crash taxonomy (16 remaining)** — `/reports/REFERENCE_SWEEP.md` has
+per-test detail:
+
+| Count | Exception                                                       | Root cause                                                                    |
+|-------|-----------------------------------------------------------------|-------------------------------------------------------------------------------|
+| 9     | `SystemError: opening file ".../tapeNN"`                        | Undispatched upstream modules: `covr` (T05/T06/T16), plus separate tape-unit plumbing issues in T12/T18/T24/T27/T34/T47/T65. |
+| 2     | `BoundsError: attempt to access 0-element Vector{Float64}`      | **NEW failure mode uncovered by the INT=0 fix** — T15/T17 JENDL U-238 now gets past the reader and trips a downstream empty-vector indexing bug. |
+| 1     | `MF7/MT4 not found for MAT=101`                                 | T09: leapr stub writes empty file; thermr tries to read real MF7. Upgrade path: real leapr output. |
+| 1     | `tape unit 0 is invalid`                                        | T20 moder card uses `0` as a "no tape" sentinel; moder_module needs to skip it. |
+| 1     | `broadr: MT=1 (total) not found on input PENDF`                 | T60 Fe-nat IRDFF-II (MF10-only dosimetry).                                    |
+| 1     | `InexactError: Int64(NaN)`                                      | T43 broadr at T=0 — NaN→Int conversion.                                       |
+| 1     | leapr chain downstream effects                                  | — (covered under T09)                                                         |
+
+**Phase-10-fixed crashes** (CRASH → DIFFS or better):
+- heatr `h` (6 tests): T08, T13, T21, T26, T49, T79.
+- acer dispatch (7 tests): T14, T50-T54, T62, T71 moved CRASH → DIFFS/MISSING_TAPE.
+- purr dispatch (13 tests): T28, T34(partial), T35-T42, T63, T72.
+- leapr dispatch (3 tests): T22, T23, T80.
+- Bragg gating + graceful degrade (7 tests): T25, T32, T67, T68, T69, T70, T74.
+- INT=0 (2 tests): T15/T17 progress past reader; new downstream bug revealed.
+
+**Priority follow-ups (post-Phase-10)**:
+1. **Dispatch `covr`** → unblocks T05, T06, T16 (3 crashes). `covr_module`
+   already exists in `src/processing/covr.jl`; just needs a pipeline
+   branch and the `:covr` parse.
+2. **T15/T17 BoundsError** → now that INT=0 is accepted, trace the
+   empty-vector index (likely MF3 section reader or broadr thinning).
+   One focused debug session with the reference T15 tape as oracle.
+3. **T20 moder tape-unit-0** → input-parser edge case.
+4. **Real leapr MF7 output** → unblocks T09 and proper thermr chains
+   (T67–T70, T74 currently produce inelastic-only output).
+5. **Real purr MT152 output** → lets T28, T34, T35–T42 move from
+   "runs but diffs" toward bit-identical.
+6. **MF7/MT2 Bragg reader** → replaces the hardcoded
+   `BRAGG_LATTICE_PARAMS` for ENDF-6 evaluations (the correct way to
+   handle T25/T67–T74).
+7. The 48 DIFFS cases — per-tape bisection (Grind Method).
+
+See `worklog/T10_phase10_batch_dispatch.md` for implementation detail.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:

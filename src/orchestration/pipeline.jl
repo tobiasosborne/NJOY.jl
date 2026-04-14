@@ -211,6 +211,14 @@ function run_njoy(input_path::AbstractString;
             params = parse_acer(mc)
             acer_module(tapes, params)
 
+        elseif mc.name == :purr
+            params = parse_purr(mc)
+            purr_module(tapes, params)
+
+        elseif mc.name == :leapr
+            params = parse_leapr(mc)
+            leapr_module(tapes, params)
+
         elseif mc.name == :plotr
             @info "plotr: skipped (visualization)"
         else
@@ -463,23 +471,25 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
         ctx.mf6_xsi[mtref] = xsi
         ctx.mf6_emax[mtref] = emax
 
-        # Bragg stub
+        # Bragg stub — only when coherent elastic is requested AND lattice is known
         if params.icoh > 0
-            bragg_params = lookup_bragg_params(params.mat_thermal)
-            bragg = build_bragg_data(
-                a=bragg_params.a, c=bragg_params.c,
-                sigma_coh=bragg_params.sigma_coh, A_mass=bragg_params.A_mass,
-                natom=params.natom, debye_waller=2.1997,
-                emax=emax, lat=round(Int, bragg_params.lat))
-            ctx.mf6_stubs[mtref + 1] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
+            try
+                bragg_params = lookup_bragg_params(params.mat_thermal)
+                bragg = build_bragg_data(
+                    a=bragg_params.a, c=bragg_params.c,
+                    sigma_coh=bragg_params.sigma_coh, A_mass=bragg_params.A_mass,
+                    natom=params.natom, debye_waller=2.1997,
+                    emax=emax, lat=round(Int, bragg_params.lat))
+                ctx.mf6_stubs[mtref + 1] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
 
-            # Track coh_ne for directory line count
-            pendf_path = resolve(tapes, params.nout)
-            tape = read_pendf(pendf_path)
-            mf3 = extract_mf3_all(tape, params.mat)
-            if haskey(mf3, mtref)
-                # coh_ne = total thermal grid points minus sentinels
-                ctx.thermr_coh_ne = length(mf3[mtref][1]) - 2
+                pendf_path = resolve(tapes, params.nout)
+                tape = read_pendf(pendf_path)
+                mf3 = extract_mf3_all(tape, params.mat)
+                if haskey(mf3, mtref)
+                    ctx.thermr_coh_ne = length(mf3[mtref][1]) - 2
+                end
+            catch err
+                @warn "thermr Bragg stub: $(sprint(showerror, err)) — skipping"
             end
         end
     end

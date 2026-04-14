@@ -7,7 +7,7 @@ compares every produced `tape{U}` against the corresponding `referenceTape{U}`
 using `execute.py`-equivalent line semantics (date wildcarded, floats with
 `rtol/atol` tolerance, non-numeric residue must match).
 
-Sweep duration: **7964.2s** (132.7 min)
+Sweep duration: **9784.8s** (163.1 min)
 
 ## Summary
 
@@ -15,11 +15,11 @@ Sweep duration: **7964.2s** (132.7 min)
 |--------|-------|
 | `BIT_IDENTICAL` | 1 |
 | `NUMERIC_PASS` | 1 |
-| `DIFFS` | 12 |
+| `DIFFS` | 48 |
 | `STRUCTURAL_FAIL` | 0 |
-| `MISSING_TAPE` | 14 |
+| `MISSING_TAPE` | 17 |
 | `NO_REFERENCE` | 1 |
-| `CRASH` | 55 |
+| `CRASH` | 16 |
 | `TIMEOUT` | 0 |
 | **Total** | **84** |
 
@@ -29,148 +29,109 @@ Per-tape pass at each tolerance: `1.0e-9` / `1.0e-7` / `1.0e-5` / `0.001`
 
 | Test | Status | Run | Time | Reference tape results |
 |------|--------|-----|------|------------------------|
-| T01 | `NUMERIC_PASS` | ok | 70.4s | tape25:✗/✗/✓/✓ 32812/32962 |
-| T02 | `DIFFS` | ok | 4.5s | tape28:✗/✗/✓/✓ 12519/13873 · tape29:✗/✗/✗/✗ 1/627 |
-| T03 | `BIT_IDENTICAL` | ok | 0.7s | tape37:✓/✓/✓/✓ 9274/9274 |
-| T04 | `DIFFS` | ok | 1.3s | tape23:✗/✓/✓/✓ 80/82 · tape24:✗/✗/✓/✓ 56/74 · tape25:✗/✗/✗/✗ 106/119 |
-| T05 | `CRASH` | CRASH | 0.8s | tape33:✗/✗/✗/✗ 19/21471 · tape34:MISSING · tape35:✗/✗/✗/✗ 0/0 |
+| T01 | `NUMERIC_PASS` | ok | 75.1s | tape25:✗/✗/✓/✓ 32812/32962 |
+| T02 | `DIFFS` | ok | 4.4s | tape28:✗/✗/✓/✓ 12519/13873 · tape29:✗/✗/✗/✗ 1/627 |
+| T03 | `BIT_IDENTICAL` | ok | 0.8s | tape37:✓/✓/✓/✓ 9274/9274 |
+| T04 | `DIFFS` | ok | 1.6s | tape23:✗/✓/✓/✓ 80/82 · tape24:✗/✗/✓/✓ 56/74 · tape25:✗/✗/✗/✗ 106/119 |
+| T05 | `CRASH` | CRASH | 0.7s | tape33:✗/✗/✗/✗ 19/21471 · tape34:MISSING · tape35:✗/✗/✗/✗ 0/0 |
 | T06 | `CRASH` | CRASH | 0.0s | tape32:✗/✗/✗/✗ 0/0 |
-| T07 | `MISSING_TAPE` | ok | 5.5s | tape26:MISSING · tape28:✗/✗/✗/✗ 16/17897 |
-| T08 | `CRASH` | CRASH | 4.8s | tape25:MISSING · tape28:MISSING |
-| T09 | `CRASH` | CRASH | 0.2s | tape24:MISSING |
-| T10 | `MISSING_TAPE` | ok | 2.1s | tape26:MISSING · tape28:MISSING |
-| T11 | `MISSING_TAPE` | ok | 5.7s | tape27:MISSING · tape28:✗/✗/✗/✗ 0/10379 |
+| T07 | `DIFFS` | ok | 5.6s | tape26:✗/✗/✗/✗ 0/1 · tape28:✗/✗/✗/✗ 16/17897 |
+| T08 | `DIFFS` | ok | 5.4s | tape25:✗/✗/✗/✗ 0/1 · tape28:✗/✗/✗/✗ 3/16878 |
+| T09 | `CRASH` | CRASH | 0.2s | tape24:✗/✗/✗/✗ 0/0 |
+| T10 | `DIFFS` | ok | 2.2s | tape26:✗/✗/✗/✗ 0/1 · tape28:✗/✗/✗/✗ 8/13873 |
+| T11 | `MISSING_TAPE` | ok | 5.8s | tape27:MISSING · tape28:✗/✗/✗/✗ 0/10379 |
 | T12 | `CRASH` | CRASH | 0.2s | tape22:MISSING · tape24:✗/✗/✗/✗ 0/0 |
-| T13 | `CRASH` | CRASH | 1.2s | tape26:MISSING · tape28:MISSING · tape36:MISSING |
-| T14 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape36:✗/✗/✗/✗ 0/0 |
-| T15 | `CRASH` | CRASH | 1097.9s | tape25:MISSING · tape26:MISSING · tape27:MISSING · tape35:MISSING · tape36:MISSING · tape37:MISSING · tape45:MISSING · tape46:MISSING · tape47:MISSING · tape91:MISSING |
-| T16 | `CRASH` | CRASH | 1165.0s | tape26:✗/✗/✗/✗ 1/5958 · tape27:✗/✗/✗/✗ 1/41 · tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING |
-| T17 | `CRASH` | CRASH | 1931.7s | tape26:MISSING · tape91:MISSING · tape92:MISSING · tape93:MISSING · tape99:MISSING |
-| T18 | `CRASH` | CRASH | 5.8s | tape28:✗/✗/✗/✗ 1/22 · tape38:MISSING · tape39:✗/✗/✗/✗ 0/0 · tape91:✗/✗/✗/✗ 2/12 |
-| T19 | `MISSING_TAPE` | ok | 5.0s | tape27:MISSING · tape29:✗/✗/✗/✗ 1/9793 |
+| T13 | `DIFFS` | ok | 1.5s | tape26:✗/✗/✗/✗ 0/0 · tape28:✗/✗/✗/✗ 1/16878 · tape36:✗/✗/✗/✗ 0/0 |
+| T14 | `DIFFS` | ok | 0.0s | tape31:✗/✗/✗/✗ 0/1 · tape36:✗/✗/✗/✗ 0/0 |
+| T15 | `CRASH` | CRASH | 1098.7s | tape25:MISSING · tape26:MISSING · tape27:MISSING · tape35:MISSING · tape36:MISSING · tape37:MISSING · tape45:MISSING · tape46:MISSING · tape47:MISSING · tape91:MISSING |
+| T16 | `CRASH` | CRASH | 1202.3s | tape26:✗/✗/✗/✗ 1/5958 · tape27:✗/✗/✗/✗ 1/41 · tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING |
+| T17 | `CRASH` | CRASH | 1964.3s | tape26:MISSING · tape91:MISSING · tape92:MISSING · tape93:MISSING · tape99:MISSING |
+| T18 | `CRASH` | CRASH | 5.5s | tape28:✗/✗/✗/✗ 1/22 · tape38:MISSING · tape39:✗/✗/✗/✗ 0/0 · tape91:✗/✗/✗/✗ 2/12 |
+| T19 | `DIFFS` | ok | 5.3s | tape27:✗/✗/✗/✗ 0/1 · tape29:✗/✗/✗/✗ 1/9793 |
 | T20 | `CRASH` | CRASH | 0.0s | tape23:MISSING · tape27:MISSING |
-| T21 | `CRASH` | CRASH | 29.6s | tape24:MISSING |
-| T22 | `MISSING_TAPE` | ok | 0.0s | tape20:MISSING |
-| T23 | `MISSING_TAPE` | ok | 0.0s | tape20:MISSING |
+| T21 | `DIFFS` | ok | 31.4s | tape24:✗/✗/✗/✗ 1/38624 |
+| T22 | `DIFFS` | ok | 0.0s | tape20:✗/✗/✗/✗ 0/0 |
+| T23 | `DIFFS` | ok | 0.0s | tape20:✗/✗/✗/✗ 0/0 |
 | T24 | `CRASH` | CRASH | 0.0s | tape34:MISSING |
-| T25 | `CRASH` | CRASH | 3.7s | tape70:MISSING · tape71:MISSING · tape72:MISSING |
-| T26 | `CRASH` | CRASH | 1.2s | tape40:MISSING |
-| T27 | `CRASH` | CRASH | 519.6s | tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING · tape56:MISSING · tape57:MISSING |
-| T28 | `CRASH` | CRASH | 27.5s | tape34:MISSING · tape44:MISSING · tape54:MISSING |
-| T29 | `DIFFS` | ok | 28.3s | tape35:✗/✗/✗/✗ 9/12 · tape45:✗/✗/✗/✗ 9/12 · tape55:✗/✗/✗/✗ 9/12 |
-| T30 | `DIFFS` | ok | 3.0s | tape43:✗/✗/✗/✗ 930/1391 · tape44:✗/✗/✗/✗ 5/88 · tape45:✗/✗/✗/✗ 2/4237 |
-| T31 | `MISSING_TAPE` | ok | 475.4s | tape30:MISSING |
-| T32 | `CRASH` | CRASH | 4.4s | tape34:MISSING · tape35:MISSING |
-| T33 | `MISSING_TAPE` | ok | 0.0s | tape24:MISSING · tape34:MISSING |
-| T34 | `CRASH` | CRASH | 478.0s | tape33:MISSING · tape43:✗/✗/✗/✗ 0/0 |
-| T35 | `CRASH` | CRASH | 150.8s | tape34:MISSING · tape44:MISSING |
-| T36 | `CRASH` | CRASH | 3.5s | tape34:MISSING · tape44:MISSING |
-| T37 | `CRASH` | CRASH | 1.3s | tape34:MISSING · tape44:MISSING |
-| T38 | `CRASH` | CRASH | 0.4s | tape34:MISSING · tape44:MISSING |
-| T39 | `CRASH` | CRASH | 0.7s | tape34:MISSING · tape44:MISSING |
-| T40 | `CRASH` | CRASH | 13.0s | tape34:MISSING · tape44:MISSING |
-| T41 | `CRASH` | CRASH | 1.3s | tape34:MISSING · tape44:MISSING |
-| T42 | `CRASH` | CRASH | 68.8s | tape34:MISSING · tape44:MISSING |
+| T25 | `DIFFS` | ok | 303.6s | tape70:✗/✗/✗/✗ 0/0 · tape71:✗/✗/✗/✗ 0/0 · tape72:✗/✗/✗/✗ 0/0 |
+| T26 | `DIFFS` | ok | 1.4s | tape40:✗/✗/✗/✗ 1/3978 |
+| T27 | `CRASH` | CRASH | 528.2s | tape36:MISSING · tape37:MISSING · tape46:✗/✗/✗/✗ 0/0 · tape47:MISSING · tape56:MISSING · tape57:MISSING |
+| T28 | `DIFFS` | ok | 29.4s | tape34:✗/✗/✗/✗ 0/0 · tape44:✗/✗/✗/✗ 0/0 · tape54:✗/✗/✗/✗ 0/0 |
+| T29 | `DIFFS` | ok | 29.0s | tape35:✗/✗/✗/✗ 9/12 · tape45:✗/✗/✗/✗ 9/12 · tape55:✗/✗/✗/✗ 9/12 |
+| T30 | `DIFFS` | ok | 2.5s | tape43:✗/✗/✗/✗ 930/1391 · tape44:✗/✗/✗/✗ 5/88 · tape45:✗/✗/✗/✗ 2/4237 |
+| T31 | `DIFFS` | ok | 481.7s | tape30:✗/✗/✗/✗ 1/148344 |
+| T32 | `DIFFS` | ok | 183.7s | tape34:✗/✗/✗/✗ 0/21818 · tape35:✗/✗/✗/✗ 1/112914 |
+| T33 | `DIFFS` | ok | 0.0s | tape24:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 |
+| T34 | `CRASH` | CRASH | 485.0s | tape33:MISSING · tape43:✗/✗/✗/✗ 0/0 |
+| T35 | `DIFFS` | ok | 154.6s | tape34:✗/✗/✗/✗ 3/52044 · tape44:✗/✗/✗/✗ 0/0 |
+| T36 | `DIFFS` | ok | 3.8s | tape34:✗/✗/✗/✗ 1/23800 · tape44:✗/✗/✗/✗ 0/0 |
+| T37 | `DIFFS` | ok | 1.5s | tape34:✗/✗/✗/✗ 5/16554 · tape44:✗/✗/✗/✗ 0/0 |
+| T38 | `DIFFS` | ok | 0.5s | tape34:✗/✗/✗/✗ 1/2849 · tape44:✗/✗/✗/✗ 0/0 |
+| T39 | `DIFFS` | ok | 0.8s | tape34:✗/✗/✗/✗ 2/6098 · tape44:✗/✗/✗/✗ 0/0 |
+| T40 | `DIFFS` | ok | 13.2s | tape34:✗/✗/✗/✗ 5/16911 · tape44:✗/✗/✗/✗ 0/0 |
+| T41 | `DIFFS` | ok | 2.4s | tape34:✗/✗/✗/✗ 1/27803 · tape44:✗/✗/✗/✗ 0/0 |
+| T42 | `DIFFS` | ok | 70.4s | tape34:✗/✗/✗/✗ 1/48221 · tape44:✗/✗/✗/✗ 0/0 |
 | T43 | `CRASH` | CRASH | 0.1s | tape35:MISSING |
 | T44 | `DIFFS` | ok | 0.1s | tape35:✗/✗/✗/✗ 1/319 |
-| T45 | `DIFFS` | ok | 0.6s | tape40:✗/✗/✗/✗ 3/5870 |
-| T46 | `DIFFS` | ok | 54.2s | tape34:✗/✗/✗/✗ 0/62 |
-| T47 | `CRASH` | CRASH | 520.4s | tape45:✗/✗/✗/✗ 9/12 · tape46:MISSING · tape47:✗/✗/✗/✗ 0/0 · tape48:MISSING · tape55:✗/✗/✗/✗ 2/12 · tape56:MISSING · tape57:MISSING · tape58:MISSING |
-| T48 | `MISSING_TAPE` | ok | 0.0s | tape27:MISSING · tape28:MISSING |
-| T49 | `CRASH` | CRASH | 4.9s | tape71:MISSING |
-| T50 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T51 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T52 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T53 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T54 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T55 | `CRASH` | CRASH | 40.1s | tape31:MISSING · tape34:MISSING · tape40:MISSING |
-| T56 | `CRASH` | CRASH | 0.1s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T57 | `CRASH` | CRASH | 0.2s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T58 | `CRASH` | CRASH | 0.3s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T59 | `MISSING_TAPE` | ok | 0.0s | tape27:MISSING · tape28:MISSING |
+| T45 | `DIFFS` | ok | 0.8s | tape40:✗/✗/✗/✗ 3/5870 |
+| T46 | `DIFFS` | ok | 54.8s | tape34:✗/✗/✗/✗ 0/62 |
+| T47 | `CRASH` | CRASH | 528.0s | tape45:✗/✗/✗/✗ 9/12 · tape46:MISSING · tape47:✗/✗/✗/✗ 0/0 · tape48:MISSING · tape55:✗/✗/✗/✗ 2/12 · tape56:MISSING · tape57:MISSING · tape58:MISSING |
+| T48 | `MISSING_TAPE` | ok | 0.0s | tape27:✗/✗/✗/✗ 0/0 · tape28:MISSING |
+| T49 | `DIFFS` | ok | 96.6s | tape71:✗/✗/✗/✗ 0/0 |
+| T50 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T51 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T52 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T53 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T54 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T55 | `DIFFS` | ok | 41.9s | tape31:✗/✗/✗/✗ 0/1 · tape34:✗/✗/✗/✗ 0/0 · tape40:✗/✗/✗/✗ 0/0 |
+| T56 | `DIFFS` | ok | 0.1s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape37:✗/✗/✗/✗ 0/0 |
+| T57 | `DIFFS` | ok | 0.2s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape37:✗/✗/✗/✗ 0/0 |
+| T58 | `DIFFS` | ok | 0.3s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape37:✗/✗/✗/✗ 0/0 |
+| T59 | `MISSING_TAPE` | ok | 0.0s | tape27:✗/✗/✗/✗ 0/0 · tape28:MISSING |
 | T60 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape32:MISSING |
-| T61 | `MISSING_TAPE` | ok | 0.0s | tape71:MISSING · tape72:MISSING |
-| T62 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T63 | `CRASH` | CRASH | 153.0s | tape34:MISSING · tape44:MISSING |
-| T64 | `CRASH` | CRASH | 0.3s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T65 | `CRASH` | CRASH | 512.1s | tape41:✗/✗/✗/✗ 0/205 |
-| T66 | `CRASH` | CRASH | 0.4s | tape31:MISSING · tape34:MISSING · tape37:MISSING |
-| T67 | `CRASH` | CRASH | 0.5s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T68 | `CRASH` | CRASH | 3.0s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T69 | `CRASH` | CRASH | 4.5s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T70 | `CRASH` | CRASH | 3.9s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T71 | `CRASH` | CRASH | 0.0s | tape33:MISSING · tape34:MISSING · tape35:MISSING |
-| T72 | `CRASH` | CRASH | 117.2s | tape41:MISSING · tape44:MISSING · tape54:✗/✗/✗/✗ 0/0 |
-| T73 | `DIFFS` | ok | 4.4s | tape30:✗/✗/✗/✗ 2/12 |
-| T74 | `CRASH` | CRASH | 0.6s | tape55:MISSING · tape60:MISSING · tape71:MISSING · tape76:MISSING |
-| T75 | `MISSING_TAPE` | ok | 227.0s | tape26:MISSING |
+| T61 | `MISSING_TAPE` | ok | 0.0s | tape71:✗/✗/✗/✗ 0/0 · tape72:MISSING |
+| T62 | `MISSING_TAPE` | ok | 0.0s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T63 | `DIFFS` | ok | 155.8s | tape34:✗/✗/✗/✗ 4/52044 · tape44:✗/✗/✗/✗ 0/0 |
+| T64 | `DIFFS` | ok | 0.2s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape37:✗/✗/✗/✗ 0/0 |
+| T65 | `CRASH` | CRASH | 518.7s | tape41:✗/✗/✗/✗ 0/205 |
+| T66 | `DIFFS` | ok | 0.5s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape37:✗/✗/✗/✗ 0/0 |
+| T67 | `MISSING_TAPE` | ok | 328.4s | tape55:✗/✗/✗/✗ 0/0 · tape60:✗/✗/✗/✗ 1/203330 · tape71:✗/✗/✗/✗ 0/0 · tape76:MISSING |
+| T68 | `MISSING_TAPE` | ok | 273.5s | tape55:✗/✗/✗/✗ 0/0 · tape60:✗/✗/✗/✗ 1/141481 · tape71:✗/✗/✗/✗ 0/0 · tape76:MISSING |
+| T69 | `MISSING_TAPE` | ok | 98.8s | tape55:✗/✗/✗/✗ 0/0 · tape60:✗/✗/✗/✗ 1/117800 · tape71:✗/✗/✗/✗ 0/0 · tape76:MISSING |
+| T70 | `MISSING_TAPE` | ok | 98.0s | tape55:✗/✗/✗/✗ 0/0 · tape60:✗/✗/✗/✗ 2/109132 · tape71:✗/✗/✗/✗ 0/0 · tape76:MISSING |
+| T71 | `MISSING_TAPE` | ok | 0.1s | tape33:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 · tape35:MISSING |
+| T72 | `DIFFS` | ok | 108.7s | tape41:✗/✗/✗/✗ 0/0 · tape44:✗/✗/✗/✗ 0/0 · tape54:✗/✗/✗/✗ 0/0 |
+| T73 | `DIFFS` | ok | 4.3s | tape30:✗/✗/✗/✗ 2/12 |
+| T74 | `MISSING_TAPE` | ok | 266.8s | tape55:✗/✗/✗/✗ 0/0 · tape60:✗/✗/✗/✗ 1/206402 · tape71:✗/✗/✗/✗ 0/0 · tape76:MISSING |
+| T75 | `DIFFS` | ok | 227.9s | tape26:✗/✗/✗/✗ 0/1 |
 | T76 | `NO_REFERENCE` | ok | 0.0s | no referenceTape* |
-| T78 | `CRASH` | CRASH | 0.0s | tape31:MISSING · tape34:MISSING |
-| T79 | `CRASH` | CRASH | 3.8s | tape30:MISSING |
-| T80 | `MISSING_TAPE` | ok | 0.0s | tape24:MISSING |
-| T81 | `DIFFS` | ok | 18.7s | tape30:✗/✗/✗/✗ 2/45369 |
-| T82 | `MISSING_TAPE` | ok | 7.4s | tape26:MISSING · tape27:MISSING · tape28:MISSING · tape29:MISSING · tape36:MISSING · tape37:MISSING · tape38:MISSING · tape39:MISSING · tape46:MISSING · tape47:MISSING · tape48:MISSING · tape49:MISSING · tape56:MISSING · tape57:MISSING · tape58:MISSING · tape59:MISSING |
-| T83 | `DIFFS` | ok | 85.4s | tape50:✗/✗/✗/✗ 1/71928 |
+| T78 | `DIFFS` | ok | 0.0s | tape31:✗/✗/✗/✗ 0/0 · tape34:✗/✗/✗/✗ 0/0 |
+| T79 | `DIFFS` | ok | 4.3s | tape30:✗/✗/✗/✗ 2/28649 |
+| T80 | `DIFFS` | ok | 0.0s | tape24:✗/✗/✗/✗ 0/0 |
+| T81 | `DIFFS` | ok | 18.8s | tape30:✗/✗/✗/✗ 2/45369 |
+| T82 | `MISSING_TAPE` | ok | 7.5s | tape26:✗/✗/✗/✗ 0/1 · tape27:MISSING · tape28:✗/✗/✗/✗ 0/1 · tape29:MISSING · tape36:✗/✗/✗/✗ 0/1 · tape37:MISSING · tape38:✗/✗/✗/✗ 0/1 · tape39:MISSING · tape46:✗/✗/✗/✗ 0/1 · tape47:MISSING · tape48:✗/✗/✗/✗ 0/1 · tape49:MISSING · tape56:✗/✗/✗/✗ 0/1 · tape57:MISSING · tape58:✗/✗/✗/✗ 0/1 · tape59:MISSING |
+| T83 | `DIFFS` | ok | 84.2s | tape50:✗/✗/✗/✗ 1/71928 |
 | T84 | `DIFFS` | ok | 0.0s | tape100:✗/✗/✗/✗ 2/849 |
-| T85 | `DIFFS` | ok | 0.6s | tape50:✗/✗/✗/✗ 2/7616 |
+| T85 | `DIFFS` | ok | 0.7s | tape50:✗/✗/✗/✗ 2/7616 |
 
 ## Crashes and timeouts
 
-- **T05** [CRASH]: SystemError: opening file "/tmp/njoy_T05_OXS69J/tape34": No such file or directory
-- **T06** [CRASH]: SystemError: opening file "/tmp/njoy_T06_uRImL0/tape31": No such file or directory
-- **T08** [CRASH]: UndefVarError: `h` not defined in local scope
-- **T09** [CRASH]: SystemError: opening file "/tmp/njoy_T09_pxZRvK/tape24": No such file or directory
-- **T12** [CRASH]: SystemError: opening file "/tmp/njoy_T12_I06iym/tape23": No such file or directory
-- **T13** [CRASH]: UndefVarError: `h` not defined in local scope
-- **T14** [CRASH]: SystemError: opening file "/tmp/njoy_T14_NNJoeH/tape33": No such file or directory
-- **T15** [CRASH]: ArgumentError: invalid value for Enum InterpolationLaw: 0
-- **T16** [CRASH]: SystemError: opening file "/tmp/njoy_T16_WmfDdY/tape36": No such file or directory
-- **T17** [CRASH]: ArgumentError: invalid value for Enum InterpolationLaw: 0
-- **T18** [CRASH]: SystemError: opening file "/tmp/njoy_T18_gHPnpf/tape38": No such file or directory
+- **T05** [CRASH]: SystemError: opening file "/tmp/njoy_T05_6owY5n/tape34": No such file or directory
+- **T06** [CRASH]: SystemError: opening file "/tmp/njoy_T06_VcJXgK/tape31": No such file or directory
+- **T09** [CRASH]: MF7/MT4 not found for MAT=101 in /tmp/njoy_T09_F8Cqir/tape24
+- **T12** [CRASH]: SystemError: opening file "/tmp/njoy_T12_1k8ZZx/tape23": No such file or directory
+- **T15** [CRASH]: BoundsError: attempt to access 0-element Vector{Float64} at index [1]
+- **T16** [CRASH]: SystemError: opening file "/tmp/njoy_T16_g44SXq/tape36": No such file or directory
+- **T17** [CRASH]: BoundsError: attempt to access 0-element Vector{Float64} at index [1]
+- **T18** [CRASH]: SystemError: opening file "/tmp/njoy_T18_ck1eIt/tape38": No such file or directory
 - **T20** [CRASH]: tape unit 0 is invalid
-- **T21** [CRASH]: UndefVarError: `h` not defined in local scope
-- **T24** [CRASH]: SystemError: opening file "/tmp/njoy_T24_2FsxLa/tape21": No such file or directory
-- **T25** [CRASH]: No Bragg lattice parameters for MAT=1. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T26** [CRASH]: UndefVarError: `h` not defined in local scope
-- **T27** [CRASH]: SystemError: opening file "/tmp/njoy_T27_A9Siwi/tape36": No such file or directory
-- **T28** [CRASH]: SystemError: opening file "/tmp/njoy_T28_FfjvWk/tape33": No such file or directory
-- **T32** [CRASH]: No Bragg lattice parameters for MAT=58. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T34** [CRASH]: SystemError: opening file "/tmp/njoy_T34_xaBcSK/tape33": No such file or directory
-- **T35** [CRASH]: SystemError: opening file "/tmp/njoy_T35_liSDzl/tape43": No such file or directory
-- **T36** [CRASH]: SystemError: opening file "/tmp/njoy_T36_oXYiPO/tape43": No such file or directory
-- **T37** [CRASH]: SystemError: opening file "/tmp/njoy_T37_T8Glju/tape43": No such file or directory
-- **T38** [CRASH]: SystemError: opening file "/tmp/njoy_T38_zucha4/tape43": No such file or directory
-- **T39** [CRASH]: SystemError: opening file "/tmp/njoy_T39_CbzDsa/tape43": No such file or directory
-- **T40** [CRASH]: SystemError: opening file "/tmp/njoy_T40_bw3iYf/tape43": No such file or directory
-- **T41** [CRASH]: SystemError: opening file "/tmp/njoy_T41_QUc6gX/tape43": No such file or directory
-- **T42** [CRASH]: SystemError: opening file "/tmp/njoy_T42_FaqTFn/tape43": No such file or directory
+- **T24** [CRASH]: SystemError: opening file "/tmp/njoy_T24_C7xC5r/tape21": No such file or directory
+- **T27** [CRASH]: SystemError: opening file "/tmp/njoy_T27_8jvzgA/tape36": No such file or directory
+- **T34** [CRASH]: SystemError: opening file "/tmp/njoy_T34_f2XFyz/tape33": No such file or directory
 - **T43** [CRASH]: InexactError: Int64(NaN)
-- **T47** [CRASH]: SystemError: opening file "/tmp/njoy_T47_FR9dLC/tape46": No such file or directory
-- **T49** [CRASH]: UndefVarError: `h` not defined in local scope
-- **T50** [CRASH]: SystemError: opening file "/tmp/njoy_T50_wWiaTQ/tape33": No such file or directory
-- **T51** [CRASH]: SystemError: opening file "/tmp/njoy_T51_LDzaYz/tape33": No such file or directory
-- **T52** [CRASH]: SystemError: opening file "/tmp/njoy_T52_80xMJW/tape33": No such file or directory
-- **T53** [CRASH]: SystemError: opening file "/tmp/njoy_T53_9GGuVo/tape33": No such file or directory
-- **T54** [CRASH]: SystemError: opening file "/tmp/njoy_T54_Fe3KVU/tape33": No such file or directory
-- **T55** [CRASH]: SystemError: opening file "/tmp/njoy_T55_AP6MB6/tape33": No such file or directory
-- **T56** [CRASH]: SystemError: opening file "/tmp/njoy_T56_OANl7G/tape33": No such file or directory
-- **T57** [CRASH]: SystemError: opening file "/tmp/njoy_T57_P5GgHE/tape33": No such file or directory
-- **T58** [CRASH]: SystemError: opening file "/tmp/njoy_T58_Uz3w7E/tape33": No such file or directory
+- **T47** [CRASH]: SystemError: opening file "/tmp/njoy_T47_hsAypu/tape46": No such file or directory
 - **T60** [CRASH]: broadr: MT=1 (total) not found on input PENDF
-- **T62** [CRASH]: SystemError: opening file "/tmp/njoy_T62_ofbv1K/tape33": No such file or directory
-- **T63** [CRASH]: SystemError: opening file "/tmp/njoy_T63_NaPtQf/tape43": No such file or directory
-- **T64** [CRASH]: SystemError: opening file "/tmp/njoy_T64_7RqUNA/tape33": No such file or directory
-- **T65** [CRASH]: SystemError: opening file "/tmp/njoy_T65_RIeheY/tape51": No such file or directory
-- **T66** [CRASH]: SystemError: opening file "/tmp/njoy_T66_FhUGm1/tape33": No such file or directory
-- **T67** [CRASH]: No Bragg lattice parameters for MAT=15. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T68** [CRASH]: No Bragg lattice parameters for MAT=1. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T69** [CRASH]: No Bragg lattice parameters for MAT=58. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T70** [CRASH]: No Bragg lattice parameters for MAT=53. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T71** [CRASH]: SystemError: opening file "/tmp/njoy_T71_w4SleN/tape33": No such file or directory
-- **T72** [CRASH]: SystemError: opening file "/tmp/njoy_T72_J2Gbz3/tape43": No such file or directory
-- **T74** [CRASH]: No Bragg lattice parameters for MAT=7. Add to BRAGG_LATTICE_PARAMS in auto_params.jl.
-- **T78** [CRASH]: SystemError: opening file "/tmp/njoy_T78_shjoLF/tape33": No such file or directory
-- **T79** [CRASH]: UndefVarError: `h` not defined in local scope
+- **T65** [CRASH]: SystemError: opening file "/tmp/njoy_T65_zk8GEA/tape51": No such file or directory
 
 ## First diff per failing tape
 
@@ -210,6 +171,14 @@ line 89
   REF:  2.436700+0 2.436700+0 2.43670019 2.43670024 2.438168+0 2.470697201395 3452    2
   JUL:  2.436700+0 2.436700+0 2.436700+0 2.436700+0 2.43889232 2.472846201395 3452    2
 ```
+### T07 tape26
+0/1 lines match at rtol=1e-09 (14108 vs 1 lines).
+
+```
+line 1
+  REF:  92235.00c  233.025000  2.5852E-08   XX/XX/XX
+  JUL: 1395.80c    395.000000 tape25 route 1   1    53808     0     0 2.585E-08
+```
 ### T07 tape28
 16/17897 lines match at rtol=1e-09 (17897 vs 22281 lines).
 
@@ -227,6 +196,58 @@ line 3
 line 8
   REF:                                 1        451         39          01395 1451    7
   JUL:                                 1        451         38          01395 1451    7
+```
+### T08 tape25
+0/1 lines match at rtol=1e-09 (22319 vs 1 lines).
+
+```
+line 1
+  REF:  28061.00c   60.408000  2.5852E-08   XX/XX/XX
+  JUL: 2834.80c    834.000000 filename route 1   1    58671     0     0 2.585E-08
+```
+### T08 tape28
+3/16878 lines match at rtol=1e-09 (23721 vs 16878 lines).
+
+```
+line 2
+  REF:  2.806100+4 6.040800+1          2          0          0          02834 1451    1
+  JUL:  2.806100+4 6.040800+1          0          0          0          02834 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62834 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          02834 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 0.000000+0          0          0         10          62834 1451    3
+  JUL:  3.000000+2 1.000000-2          0          0          1         232834 1451    3
+```
+### T10 tape26
+0/1 lines match at rtol=1e-09 (9691 vs 1 lines).
+
+```
+line 1
+  REF:  94238.00c  236.167000  2.5852E-08   XX/XX/XX
+  JUL: 1050.80c     50.000000 filename route 1   1    19543     0     0 2.585E-08
+```
+### T10 tape28
+8/13873 lines match at rtol=1e-09 (15277 vs 13873 lines).
+
+```
+line 2
+  REF:  9.423800+4 2.361670+2          3          1          0         211050 1451    1
+  JUL:  9.423800+4 2.361670+2          3          1          0         201050 1451    1
+```
+```
+line 9
+  REF:                                 2        152        141          01050 1451    8
+  JUL:                                 2        152         27          01050 1451    8
+```
+```
+line 10
+  REF:                                 2        153        465          01050 1451    9
+  JUL:                                 3          1        978          01050 1451    9
 ```
 ### T11 tape28
 0/10379 lines match at rtol=1e-09 (10379 vs 15722 lines).
@@ -246,6 +267,49 @@ line 3
   REF:  3.000000+2 0.000000+0         69          0         79          01050 1451    2
   JUL:  0.000000+0 0.000000+0          0          0          0          01050 1451    2
 ```
+### T13 tape26
+0/0 lines match at rtol=1e-09 (32691 vs 0 lines).
+
+### T13 tape28
+1/16878 lines match at rtol=1e-09 (25430 vs 16878 lines).
+
+```
+line 2
+  REF:  2.806100+4 6.040800+1          2          0          0          02834 1451    1
+  JUL:  2.806100+4 6.040800+1          0          0          0          02834 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62834 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          02834 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 0.000000+0          0          0         10          62834 1451    3
+  JUL:  3.000000+2 1.000000-2          0          0          1         232834 1451    3
+```
+### T13 tape36
+0/0 lines match at rtol=1e-09 (111182 vs 0 lines).
+
+### T14 tape31
+0/1 lines match at rtol=1e-09 (17855 vs 1 lines).
+
+```
+line 1
+  REF:   7014.00h   13.882780  0.0000E+00   XX/XX/XX
+  JUL: 725.80c     725.000000 filename route 1   1      864     0     0 2.585E-08
+```
+### T14 tape36
+0/0 lines match at rtol=1e-09 (41152 vs 0 lines).
+
+### T19 tape27
+0/1 lines match at rtol=1e-09 (16947 vs 1 lines).
+
+```
+line 1
+  REF:  94241.00c  238.978000  2.5300E-08   XX/XX/XX
+  JUL: 9443.80c    443.000000 filename route 1   1    23687     0     0 2.530E-08
+```
 ### T19 tape29
 1/9793 lines match at rtol=1e-09 (44568 vs 9793 lines).
 
@@ -264,6 +328,66 @@ line 4
   REF:  1.000000+0 0.000000+0          0          0         10          69443 1451    3
   JUL:  2.100000+3 2.000000-2          0          0          3         309443 1451    3
 ```
+### T21 tape24
+1/38624 lines match at rtol=1e-09 (66867 vs 38624 lines).
+
+```
+line 1
+  REF: ENDF/B-8 PENDF for  26-Fe- 58                                        1 0  0    0
+  JUL: ENDF/B-8 PENDF for  26-Fe- 58                                        0 0  0    0
+```
+```
+line 2
+  REF:  2.605800+4 5.743560+1          2          0          0          02637 1451    1
+  JUL:  2.605800+4 5.743560+1          3          1          0         812637 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62637 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          2         812637 1451    2
+```
+### T22 tape20
+0/0 lines match at rtol=1e-09 (4636 vs 0 lines).
+
+### T23 tape20
+0/0 lines match at rtol=1e-09 (17306 vs 0 lines).
+
+### T25 tape70
+0/0 lines match at rtol=1e-09 (12356 vs 0 lines).
+
+### T25 tape71
+0/0 lines match at rtol=1e-09 (12356 vs 0 lines).
+
+### T25 tape72
+0/0 lines match at rtol=1e-09 (362909 vs 0 lines).
+
+### T26 tape40
+1/3978 lines match at rtol=1e-09 (5802 vs 3978 lines).
+
+```
+line 2
+  REF:  9.424500+4 2.429625+2          2          1          0          09455 1451    1
+  JUL:  9.424500+4 2.429625+2          0          0          0          09455 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          69455 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          09455 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          89455 1451    3
+  JUL:  2.936000+2 1.000000-3          0          0          0         279455 1451    3
+```
+### T28 tape34
+0/0 lines match at rtol=1e-09 (43944 vs 0 lines).
+
+### T28 tape44
+0/0 lines match at rtol=1e-09 (43944 vs 0 lines).
+
+### T28 tape54
+0/0 lines match at rtol=1e-09 (36375 vs 0 lines).
+
 ### T29 tape35
 9/12 lines match at rtol=1e-09 (635 vs 12 lines).
 
@@ -372,6 +496,234 @@ line 5
   REF:  0.000000+0 1.000000-3          1          0          1          9 100 1451    4
   JUL:  0.000000+0 0.000000+0          2        151          4          0 100 1451    4
 ```
+### T31 tape30
+1/148344 lines match at rtol=1e-09 (221737 vs 148344 lines).
+
+```
+line 2
+  REF:  9.424000+4 2.379916+2          2          1          0          09440 1451    1
+  JUL:  9.424000+4 2.379916+2          3          1          0         569440 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 1.000000+0          0          0          0          69440 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         569440 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 3.000000+7          0          0         10          89440 1451    3
+  JUL:                                 1        451         58          09440 1451    3
+```
+### T32 tape34
+0/21818 lines match at rtol=1e-09 (216275 vs 21818 lines).
+
+```
+line 1
+  REF: reconr/pendf tape for 4025                                           1 0  0    0
+  JUL: reconr/pendf tape for 4025                                           0 0  0    0
+```
+```
+line 2
+  REF:  4.009000+4 8.913240+1          2          0          0          04025 1451    1
+  JUL:  4.009000+4 8.913240+1          3          1          0         494025 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          64025 1451    2
+  JUL:  2.960000+2 1.000000-3          0          0          0         494025 1451    2
+```
+### T32 tape35
+1/112914 lines match at rtol=1e-09 (216275 vs 112914 lines).
+
+```
+line 2
+  REF:  4.009000+4 8.913240+1          2          0          0          04025 1451    1
+  JUL:  4.009000+4 8.913240+1          0          0          0          04025 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          64025 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          04025 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          84025 1451    3
+  JUL:  2.960000+2 1.000000-3          0          0          0         504025 1451    3
+```
+### T33 tape24
+0/0 lines match at rtol=1e-09 (53151 vs 0 lines).
+
+### T33 tape34
+0/0 lines match at rtol=1e-09 (53151 vs 0 lines).
+
+### T35 tape34
+3/52044 lines match at rtol=1e-09 (52454 vs 52044 lines).
+
+```
+line 2
+  REF:  4.710900+4 1.079690+2          2          0          0          04731 1451    1
+  JUL:  4.710900+4 1.079690+2          3          1          0         694731 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          64731 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         694731 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          84731 1451    3
+  JUL:                                 1        451         71          04731 1451    3
+```
+### T35 tape44
+0/0 lines match at rtol=1e-09 (153758 vs 0 lines).
+
+### T36 tape34
+1/23800 lines match at rtol=1e-09 (24331 vs 23800 lines).
+
+```
+line 2
+  REF:  5.011900+4 1.178820+2          2          0          0          05046 1451    1
+  JUL:  5.011900+4 1.178820+2          3          1          0         375046 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          65046 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         375046 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          85046 1451    3
+  JUL:                                 1        451         39          05046 1451    3
+```
+### T36 tape44
+0/0 lines match at rtol=1e-09 (30401 vs 0 lines).
+
+### T37 tape34
+5/16554 lines match at rtol=1e-09 (16777 vs 16554 lines).
+
+```
+line 2
+  REF:  2.705800+4 5.743810+1          2          0          0          02722 1451    1
+  JUL:  2.705800+4 5.743810+1          3          1          0        1412722 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62722 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0        1412722 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          82722 1451    3
+  JUL:                                 1        451        143          02722 1451    3
+```
+### T37 tape44
+0/0 lines match at rtol=1e-09 (60117 vs 0 lines).
+
+### T38 tape34
+1/2849 lines match at rtol=1e-09 (3480 vs 2849 lines).
+
+```
+line 2
+  REF:  3.608300+4 8.220200+1          2          0          0          03640 1451    1
+  JUL:  3.608300+4 8.220200+1          3          1          0         333640 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          63640 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         333640 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          83640 1451    3
+  JUL:                                 1        451         35          03640 1451    3
+```
+### T38 tape44
+0/0 lines match at rtol=1e-09 (25128 vs 0 lines).
+
+### T39 tape34
+2/6098 lines match at rtol=1e-09 (6214 vs 6098 lines).
+
+```
+line 2
+  REF:  2.806300+4 6.238907+1          2          0          0          02840 1451    1
+  JUL:  2.806300+4 6.238907+1          3          1          0         902840 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62840 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         902840 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          82840 1451    3
+  JUL:                                 1        451         92          02840 1451    3
+```
+### T39 tape44
+0/0 lines match at rtol=1e-09 (46630 vs 0 lines).
+
+### T40 tape34
+5/16911 lines match at rtol=1e-09 (17224 vs 16911 lines).
+
+```
+line 2
+  REF:  2.505500+4 5.446610+1          2          0          0          02525 1451    1
+  JUL:  2.505500+4 5.446610+1          3          1          0        1192525 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          62525 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0        1192525 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 6.000000+7          0          0         10          82525 1451    3
+  JUL:                                 1        451        121          02525 1451    3
+```
+### T40 tape44
+0/0 lines match at rtol=1e-09 (218520 vs 0 lines).
+
+### T41 tape34
+1/27803 lines match at rtol=1e-09 (27803 vs 30166 lines).
+
+```
+line 2
+  REF:  3.207100+4 7.031567+1          2          0          0          03228 1451    1
+  JUL:  3.207100+4 7.031567+1          3          1          0        1163228 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          63228 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0        1163228 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          83228 1451    3
+  JUL:                                 1        451        118          03228 1451    3
+```
+### T41 tape44
+0/0 lines match at rtol=1e-09 (101924 vs 0 lines).
+
+### T42 tape34
+1/48221 lines match at rtol=1e-09 (48221 vs 54700 lines).
+
+```
+line 2
+  REF:  3.006700+4 6.635220+1          2          0          0          03034 1451    1
+  JUL:  3.006700+4 6.635220+1          3          1          0         343034 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          63034 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         343034 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          83034 1451    3
+  JUL:                                 1        451         36          03034 1451    3
+```
+### T42 tape44
+0/0 lines match at rtol=1e-09 (122621 vs 0 lines).
+
 ### T44 tape35
 1/319 lines match at rtol=1e-09 (322 vs 319 lines).
 
@@ -426,6 +778,245 @@ line 3
   REF:  2.936000+2 0.000000+0        238          0        239          02631 1451    2
   JUL:  0.000000+0 0.000000+0        314          0        315          02631 1451    2
 ```
+### T48 tape27
+0/0 lines match at rtol=1e-09 (17964 vs 0 lines).
+
+### T49 tape71
+0/0 lines match at rtol=1e-09 (272558 vs 0 lines).
+
+### T50 tape33
+0/0 lines match at rtol=1e-09 (432 vs 0 lines).
+
+### T50 tape34
+0/0 lines match at rtol=1e-09 (163 vs 0 lines).
+
+### T51 tape33
+0/0 lines match at rtol=1e-09 (3918 vs 0 lines).
+
+### T51 tape34
+0/0 lines match at rtol=1e-09 (1510 vs 0 lines).
+
+### T52 tape33
+0/0 lines match at rtol=1e-09 (6042 vs 0 lines).
+
+### T52 tape34
+0/0 lines match at rtol=1e-09 (3986 vs 0 lines).
+
+### T53 tape33
+0/0 lines match at rtol=1e-09 (17236 vs 0 lines).
+
+### T53 tape34
+0/0 lines match at rtol=1e-09 (12030 vs 0 lines).
+
+### T54 tape33
+0/0 lines match at rtol=1e-09 (11340 vs 0 lines).
+
+### T54 tape34
+0/0 lines match at rtol=1e-09 (7327 vs 0 lines).
+
+### T55 tape31
+0/1 lines match at rtol=1e-09 (146119 vs 1 lines).
+
+```
+line 1
+  REF:  26056.80c   55.454430  2.5300E-08   XX/XX/XX
+  JUL: 2631.80c    631.000000 filename route 1   1   233313     0     0 2.530E-08
+```
+### T55 tape34
+0/0 lines match at rtol=1e-09 (146119 vs 0 lines).
+
+### T55 tape40
+0/0 lines match at rtol=1e-09 (146119 vs 0 lines).
+
+### T56 tape31
+0/0 lines match at rtol=1e-09 (36530 vs 0 lines).
+
+### T56 tape34
+0/0 lines match at rtol=1e-09 (36530 vs 0 lines).
+
+### T56 tape37
+0/0 lines match at rtol=1e-09 (36530 vs 0 lines).
+
+### T57 tape31
+0/0 lines match at rtol=1e-09 (57803 vs 0 lines).
+
+### T57 tape34
+0/0 lines match at rtol=1e-09 (57803 vs 0 lines).
+
+### T57 tape37
+0/0 lines match at rtol=1e-09 (57803 vs 0 lines).
+
+### T58 tape31
+0/0 lines match at rtol=1e-09 (132970 vs 0 lines).
+
+### T58 tape34
+0/0 lines match at rtol=1e-09 (132970 vs 0 lines).
+
+### T58 tape37
+0/0 lines match at rtol=1e-09 (132970 vs 0 lines).
+
+### T59 tape27
+0/0 lines match at rtol=1e-09 (17964 vs 0 lines).
+
+### T61 tape71
+0/0 lines match at rtol=1e-09 (49211 vs 0 lines).
+
+### T62 tape33
+0/0 lines match at rtol=1e-09 (5460 vs 0 lines).
+
+### T62 tape34
+0/0 lines match at rtol=1e-09 (7221 vs 0 lines).
+
+### T63 tape34
+4/52044 lines match at rtol=1e-09 (52073 vs 52044 lines).
+
+```
+line 2
+  REF:  4.710900+4 1.079690+2          2          0          0          04731 1451    1
+  JUL:  4.710900+4 1.079690+2          3          1          0         694731 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          64731 1451    2
+  JUL:  2.936000+2 1.000000-3          0          0          0         694731 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          84731 1451    3
+  JUL:                                 1        451         71          04731 1451    3
+```
+### T63 tape44
+0/0 lines match at rtol=1e-09 (153214 vs 0 lines).
+
+### T64 tape31
+0/0 lines match at rtol=1e-09 (70103 vs 0 lines).
+
+### T64 tape34
+0/0 lines match at rtol=1e-09 (70103 vs 0 lines).
+
+### T64 tape37
+0/0 lines match at rtol=1e-09 (70103 vs 0 lines).
+
+### T66 tape31
+0/0 lines match at rtol=1e-09 (259515 vs 0 lines).
+
+### T66 tape34
+0/0 lines match at rtol=1e-09 (259515 vs 0 lines).
+
+### T66 tape37
+0/0 lines match at rtol=1e-09 (259515 vs 0 lines).
+
+### T67 tape55
+0/0 lines match at rtol=1e-09 (1265 vs 0 lines).
+
+### T67 tape60
+1/203330 lines match at rtol=1e-09 (463392 vs 203330 lines).
+
+```
+line 2
+  REF:  1.002000+3 1.996800+0          2          0          0          0 128 1451    1
+  JUL:  1.002000+3 1.996800+0          0          0          0          0 128 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          6 128 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          0 128 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 1.500000+8          0          0         10          8 128 1451    3
+  JUL:  4.000000+2 1.000000-3          0          0          2          9 128 1451    3
+```
+### T67 tape71
+0/0 lines match at rtol=1e-09 (13036 vs 0 lines).
+
+### T68 tape55
+0/0 lines match at rtol=1e-09 (392 vs 0 lines).
+
+### T68 tape60
+1/141481 lines match at rtol=1e-09 (324387 vs 141481 lines).
+
+```
+line 2
+  REF:  1.001000+3 9.991673-1          2          0          0          0 125 1451    1
+  JUL:  1.001000+3 9.991673-1          0          0          0          0 125 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          6 125 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          0 125 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          8 125 1451    3
+  JUL:  4.000000+2 1.000000-3          0          0          2          7 125 1451    3
+```
+### T68 tape71
+0/0 lines match at rtol=1e-09 (12356 vs 0 lines).
+
+### T69 tape55
+0/0 lines match at rtol=1e-09 (605 vs 0 lines).
+
+### T69 tape60
+1/117800 lines match at rtol=1e-09 (226829 vs 117800 lines).
+
+```
+line 2
+  REF:  4.009000+4 8.913240+1          2          0          0          04025 1451    1
+  JUL:  4.009000+4 8.913240+1          0          0          0          04025 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          64025 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          04025 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          84025 1451    3
+  JUL:  4.000000+2 1.000000-3          0          0          2         504025 1451    3
+```
+### T69 tape71
+0/0 lines match at rtol=1e-09 (10114 vs 0 lines).
+
+### T70 tape55
+0/0 lines match at rtol=1e-09 (1033 vs 0 lines).
+
+### T70 tape60
+2/109132 lines match at rtol=1e-09 (213800 vs 109132 lines).
+
+```
+line 2
+  REF:  1.302700+4 2.674975+1          2          0          0          01325 1451    1
+  JUL:  1.302700+4 2.674975+1          0          0          0          01325 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          61325 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          01325 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 1.500000+8          0          0         10          81325 1451    3
+  JUL:  4.000000+2 1.000000-3          0          0          2        1391325 1451    3
+```
+### T70 tape71
+0/0 lines match at rtol=1e-09 (10608 vs 0 lines).
+
+### T71 tape33
+0/0 lines match at rtol=1e-09 (123992 vs 0 lines).
+
+### T71 tape34
+0/0 lines match at rtol=1e-09 (72594 vs 0 lines).
+
+### T72 tape41
+0/0 lines match at rtol=1e-09 (50748 vs 0 lines).
+
+### T72 tape44
+0/0 lines match at rtol=1e-09 (50748 vs 0 lines).
+
+### T72 tape54
+0/0 lines match at rtol=1e-09 (34325 vs 0 lines).
+
 ### T73 tape30
 2/12 lines match at rtol=1e-09 (1009 vs 12 lines).
 
@@ -444,6 +1035,65 @@ line 5
   REF:                                                                   8237 0  0    0
   JUL:  3.060000+0 8.320000+0 2.260000+1 6.140000+1 1.670000+2 4.540000+28237 1451    4
 ```
+### T74 tape55
+0/0 lines match at rtol=1e-09 (104561 vs 0 lines).
+
+### T74 tape60
+1/206402 lines match at rtol=1e-09 (470251 vs 206402 lines).
+
+```
+line 2
+  REF:  1.001000+3 9.991673-1          2          0          0          0 125 1451    1
+  JUL:  1.001000+3 9.991673-1          0          0          0          0 125 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          6 125 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          0 125 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          8 125 1451    3
+  JUL:  2.960000+2 1.000000-3          0          0          2          7 125 1451    3
+```
+### T74 tape71
+0/0 lines match at rtol=1e-09 (573966 vs 0 lines).
+
+### T75 tape26
+0/1 lines match at rtol=1e-09 (153152 vs 1 lines).
+
+```
+line 1
+  REF:  47109.01c  107.969000  2.5300E-08   XX/XX/XX
+  JUL: 4731.80c    731.000000 filename route 1   1   266046     0     0 2.530E-08
+```
+### T78 tape31
+0/0 lines match at rtol=1e-09 (3488 vs 0 lines).
+
+### T78 tape34
+0/0 lines match at rtol=1e-09 (3488 vs 0 lines).
+
+### T79 tape30
+2/28649 lines match at rtol=1e-09 (35994 vs 28649 lines).
+
+```
+line 2
+  REF:  5.011900+4 1.178820+2          2          0          0          05046 1451    1
+  JUL:  5.011900+4 1.178820+2          0          0          0          05046 1451    1
+```
+```
+line 3
+  REF:  0.000000+0 0.000000+0          0          0          0          65046 1451    2
+  JUL:  0.000000+0 0.000000+0          0          0          0          05046 1451    2
+```
+```
+line 4
+  REF:  1.000000+0 2.000000+7          0          0         10          85046 1451    3
+  JUL:  2.960000+2 1.000000-3          0          0          0         385046 1451    3
+```
+### T80 tape24
+0/0 lines match at rtol=1e-09 (91453 vs 0 lines).
+
 ### T81 tape30
 2/45369 lines match at rtol=1e-09 (45372 vs 45369 lines).
 
@@ -461,6 +1111,70 @@ line 4
 line 5
   REF:  0.000000+0 1.000000-3          1          0          1         383837 1451    4
   JUL:  0.000000+0 0.000000+0          2        151          4          03837 1451    4
+```
+### T82 tape26
+0/1 lines match at rtol=1e-09 (59631 vs 1 lines).
+
+```
+line 1
+  REF:  27058.01c   57.438100  2.5300E-08   XX/XX/XX
+  JUL: 2722.80c    722.000000 filename route 1   1    58403     0     0 2.530E-08
+```
+### T82 tape28
+0/1 lines match at rtol=1e-09 (59631 vs 1 lines).
+
+```
+line 1
+  REF:  27058.01c   57.438100  2.5300E-08   XX/XX/XX
+  JUL: 2722.80c    722.000000 filename route 1   1    58403     0     0 2.530E-08
+```
+### T82 tape36
+0/1 lines match at rtol=1e-09 (6156 vs 1 lines).
+
+```
+line 1
+  REF:  27058.01c   57.438100  2.5300E-08   XX/XX/XX
+  JUL: 2723.80c    723.000000 filename route 1   1     8138     0     0 2.530E-08
+```
+### T82 tape38
+0/1 lines match at rtol=1e-09 (6156 vs 1 lines).
+
+```
+line 1
+  REF:  27458.01c   57.438100  2.5300E-08   XX/XX/XX
+  JUL: 2723.80c    723.000000 filename route 1   1     8138     0     0 2.530E-08
+```
+### T82 tape46
+0/1 lines match at rtol=1e-09 (52602 vs 1 lines).
+
+```
+line 1
+  REF:  95242.01c  239.980100  2.5300E-08   XX/XX/XX
+  JUL: 9546.80c    546.000000 filename route 1   1    53453     0     0 2.530E-08
+```
+### T82 tape48
+0/1 lines match at rtol=1e-09 (52602 vs 1 lines).
+
+```
+line 1
+  REF:  95642.01c  239.980100  2.5300E-08   XX/XX/XX
+  JUL: 9546.80c    546.000000 filename route 1   1    53453     0     0 2.530E-08
+```
+### T82 tape56
+0/1 lines match at rtol=1e-09 (55967 vs 1 lines).
+
+```
+line 1
+  REF:  95242.01c  239.980100  2.5300E-08   XX/XX/XX
+  JUL: 9547.80c    547.000000 filename route 1   1    27732     0     0 2.530E-08
+```
+### T82 tape58
+0/1 lines match at rtol=1e-09 (55967 vs 1 lines).
+
+```
+line 1
+  REF:  95242.01c  239.980100  2.5300E-08   XX/XX/XX
+  JUL: 9547.80c    547.000000 filename route 1   1    27732     0     0 2.530E-08
 ```
 ### T83 tape50
 1/71928 lines match at rtol=1e-09 (71931 vs 71928 lines).

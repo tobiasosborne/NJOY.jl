@@ -770,6 +770,16 @@ function parse_viewr(mc::ModuleCall)::ViewrParams
     ViewrParams(infile, nps)
 end
 
+struct LeaprParams
+    nout::Int
+end
+
+function parse_leapr(mc::ModuleCall)::LeaprParams
+    cards = mc.raw_cards
+    isempty(cards) && return LeaprParams(0)
+    LeaprParams(abs(_fint(cards[1], 1)))
+end
+
 function parse_purr(mc::ModuleCall)::PurrParams
     cards = mc.raw_cards
     isempty(cards) && return PurrParams(0,0,0,0,1,1,20,64,Float64[],Float64[])

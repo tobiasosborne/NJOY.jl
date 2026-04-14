@@ -134,26 +134,37 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     @info "thermr SAB: alpha=$(length(sab.alpha))×beta=$(length(sab.beta)), " *
           "T_eff=$(round(sab.T_eff, sigdigits=4))K"
 
-    # Build Bragg data from lattice parameters
-    bragg_params = lookup_bragg_params(mat_thermal)
-    # Debye-Waller from SAB data (already extracted by read_mf7_mt4)
-    # The DW integral is stored in the B-list constants read by read_mf7_mt4
-    # For now use the gateff-based T_eff lookup
-    dw = _compute_debye_waller(sab, temp)
+    # Build Bragg data only when coherent elastic is requested.
+    # Fortran thermr.f90:428: Bragg edges are computed only when icoh > 0.
+    # For ENDF-6 (lthr=1), thermr overwrites icoh = 10*lthr; pre-overwrite
+    # input icoh=0 ⇒ no coherent elastic, no MT=mtref+1 section.
+    bragg = nothing
+    if icoh > 0
+        bragg = try
+            bp = lookup_bragg_params(mat_thermal)
+            dw = _compute_debye_waller(sab, temp)
+            build_bragg_data(a=bp.a, c=bp.c,
+                             sigma_coh=bp.sigma_coh, A_mass=bp.A_mass,
+                             natom=natom, debye_waller=dw, emax=emax,
+                             lat=round(Int, bp.lat))
+        catch err
+            @warn "thermr SAB: Bragg lattice unavailable for MAT=$mat_thermal — " *
+                  "skipping coherent elastic (MT=$(mtref+1)). $(sprint(showerror, err))"
+            nothing
+        end
+    end
 
-    bragg = build_bragg_data(
-        a=bragg_params.a, c=bragg_params.c,
-        sigma_coh=bragg_params.sigma_coh, A_mass=bragg_params.A_mass,
-        natom=natom, debye_waller=dw, emax=emax, lat=round(Int, bragg_params.lat))
-
-    # Build thermal grid from BROADENED elastic grid (not reconr — Trap 83)
     haskey(mf3_data, 2) || error("thermr SAB: MT=2 (elastic) not found on PENDF")
     el_e = mf3_data[2][1]
     broadened_grid = sort(unique(vcat(
         Float64[e for e in el_e if e <= emax],
         [emax, round_sigfig(emax, 7, 1)])))
 
-    thermal_e = build_thermal_grid(bragg, broadened_grid, emax; tol=tol)
+    thermal_e = if bragg !== nothing
+        build_thermal_grid(bragg, broadened_grid, emax; tol=tol)
+    else
+        copy(broadened_grid)
+    end
     coh_ne = length(thermal_e)
 
     # Add sentinels (Fortran tpend)
@@ -165,7 +176,6 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     # MT=mtref (inelastic): calcem → two-step interpolation → thermal grid
     esi_sab, xsi_sab, mf6_sab = calcem(sab, temp, emax, nbin; tol=tol)
 
-    # Two-step interpolation: calcem(94pts) → broadened grid → thermal grid
     intermediate_e = sort(unique(vcat(
         Float64[e for e in el_e if e <= emax * (1 + 1e-10)],
         [emax, round_sigfig(emax, 7, 1)])))
@@ -180,16 +190,18 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     mf6_xsi[mtref] = xsi_sab
     mf6_emax[mtref] = emax
 
-    # MT=mtref+1 (coherent elastic): Bragg edges on thermal grid
-    mt_coh = mtref + 1
-    mt_coh_xs = Float64[e > emax ? 0.0 : round_sigfig(bragg_edges(e, bragg), 7, 0) for e in thermal_e]
-    added_mf3[mt_coh] = (thermal_e, mt_coh_xs)
-    push!(thermr_mts, mt_coh)
-
-    mf6_stubs[mt_coh] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
-
-    @info "thermr SAB: MT=$mtref+$mt_coh, $(length(thermal_e)) grid pts, " *
-          "$(length(esi_sab)) calcem IEs, $(bragg.n_edges) Bragg edges"
+    if bragg !== nothing
+        mt_coh = mtref + 1
+        mt_coh_xs = Float64[e > emax ? 0.0 : round_sigfig(bragg_edges(e, bragg), 7, 0) for e in thermal_e]
+        added_mf3[mt_coh] = (thermal_e, mt_coh_xs)
+        push!(thermr_mts, mt_coh)
+        mf6_stubs[mt_coh] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
+        @info "thermr SAB: MT=$mtref+$mt_coh, $(length(thermal_e)) grid pts, " *
+              "$(length(esi_sab)) calcem IEs, $(bragg.n_edges) Bragg edges"
+    else
+        @info "thermr SAB: MT=$mtref (inelastic only), $(length(thermal_e)) grid pts, " *
+              "$(length(esi_sab)) calcem IEs"
+    end
 
     return coh_ne
 end

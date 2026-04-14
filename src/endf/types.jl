@@ -66,7 +66,10 @@ struct InterpolationTable
                                 law::AbstractVector{<:Integer})
         length(nbt) == length(law) ||
             throw(ArgumentError("nbt and law must have same length"))
-        new(Int32.(nbt), InterpolationLaw.(law))
+        # JENDL-3.3 emits INT=0 for some MF3/MF4 sections; Fortran NJOY
+        # silently treats these as linear (INT=2).
+        normed = [li == 0 ? Int32(2) : Int32(li) for li in law]
+        new(Int32.(nbt), InterpolationLaw.(normed))
     end
 
     function InterpolationTable(nbt::AbstractVector{<:Integer},
