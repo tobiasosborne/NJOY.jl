@@ -488,6 +488,20 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
     elseif params.iinc == 2
         # SAB MF6 + Bragg stub
         sab_path = resolve(tapes, params.nin_thermal)
+
+        # Mirror thermr_module's graceful degrade: empty/missing SAB tape
+        # (leapr touch-stub) → fall back to free gas for MF6 recompute.
+        if !isfile(sab_path) || filesize(sab_path) == 0
+            @warn "thermr MF6 recompute: SAB tape empty/missing — free-gas fallback"
+            sb = ((awr + 1) / awr)^2
+            esi, xsi, records = calcem_free_gas(awr, temp, emax, nbin;
+                                                sigma_b=sb, tol=params.tol)
+            ctx.mf6_records[mtref] = records
+            ctx.mf6_xsi[mtref] = xsi
+            ctx.mf6_emax[mtref] = emax
+            return nothing
+        end
+
         sab = read_mf7_mt4(sab_path, params.mat_thermal, temp)
         esi, xsi, records = calcem(sab, temp, emax, nbin; tol=params.tol)
         ctx.mf6_records[mtref] = records

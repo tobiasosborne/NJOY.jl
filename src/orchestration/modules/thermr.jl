@@ -55,10 +55,23 @@ function thermr_module(tapes::TapeManager, params::ThermrParams)
         # S(α,β) with coherent elastic (iinc=2)
         # ===============================================================
         thermal_tape_path = resolve(tapes, params.nin_thermal)
-        coh_ne = _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
-                              thermr_mts, mf3_data, thermal_tape_path,
-                              params.mat_thermal, A, temp, emax, tol, nbin, mtref,
-                              params.icoh, params.natom)
+
+        # Graceful degrade: if the thermal tape is absent or empty (the
+        # leapr stub's current output), we cannot read MF7/MT4. Drop
+        # down to iinc=1 (free gas) so the chain runs to completion.
+        # This produces nonsense thermal data for the SAB material but
+        # avoids a hard CRASH while leapr is still a touch-stub.
+        if !isfile(thermal_tape_path) || filesize(thermal_tape_path) == 0
+            @warn "thermr: SAB tape $(thermal_tape_path) empty/missing " *
+                  "(likely leapr stub) — falling back to free-gas (iinc=1)"
+            _thermr_free_gas!(added_mf3, mf6_records, mf6_xsi, mf6_emax,
+                              thermr_mts, mf3_data, A, temp, emax, tol, nbin, mtref)
+        else
+            coh_ne = _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
+                                  thermr_mts, mf3_data, thermal_tape_path,
+                                  params.mat_thermal, A, temp, emax, tol, nbin, mtref,
+                                  params.icoh, params.natom)
+        end
     end
 
     # Build output PENDF with thermal sections added

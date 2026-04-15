@@ -35,8 +35,19 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
     thnmax = resolve_thnmax(params.thnmax, reconr_mf3_secs, awr; eresh=eresh)
     @info "broadr: MAT=$(params.mat) thnmax=$(thnmax) ntemp=$(length(params.temperatures))"
 
-    # Get energy grid from MT=1 (total)
-    haskey(mf3_data, 1) || error("broadr: MT=1 (total) not found on input PENDF")
+    # Dosimetry / IRDFF evaluations (e.g. Fe-nat IRDFF-II) carry only
+    # partial reactions in MF3 — no MT=1 (total). Fortran broadr handles
+    # this by broadening each partial independently; our current pipeline
+    # is built around an MT=1 master grid. STUB: pass the input PENDF
+    # through unchanged so downstream modules (groupr, errorr) see
+    # usable data.
+    if !haskey(mf3_data, 1)
+        @warn "broadr: MT=1 not present on input PENDF (MAT=$(params.mat)) — " *
+              "dosimetry pass-through (broadening skipped)"
+        cp(pendf_in_path, pendf_out_path; force=true)
+        register!(tapes, params.npendf_out, pendf_out_path)
+        return nothing
+    end
     energies = mf3_data[1][1]
 
     # Select partials for convergence testing (Trap 53: NOT total)

@@ -206,21 +206,23 @@ end
 
 struct HeatrParams
     nendf::Int; npendf_in::Int; npendf_out::Int
+    nplot::Int           # card 1, 4th int — plot tape unit (0 = no plot)
     mat::Int; nqa::Int; mts::Vector{Int}
 end
 
 function parse_heatr(mc::ModuleCall)::HeatrParams
     cards = mc.raw_cards
-    isempty(cards) && return HeatrParams(0,0,0,0,0,Int[])
+    isempty(cards) && return HeatrParams(0,0,0,0,0,0,Int[])
     nendf = abs(_fint(cards[1], 1)); nin = abs(_fint(cards[1], 2))
     nout = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
+    nplot = length(cards[1]) >= 4 ? abs(_fint(cards[1], 4)) : 0
     mat = length(cards) >= 2 ? _fint(cards[2], 1) : 0
     nqa = length(cards) >= 2 ? _fint(cards[2], 2; default=0) : 0
     mts = Int[]
     if length(cards) >= 3 && nqa > 0
         for t in cards[3]; startswith(t, "'") && continue; push!(mts, _parse_int_token(t)); end
     end
-    HeatrParams(nendf, nin, nout, mat, nqa, mts)
+    HeatrParams(nendf, nin, nout, nplot, mat, nqa, mts)
 end
 
 struct ThermrParams

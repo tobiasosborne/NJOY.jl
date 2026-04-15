@@ -23,6 +23,17 @@ function heatr_module(tapes::TapeManager, params::HeatrParams;
     pendf_in_path = resolve(tapes, params.npendf_in)
     pendf_out_path = resolve(tapes, params.npendf_out)
 
+    # Plot-tape (4th card-1 int, e.g. `heatr / -21 -23 -25 26/`): Fortran
+    # heatr writes KERMA / damage plots here for later viewr rendering.
+    # STUB: touch the file so downstream viewr doesn't SystemError; plot
+    # emission is not yet implemented.
+    if params.nplot > 0
+        nplot_path = resolve(tapes, params.nplot)
+        touch(nplot_path)
+        register!(tapes, params.nplot, nplot_path)
+        @info "heatr: plot tape $(params.nplot) stubbed (empty)"
+    end
+
     # Read input PENDF
     pendf_in = read_pendf(pendf_in_path)
     mf3_data = extract_mf3_all(pendf_in, params.mat)

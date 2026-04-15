@@ -139,31 +139,29 @@ per-test detail:
 - Bragg gating + graceful degrade (7 tests): T25, T32, T67, T68, T69, T70, T74.
 - INT=0 (2 tests): T15/T17 progress past reader; new downstream bug revealed.
 
-**Priority follow-ups (post-Phase-13, 2026-04-15)**:
-1. ~~**Dispatch `covr`**~~ — Phase 11. T05/T16 CRASH → DIFFS.
-2. ~~**Dispatch `plotr`** (stub)~~ — Phase 12. T06 CRASH → DIFFS.
-3. ~~**T20 errorr 999-mode stub**~~ — Phase 12. T20 CRASH → DIFFS.
-4. ~~**T43 broadr T=0 pass-through**~~ — Phase 12. T43 CRASH → DIFFS.
-5. ~~**moder iopt=1 extract-mode stub + gaspr dispatch stub**~~ —
-   Phase 13. T12/T18/T27/T34/T47 also cascaded past CRASH (covr/plotr
-   stubs did it, not moder/gaspr per se). T24 still CRASHes downstream
-   on heatr plot-tape (bead `NJOY.jl-327`).
-6. **heatr plot-tape stub** (`NJOY.jl-327`) — add `nplot::Int` to
-   `HeatrParams`; touch plot file. Unblocks T24's downstream viewr.
-7. **T15/T17 broadr performance** (`NJOY.jl-326`) — 471 s on U-238
-   JENDL-3.3. Profile `broadn_grid` / `sigma1_at`.
-8. **Real plotr / covr / leapr / purr output** — each unblocks bit-
-   identical convergence; leapr has the richest downstream chain.
-9. **Remaining CRASHes**: T09 (leapr thin stub), T60 (Fe-nat IRDFF-II
-   MT=1 missing), T24 (see 6). T65 is TIMEOUT not CRASH — errorr perf
-   on U-235 MF34.
-10. **MF7/MT2 Bragg reader** → replaces hardcoded `BRAGG_LATTICE_PARAMS`
-    for ENDF-6 evaluations (T25/T67–T74).
-11. The ~55 DIFFS cases — per-tape bisection (Grind Method).
+**Priority follow-ups (post-Phase-14, 2026-04-15)**:
+1. ~~**Dispatch `covr`**~~ — Phase 11.
+2. ~~**Dispatch `plotr`** (stub)~~ — Phase 12.
+3. ~~**T20 errorr 999-mode stub**~~ — Phase 12.
+4. ~~**T43 broadr T=0 pass-through**~~ — Phase 12.
+5. ~~**moder iopt=1 extract + gaspr stub**~~ — Phase 13.
+6. ~~**heatr plot-tape stub** (`NJOY.jl-327`)~~ — Phase 14. T24 unblocked.
+7. ~~**T60 broadr MT=1 fallback** (dosimetry)~~ — Phase 14.
+8. ~~**T09 thermr → free-gas fallback for empty SAB tape**~~ — Phase 14.
+9. **Run a full sweep** — six phases of progress (P10→P14); the
+   HANDOFF's 16-CRASH taxonomy is now estimated ≈0 structural crashes.
+   Re-sweep to confirm across all 84 tests (~2–3 h).
+10. **TIMEOUTs**: `NJOY.jl-326` (broadr U-238 JENDL, T15/T17), T65
+    errorr perf on U-235 MF34.
+11. **Real plotr / covr / leapr / purr output** — each bit-converges
+    5–10 tests; leapr has the richest downstream chain.
+12. **MF7/MT2 Bragg reader** → replaces hardcoded
+    `BRAGG_LATTICE_PARAMS` for ENDF-6 evaluations (T25/T67–T74).
+13. The ~55 DIFFS cases — per-tape bisection (Grind Method).
 
 See `worklog/T10_phase10_batch_dispatch.md`, `T11_covr_dispatch.md`,
-`T12_small_batch.md`, and `T13_moder_gaspr.md` for implementation
-detail.
+`T12_small_batch.md`, `T13_moder_gaspr.md`, `T14_drain_crash.md` for
+implementation detail.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
