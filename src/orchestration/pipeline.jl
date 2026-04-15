@@ -240,6 +240,10 @@ function run_njoy(input_path::AbstractString;
             params = parse_plotr(mc)
             plotr_module(tapes, params)
 
+        elseif mc.name == :gaspr
+            params = parse_gaspr(mc)
+            gaspr_module(tapes, params)
+
         else
             @warn "Module $(mc.name) not yet implemented"
         end

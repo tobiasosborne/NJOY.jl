@@ -22,22 +22,53 @@ function moder_module(tapes::TapeManager, mc::ModuleCall)
     nin  = _parse_int_token(card1[1])
     nout = _parse_int_token(card1[2])
 
+    # Fortran moder extract/merge mode: if 1 <= |nin| <= 19, card 1's nin
+    # is a flag (1=endf/pendf, 2=gendf, 3=errorr) — not a real tape unit.
+    # Card 2 is a tape-ID label; card 3+ are (real_nin, matd) pairs
+    # terminated by real_nin=0. Single-material stub: cp the first
+    # referenced tape to the output. Material filtering / multi-material
+    # merging is not yet implemented.
+    if 1 <= abs(nin) <= 19
+        return _moder_extract_stub!(tapes, mc.raw_cards, nin, nout)
+    end
+
     nin_path = resolve(tapes, nin)
     nout_path = resolve(tapes, nout)
 
     @info "moder: tape $(abs(nin)) → tape $(abs(nout))"
 
-    # If input tape exists, copy it to output location
     if isfile(nin_path)
         if nin_path != nout_path
             cp(nin_path, nout_path; force=true)
         end
-        # Register the output tape so downstream modules can find it
         register!(tapes, nout, nout_path)
     else
         @warn "moder: input tape $nin_path not found"
     end
 
+    nothing
+end
+
+function _moder_extract_stub!(tapes::TapeManager, cards, nin_flag::Int, nout::Int)
+    if length(cards) < 3 || isempty(cards[3])
+        @warn "moder: extract-mode missing card 3 (nin_real, matd) — skipping"
+        return nothing
+    end
+    real_nin = _parse_int_token(cards[3][1])
+    if real_nin == 0
+        @warn "moder: extract-mode card 3 starts with 0 sentinel — nothing to extract"
+        return nothing
+    end
+    nin_path  = resolve(tapes, real_nin)
+    nout_path = resolve(tapes, nout)
+    @info "moder: extract-mode (flag=$nin_flag) tape $(abs(real_nin)) → tape $(abs(nout)) " *
+          "(material filter not implemented)"
+    if isfile(nin_path)
+        nin_path != nout_path && cp(nin_path, nout_path; force=true)
+        register!(tapes, nout, nout_path)
+    else
+        @warn "moder: extract-mode input tape $nin_path not found"
+    end
     nothing
 end
 
