@@ -139,30 +139,26 @@ per-test detail:
 - Bragg gating + graceful degrade (7 tests): T25, T32, T67, T68, T69, T70, T74.
 - INT=0 (2 tests): T15/T17 progress past reader; new downstream bug revealed.
 
-**Priority follow-ups (post-Phase-10)**:
-1. ~~**Dispatch `covr`**~~ — landed in Phase 11 (2026-04-15). T05 and
-   T16 no longer CRASH. T06 was mis-classified in the T10 recommendation
-   — it is a `plotr` test, not `covr`, and stays CRASH pending a `plotr`
-   dispatch. See `worklog/T11_covr_dispatch.md`.
-2. **T15/T17 BoundsError** → now that INT=0 is accepted, trace the
-   empty-vector index (likely MF3 section reader or broadr thinning).
-   One focused debug session with the reference T15 tape as oracle.
-3. **T20 moder tape-unit-0** → input-parser edge case.
-4. **Dispatch `plotr`** (stub) → unblocks T06. Same shape as the
-   covr/purr/leapr stubs.
-5. **Real leapr MF7 output** → unblocks T09 and proper thermr chains
-   (T67–T70, T74 currently produce inelastic-only output).
-6. **Real purr MT152 output** → lets T28, T34, T35–T42 move from
-   "runs but diffs" toward bit-identical.
-7. **Real covr plot-tape serializer** → bit-identical tape34/36/37 for
-   T05, T16.
-8. **MF7/MT2 Bragg reader** → replaces the hardcoded
-   `BRAGG_LATTICE_PARAMS` for ENDF-6 evaluations (the correct way to
-   handle T25/T67–T74).
-9. The 48 DIFFS cases — per-tape bisection (Grind Method).
+**Priority follow-ups (post-Phase-12, 2026-04-15)**:
+1. ~~**Dispatch `covr`**~~ — Phase 11. T05/T16 CRASH → DIFFS.
+2. ~~**Dispatch `plotr`** (stub)~~ — Phase 12. T06 CRASH → DIFFS.
+3. ~~**T20 errorr 999-mode stub**~~ — Phase 12. T20 CRASH → DIFFS.
+4. ~~**T43 broadr T=0 pass-through**~~ — Phase 12. T43 CRASH → DIFFS.
+5. **T15/T17 broadr performance** — sweep had classified as CRASH with
+   `BoundsError`; on this machine the failure mode is actually broadr
+   taking 471 s on U-238 JENDL-3.3 (hard-timeout at 300 s). Tracked as
+   bead `NJOY.jl-326`. Profile `broadn_grid` / `sigma1_at` hot paths.
+6. **Real plotr / covr / leapr / purr output** — each unblocks bit-
+   identical convergence for their respective tests. Plotr would cover
+   the most test count; leapr has the richest downstream chain.
+7. **Remaining crashes**: T09 (leapr thin stub), T12/T18/T24/T27/T34/
+   T47/T65 (tape-unit plumbing), T60 (Fe-nat IRDFF-II MT=1 missing).
+8. **MF7/MT2 Bragg reader** → replaces hardcoded `BRAGG_LATTICE_PARAMS`
+   for ENDF-6 evaluations (T25/T67–T74).
+9. The ~50 DIFFS cases — per-tape bisection (Grind Method).
 
-See `worklog/T10_phase10_batch_dispatch.md` and
-`worklog/T11_covr_dispatch.md` for implementation detail.
+See `worklog/T10_phase10_batch_dispatch.md`, `T11_covr_dispatch.md`,
+and `T12_small_batch.md` for implementation detail.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:

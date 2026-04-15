@@ -5,6 +5,33 @@
 # write output tape in GENDF-like format.
 
 """
+    errorr_dummy_mf33_stub!(tapes::TapeManager, nin_unit::Int, nout_unit::Int)
+
+STUB for Fortran errorr's "999 option" — inserts dummy MF33 covariance
+sections into an ENDF tape. Full implementation would synthesize
+placeholder MF33 records for each requested MT (see Fortran errorr.f90
+line ~900). For now, copy the input tape unchanged so downstream
+reconr/broadr find a readable file.
+"""
+function errorr_dummy_mf33_stub!(tapes::TapeManager, nin_unit::Int, nout_unit::Int)
+    if nin_unit <= 0 || nout_unit <= 0
+        @warn "errorr 999-mode: bad units nin=$nin_unit nout=$nout_unit — skipping"
+        return nothing
+    end
+    nin_path  = resolve(tapes, nin_unit)
+    nout_path = resolve(tapes, nout_unit)
+    @info "errorr: 999-mode STUB (cp tape$(nin_unit) → tape$(nout_unit); " *
+          "dummy MF33 insertion not implemented)"
+    if isfile(nin_path)
+        nin_path != nout_path && cp(nin_path, nout_path; force=true)
+        register!(tapes, nout_unit, nout_path)
+    else
+        @warn "errorr 999-mode: input tape$(nin_unit) at $nin_path not found"
+    end
+    nothing
+end
+
+"""
     errorr_module(tapes::TapeManager, params::ErrorrParams)
 
 Run ERRORR: read ENDF covariance data, compute multigroup covariances,
@@ -15,6 +42,13 @@ Output tapes: nout (covariance output)
 """
 function errorr_module(tapes::TapeManager, params::ErrorrParams)
     @info "errorr: MAT=$(params.mat) mfcov=$(params.mfcov) → tape $(params.nout)"
+
+    # Graceful skip for malformed/unsupported deck shapes that left nout=0.
+    # The dedicated 999-mode stub is dispatched separately in pipeline.jl.
+    if params.nout <= 0
+        @warn "errorr: nout=0 — skipping (unsupported deck shape)"
+        return nothing
+    end
 
     endf_path = resolve(tapes, params.nendf)
     nout_path = resolve(tapes, params.nout)

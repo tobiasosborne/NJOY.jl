@@ -188,8 +188,21 @@ function run_njoy(input_path::AbstractString;
             ccccr_module(tapes, params)
 
         elseif mc.name == :errorr
-            params = parse_errorr(mc)
-            errorr_module(tapes, params)
+            # Detect the Fortran "999 option" (insert-dummy-MF33 mode):
+            # card 1 is just the integer 999, card 2 is (nin, nout). Full
+            # covariance-injection is not implemented; stub cp's nin → nout
+            # so downstream reconr/broadr finds a readable tape.
+            cards = mc.raw_cards
+            if !isempty(cards) && length(cards[1]) == 1 &&
+               _parse_int_token(cards[1][1]) == 999 && length(cards) >= 2 &&
+               length(cards[2]) >= 2
+                nin  = abs(_parse_int_token(cards[2][1]))
+                nout = abs(_parse_int_token(cards[2][2]))
+                errorr_dummy_mf33_stub!(tapes, nin, nout)
+            else
+                params = parse_errorr(mc)
+                errorr_module(tapes, params)
+            end
 
         elseif mc.name == :gaminr
             params = parse_gaminr(mc)
@@ -224,7 +237,9 @@ function run_njoy(input_path::AbstractString;
             covr_module(tapes, params)
 
         elseif mc.name == :plotr
-            @info "plotr: skipped (visualization)"
+            params = parse_plotr(mc)
+            plotr_module(tapes, params)
+
         else
             @warn "Module $(mc.name) not yet implemented"
         end

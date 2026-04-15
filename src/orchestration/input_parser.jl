@@ -819,6 +819,16 @@ function parse_covr(mc::ModuleCall)::CovrParams
     CovrParams(nin, npend, nout)
 end
 
+struct PlotrParams
+    nplt::Int     # output plot-command tape (card 1, first int)
+end
+
+function parse_plotr(mc::ModuleCall)::PlotrParams
+    cards = mc.raw_cards
+    isempty(cards) && return PlotrParams(0)
+    PlotrParams(abs(_fint(cards[1], 1)))
+end
+
 # =========================================================================
 # CMakeLists.txt parser
 # =========================================================================

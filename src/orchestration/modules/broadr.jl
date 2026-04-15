@@ -51,6 +51,23 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
 
     for (it, temp) in enumerate(params.temperatures)
         t_eff = temp - t_old  # Fortran broadr uses T_eff = T_new - T_old
+
+        # T=0K (or already-broadened T_old ≥ T_new): broadening kernel is a
+        # delta function — pass through the current grid unchanged. Fortran
+        # broadr handles this by short-circuiting the broadn call.
+        if t_eff <= 0.0
+            @info "broadr: T=$(temp)K ΔT=$(t_eff) ≤ 0 — pass-through (no broadening)"
+            push!(all_temp_results, (
+                temperature = temp,
+                energies = copy(cur_energies),
+                total = copy(cur_total),
+                partials = copy(cur_xs),
+                partial_mts = partial_mts,
+            ))
+            t_old = temp
+            continue
+        end
+
         alpha = awr / (PhysicsConstants.bk * t_eff)
         tol = params.tol
         errmax = 10 * tol
