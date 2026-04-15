@@ -804,6 +804,21 @@ function parse_purr(mc::ModuleCall)::PurrParams
                max(nsigz, length(sigz)), nbin, nladr, temps, sigz)
 end
 
+struct CovrParams
+    nin::Int      # input covariance tape from errorr (or zero)
+    npend::Int    # input pendf tape (or zero; unused by stub)
+    nout::Int     # output plot-tape unit consumed by viewr
+end
+
+function parse_covr(mc::ModuleCall)::CovrParams
+    cards = mc.raw_cards
+    isempty(cards) && return CovrParams(0, 0, 0)
+    nin   = abs(_fint(cards[1], 1))
+    npend = abs(_fint(cards[1], 2; default=0))
+    nout  = abs(_fint(cards[1], 3; default=0))
+    CovrParams(nin, npend, nout)
+end
+
 # =========================================================================
 # CMakeLists.txt parser
 # =========================================================================

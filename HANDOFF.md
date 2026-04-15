@@ -140,23 +140,29 @@ per-test detail:
 - INT=0 (2 tests): T15/T17 progress past reader; new downstream bug revealed.
 
 **Priority follow-ups (post-Phase-10)**:
-1. **Dispatch `covr`** → unblocks T05, T06, T16 (3 crashes). `covr_module`
-   already exists in `src/processing/covr.jl`; just needs a pipeline
-   branch and the `:covr` parse.
+1. ~~**Dispatch `covr`**~~ — landed in Phase 11 (2026-04-15). T05 and
+   T16 no longer CRASH. T06 was mis-classified in the T10 recommendation
+   — it is a `plotr` test, not `covr`, and stays CRASH pending a `plotr`
+   dispatch. See `worklog/T11_covr_dispatch.md`.
 2. **T15/T17 BoundsError** → now that INT=0 is accepted, trace the
    empty-vector index (likely MF3 section reader or broadr thinning).
    One focused debug session with the reference T15 tape as oracle.
 3. **T20 moder tape-unit-0** → input-parser edge case.
-4. **Real leapr MF7 output** → unblocks T09 and proper thermr chains
+4. **Dispatch `plotr`** (stub) → unblocks T06. Same shape as the
+   covr/purr/leapr stubs.
+5. **Real leapr MF7 output** → unblocks T09 and proper thermr chains
    (T67–T70, T74 currently produce inelastic-only output).
-5. **Real purr MT152 output** → lets T28, T34, T35–T42 move from
+6. **Real purr MT152 output** → lets T28, T34, T35–T42 move from
    "runs but diffs" toward bit-identical.
-6. **MF7/MT2 Bragg reader** → replaces the hardcoded
+7. **Real covr plot-tape serializer** → bit-identical tape34/36/37 for
+   T05, T16.
+8. **MF7/MT2 Bragg reader** → replaces the hardcoded
    `BRAGG_LATTICE_PARAMS` for ENDF-6 evaluations (the correct way to
    handle T25/T67–T74).
-7. The 48 DIFFS cases — per-tape bisection (Grind Method).
+9. The 48 DIFFS cases — per-tape bisection (Grind Method).
 
-See `worklog/T10_phase10_batch_dispatch.md` for implementation detail.
+See `worklog/T10_phase10_batch_dispatch.md` and
+`worklog/T11_covr_dispatch.md` for implementation detail.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:

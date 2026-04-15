@@ -219,6 +219,10 @@ function run_njoy(input_path::AbstractString;
             params = parse_leapr(mc)
             leapr_module(tapes, params)
 
+        elseif mc.name == :covr
+            params = parse_covr(mc)
+            covr_module(tapes, params)
+
         elseif mc.name == :plotr
             @info "plotr: skipped (visualization)"
         else
