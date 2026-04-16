@@ -574,15 +574,89 @@ function build_unresolved_table(urr::URR2Data, abn::Float64,
     ne = length(energies)
     total = zeros(ne); elastic = zeros(ne); fission = zeros(ne); capture = zeros(ne)
 
-    # Evaluate at each node using csunr2
-    for i in 1:ne
-        E = abs(energies[i])
-        if E >= urr.EL && E < urr.EH
-            sig = _csunr2(E, urr)
-            total[i]   = round_sigfig(abn * sig[1], 7)
-            elastic[i] = round_sigfig(abn * sig[2], 7)
-            fission[i] = round_sigfig(abn * sig[3], 7)
-            capture[i] = round_sigfig(abn * sig[4], 7)
+    # Match Fortran csunr2's state machine (reconr.f90:4146-4313):
+    # XS is computed at each URR sequence energy (the "control" grid) and
+    # interpolated between bracketing sequence nodes for any other E.  Pure
+    # parameter-interpolation at the table-node E (Julia's prior behavior)
+    # gave 1-ULP differences at boundary nodes like sigfig(EL,7,+1).
+    #
+    # Use the first sequence's energy grid as the control grid (matches
+    # Fortran's iloc=inoww+30 pointing at the first L-state's first
+    # J-state's first energy).  INT for the final interpolation comes
+    # from the last sequence's INT (matches Fortran line 4219 overwrite).
+    if !isempty(urr.sequences)
+        seq_e = urr.sequences[1].energies
+        # Pre-compute XS at every sequence energy.  Include the upper
+        # boundary EH so table nodes like sigfig(EH,7,-1) interpolate
+        # against XS_at_EH rather than falling back to param-interp.
+        seq_xs = Dict{Float64, NTuple{4,Float64}}()
+        for se in seq_e
+            (se >= urr.EL && se <= urr.EH) || continue
+            seq_xs[se] = _csunr2(se, urr)
+        end
+        int_law = urr.sequences[end].INT
+
+        # Match Fortran csunr2's gap-conditional dispatch (reconr.f90:4151-4152):
+        #   wide gap  (enext >= 1.26 * elast) → compute XS by param-interp at E
+        #   narrow gap                         → interpolate precomputed XS
+        # Wide gaps fall through to the original _csunr2(E) path; narrow gaps
+        # use the precomputed seq_xs and the URR INT law.
+        wide = 1.26
+        function eval_xs(E)
+            n_seq = length(seq_e)
+            if n_seq == 0 || !haskey(seq_xs, seq_e[1])
+                return _csunr2(E, urr)
+            end
+            i1 = 1
+            while i1 < n_seq && seq_e[i1+1] <= E
+                i1 += 1
+            end
+            if i1 == n_seq || seq_e[i1] == E
+                return haskey(seq_xs, seq_e[i1]) ? seq_xs[seq_e[i1]] : _csunr2(E, urr)
+            end
+            e1 = seq_e[i1]; e2 = seq_e[i1+1]
+            # Wide-gap path → param-interp at E (Julia's prior behavior).
+            if e1 > 0 && e2 >= wide * e1
+                return _csunr2(E, urr)
+            end
+            (haskey(seq_xs, e1) && haskey(seq_xs, e2)) || return _csunr2(E, urr)
+            x1 = seq_xs[e1]; x2 = seq_xs[e2]
+            if int_law == 2 || int_law == 0
+                frac = (E - e1) / (e2 - e1)
+                return ntuple(k -> x1[k] + frac * (x2[k] - x1[k]), 4)
+            elseif int_law == 5 && e1 > 0 && e2 > 0
+                logr = log(E / e1) / log(e2 / e1)
+                return ntuple(4) do k
+                    (x1[k] <= 0 || x2[k] <= 0) ?
+                        x1[k] + logr * (x2[k] - x1[k]) :
+                        exp(log(x1[k]) + logr * log(x2[k] / x1[k]))
+                end
+            else
+                frac = (E - e1) / (e2 - e1)
+                return ntuple(k -> x1[k] + frac * (x2[k] - x1[k]), 4)
+            end
+        end
+
+        for i in 1:ne
+            E = abs(energies[i])
+            if E >= urr.EL && E < urr.EH
+                sig = eval_xs(E)
+                total[i]   = round_sigfig(abn * sig[1], 7)
+                elastic[i] = round_sigfig(abn * sig[2], 7)
+                fission[i] = round_sigfig(abn * sig[3], 7)
+                capture[i] = round_sigfig(abn * sig[4], 7)
+            end
+        end
+    else
+        for i in 1:ne
+            E = abs(energies[i])
+            if E >= urr.EL && E < urr.EH
+                sig = _csunr2(E, urr)
+                total[i]   = round_sigfig(abn * sig[1], 7)
+                elastic[i] = round_sigfig(abn * sig[2], 7)
+                fission[i] = round_sigfig(abn * sig[3], 7)
+                capture[i] = round_sigfig(abn * sig[4], 7)
+            end
         end
     end
 
