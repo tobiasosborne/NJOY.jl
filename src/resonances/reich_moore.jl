@@ -63,6 +63,14 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
     k = cwaven * arat * sqrt(abs(E))
     pifac = C.pi / (k * k)
 
+    # Fortran csrmat sets gf=0 once at subroutine entry (reconr.f90:3259) and
+    # sets gf=1 inside the resonance loop when gfa/gfb != 0 (line 3371).  gf
+    # is NEVER reset inside the l/j/channel loops, so once any fissile
+    # resonance is seen it "sticks" for all subsequent iterations and forces
+    # the R-matrix (Frobenius-Schur) path rather than the R-function path.
+    # Julia must mirror this to be bit-identical: once sticky, always sticky.
+    sticky_has_fission = false
+
     # Loop over l states
     for il in 1:Int(params.NLS)
         ll = Int(params.l_values[il])
@@ -139,8 +147,10 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                 s11 = zE; s12 = zE; s13 = zE
                 s22 = zE; s23 = zE; s33 = zE
 
-                # Accumulate R-matrix from resonances
-                has_fission = false
+                # Accumulate R-matrix from resonances.  has_fission reflects
+                # Fortran's sticky gf flag — initialize from the sticky state
+                # carried across all previous l/j/kchanl iterations.
+                has_fission = sticky_has_fission
                 for ir in 1:nrs
                     aj_val = params.AJ[il][ir]
                     aj_abs = abs(aj_val)
@@ -221,6 +231,7 @@ function cross_section_rm(E::Real, params::ReichMooreParameters,
                         r23 += gg4 * a2 * a3
                         s23 -= de2 * a2 * a3
                         has_fission = true
+                        sticky_has_fission = true
                     end
                 end
 
