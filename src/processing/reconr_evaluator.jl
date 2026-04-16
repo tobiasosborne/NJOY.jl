@@ -1042,14 +1042,34 @@ function build_rml_evaluator(rml::RMLData)
     return evaluator
 end
 
-"""Threshold-adjusted interpolation: modify first breakpoint to (thrxx, 0) and use the correct law."""
+"""Threshold-adjusted interpolation matching Fortran lunion (reconr.f90:1925-1943).
+
+Sets x[1] = thrxx, y[1] = 0, and cascades sigfig nudges to subsequent
+breakpoints whenever they end up <= the previous (modified) value.
+This matches Trap 33 / pendf_writer's `_threshold_interp`.
+"""
 function _threshold_interp_legacy(tab::TabulatedFunction, e::Float64, thrxx::Float64)
-    saved_x, saved_y = tab.x[1], tab.y[1]
+    n = length(tab.x)
+    saved = Tuple{Int,Float64}[]
+    push!(saved, (1, tab.x[1]))
     tab.x[1] = thrxx
+    push!(saved, (-1, tab.y[1]))
     tab.y[1] = 0.0
+    k = 1
+    while k < n && tab.x[k+1] <= tab.x[k]
+        push!(saved, (k+1, tab.x[k+1]))
+        tab.x[k+1] = round_sigfig(tab.x[k], 7, +1)
+        k += 1
+        k > 21 && break
+    end
     result = interpolate(tab, e)
-    tab.x[1] = saved_x
-    tab.y[1] = saved_y
+    for (idx, val) in reverse(saved)
+        if idx == -1
+            tab.y[1] = val
+        else
+            tab.x[idx] = val
+        end
+    end
     return result
 end
 
@@ -1115,9 +1135,15 @@ function merge_background_legacy(energies::Vector{Float64},
             if thrx > 1.0 && (thrx - e) > 1.0e-10 * thrx
                 continue
             end
+            # Fortran emerge line 4794: at-threshold suppression — when E lies
+            # within tol of the (sigfig'd) threshold, force sn=0.  Without
+            # this, sections whose first breakpoint ≈ E contribute a tiny
+            # nonzero value to MT=1 that Fortran zeros out.
+            if thrx > 1.0 && abs(thrx - e) < 1.0e-10 * thrx
+                continue
+            end
             tab = sec.tab
-            bg = if thrx > 1.0 && e >= thrx && length(tab.x) >= 2 &&
-                    e < tab.x[2] && tab.x[1] < thrx
+            bg = if thrx > 1.0 && e >= thrx && tab.x[1] < thrx
                 _threshold_interp_legacy(tab, e, thrx)
             else
                 interpolate(tab, e)
