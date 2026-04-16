@@ -348,30 +348,45 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
             xxxxr = zeros(typeof(float(E)), ntriag)
             xxxxi = zeros(typeof(float(E)), ntriag)
         else
-            # Build full complex Y matrix and invert
-            ymat_full = zeros(Complex{typeof(float(E))}, nchan, nchan)
-            rmat_full = zeros(Complex{typeof(float(E))}, nchan, nchan)
-            for i in 1:nchan
-                for j in 1:i
-                    ij = i * (i - 1) / 2 + j |> Int
+            yinv_r = similar(ymat_r)
+            yinv_i = similar(ymat_i)
+            if nchan == 1
+                _sammy_onech!(yinv_r, yinv_i, ymat_r, ymat_i)
+            elseif nchan == 2
+                _sammy_twoch!(yinv_r, yinv_i, ymat_r, ymat_i)
+            else
+                # Fall back to generic complex inversion for nchan > 2
+                # (onech, twoch, threech, yfour paths to be ported as needed).
+                ymat_full = zeros(Complex{typeof(float(E))}, nchan, nchan)
+                for i in 1:nchan, j in 1:i
+                    ij = i * (i - 1) ÷ 2 + j
                     ymat_full[i, j] = complex(ymat_r[ij], ymat_i[ij])
-                    ymat_full[j, i] = ymat_full[i, j]  # symmetric
-                    rmat_full[i, j] = complex(rmat_r[ij], rmat_i[ij])
-                    rmat_full[j, i] = rmat_full[i, j]
+                    ymat_full[j, i] = ymat_full[i, j]
+                end
+                yinv_full = inv(ymat_full)
+                for i in 1:nchan, j in 1:i
+                    ij = i * (i - 1) ÷ 2 + j
+                    yinv_r[ij] = real(yinv_full[i, j])
+                    yinv_i[ij] = imag(yinv_full[i, j])
                 end
             end
 
-            yinv_full = inv(ymat_full)
+            # XQ(k,i) = Σ_j yinv(j,i) * rmat(k,j)  (packed symmetric ⇒ same as yinv(i,j))
+            # Matches Fortran setxqx (samm.f90:6258-6270).  XQ is asymmetric;
+            # xqr/xqi are full nchan×nchan, stored row-major via [i,j] indexing.
+            xqr = zeros(typeof(float(E)), nchan, nchan)
+            xqi = zeros(typeof(float(E)), nchan, nchan)
+            for i in 1:nchan, j in 1:nchan
+                for k in 1:nchan
+                    ij = _sammy_ijkl(j, i)  # yinv(j,i)
+                    jk = _sammy_ijkl(k, j)  # rmat(k,j)
+                    xqr[k, i] += yinv_r[ij] * rmat_r[jk] - yinv_i[ij] * rmat_i[jk]
+                    xqi[k, i] += yinv_r[ij] * rmat_i[jk] + yinv_i[ij] * rmat_r[jk]
+                end
+            end
 
-            # XQ = Yinv * R  (note: asymmetric because multiplication)
-            xq = yinv_full * rmat_full
-
-            # XXXX = sqrt(P)/L * XQ * sqrt(P)  (symmetric, lower triangular packed)
-            # Fortran setxqx computes XQ(k,i) = Σ_j R(k,j)*Yinv(j,i) = (R*Yinv)_{k,i}
-            # then uses XQ(j,i) in the XXXX loop.  For symmetric R,Yinv:
-            #   (R*Yinv)_{j,i} = (Yinv*R)_{i,j}
-            # Julia computes xq = Yinv*R, so xq[i,j] = (Yinv*R)_{i,j}.
-            # Therefore we must read xq[i,j] (not xq[j,i]) to match Fortran.
+            # XXXX = sqrt(P)/L * XQ * sqrt(P)  (lower-triangular packed)
+            # Fortran: xxxxr(ij) = rootp(j) * (xqr(j,i)*plr - xqi(j,i)*pli)
             xxxxr = zeros(typeof(float(E)), ntriag)
             xxxxi = zeros(typeof(float(E)), ntriag)
             ij = 0
@@ -380,11 +395,8 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
                 pli = rootp[i] * elinvi[i]
                 for j in 1:i
                     ij += 1
-                    xq_val = xq[i, j]
-                    xqr_v = real(xq_val)
-                    xqi_v = imag(xq_val)
-                    xxxxr[ij] = rootp[j] * (xqr_v * plr - xqi_v * pli)
-                    xxxxi[ij] = rootp[j] * (xqi_v * plr + xqr_v * pli)
+                    xxxxr[ij] = rootp[j] * (xqr[j, i] * plr - xqi[j, i] * pli)
+                    xxxxi[ij] = rootp[j] * (xqi[j, i] * plr + xqr[j, i] * pli)
                 end
             end
         end
@@ -506,6 +518,158 @@ function cross_section_sammy(E::Real, params::SAMMYParameters,
     end
 
     return CrossSections(sig_total, sig_elastic, sig_fission, sig_capture, rxns)
+end
+
+# Packed lower-triangular index for a symmetric nchan×nchan matrix.
+# Matches Fortran ijkl(i,j) (samm.f90).
+@inline function _sammy_ijkl(i::Int, j::Int)
+    if i >= j
+        return (i * (i - 1)) ÷ 2 + j
+    else
+        return (j * (j - 1)) ÷ 2 + i
+    end
+end
+
+# One-channel Y-matrix inversion (samm.f90 onech, lines 5046-5074).
+# Complex 1/y with three numerically-stable branches.
+function _sammy_onech!(yinv_r::AbstractVector, yinv_i::AbstractVector,
+                       y_r::AbstractVector, y_i::AbstractVector)
+    yr = y_r[1]; yi = y_i[1]
+    if yr + yi == yr
+        yinv_r[1] = 1.0 / yr
+        yinv_i[1] = -(yi / yr) / yr
+    elseif yr + yi == yi
+        yinv_r[1] = (yr / yi) / yi
+        yinv_i[1] = -1.0 / yi
+    elseif yr == 0.0
+        yinv_r[1] = 0.0
+        yinv_i[1] = -1.0 / yi
+    else
+        aa = yr * yr + yi * yi
+        yinv_r[1] = yr / aa
+        yinv_i[1] = -yi / aa
+    end
+    return nothing
+end
+
+# Two-channel Y-matrix inversion (samm.f90 twoch, lines 5076-5181).
+# Normalizes ymat by its largest element, computes the 2×2 complex
+# determinant with IEEE-edge-case reciprocal, applies the adjugate, and
+# un-normalizes.  In-place modification of the input is the Fortran
+# pattern; here we copy to avoid aliasing side effects.
+function _sammy_twoch!(yinv_r::AbstractVector, yinv_i::AbstractVector,
+                       y_r::AbstractVector, y_i::AbstractVector)
+    # Packed indices: (1,1)=1, (2,1)=2, (2,2)=3 (kkkk11, kkkk21, kkkk22)
+    kkkk11 = 1; kkkk21 = 2; kkkk22 = 3
+
+    # Work on a local copy so the caller's ymat is not mutated.
+    r_r = @inbounds [y_r[1], y_r[2], y_r[3]]
+    r_i = @inbounds [y_i[1], y_i[2], y_i[3]]
+
+    real_any_nonzero = r_r[kkkk11] != 0.0 || r_r[kkkk21] != 0.0 ||
+                       r_r[kkkk22] != 0.0
+    if real_any_nonzero
+        # Find max abs element over all 6 real/imag slots (k = 1..3).
+        a = 0.0
+        k = 0
+        @inbounds for i in 1:3
+            if abs(r_r[i]) > a
+                k = i
+                a = abs(r_r[i])
+            end
+            if abs(r_i[i]) > a
+                k = i
+                a = abs(r_i[i])
+            end
+        end
+
+        # Normalize.
+        if a > 0.0
+            if k == 2
+                @inbounds for i in 1:3
+                    r_r[i] /= a
+                    r_i[i] /= a
+                end
+            else
+                sqa = sqrt(a)
+                @inbounds begin
+                    r_r[k] /= a
+                    r_i[k] /= a
+                    r_r[2] /= sqa
+                    r_i[2] /= sqa
+                end
+            end
+        end
+
+        # det = r11 * r22 - r21^2  (complex)
+        bbr = r_r[kkkk11] * r_r[kkkk22] -
+              r_i[kkkk11] * r_i[kkkk22] -
+              r_r[kkkk21]^2 + r_i[kkkk21]^2
+        bbi = r_r[kkkk11] * r_i[kkkk22] +
+              r_i[kkkk11] * r_r[kkkk22] -
+              2.0 * r_r[kkkk21] * r_i[kkkk21]
+
+        # 1/det with IEEE stability branches (matches samm.f90:5123-5135).
+        if bbr + bbi != bbi
+            if bbr + bbi != bbr
+                aa = 1.0 / (bbr * bbr + bbi * bbi)
+                aar = bbr * aa
+                aai = -bbi * aa
+            else
+                aar = 1.0 / bbr
+                aai = -(bbi / bbr) / bbr
+            end
+        else
+            aar = (bbr / bbi) / bbi
+            aai = -1.0 / bbi
+        end
+
+        # Adjugate / det.
+        yinv_r[kkkk11] =  aar * r_r[kkkk22] - aai * r_i[kkkk22]
+        yinv_i[kkkk11] =  aar * r_i[kkkk22] + aai * r_r[kkkk22]
+        yinv_r[kkkk21] = -aar * r_r[kkkk21] + aai * r_i[kkkk21]
+        yinv_i[kkkk21] = -aar * r_i[kkkk21] - aai * r_r[kkkk21]
+        yinv_r[kkkk22] =  aar * r_r[kkkk11] - aai * r_i[kkkk11]
+        yinv_i[kkkk22] =  aar * r_i[kkkk11] + aai * r_r[kkkk11]
+
+        # Un-normalize inverse.
+        if a != 0.0
+            if k == 2
+                @inbounds for i in 1:3
+                    yinv_r[i] /= a
+                    yinv_i[i] /= a
+                end
+            else
+                sqa = sqrt(a)
+                @inbounds begin
+                    yinv_r[k] /= a
+                    yinv_i[k] /= a
+                    yinv_r[2] /= sqa
+                    yinv_i[2] /= sqa
+                end
+            end
+        end
+
+    elseif y_i[kkkk21] != 0.0
+        # Real part zero everywhere, dense imaginary (samm.f90:5161-5167).
+        yinv_r[kkkk11] = 0.0
+        yinv_r[kkkk21] = 0.0
+        yinv_r[kkkk22] = 0.0
+        a = y_i[kkkk11] * y_i[kkkk22] - y_i[kkkk21]^2
+        yinv_i[kkkk11] = -y_i[kkkk22] / a
+        yinv_i[kkkk21] =  y_i[kkkk21] / a
+        yinv_i[kkkk22] = -y_i[kkkk11] / a
+
+    else
+        # Diagonal imaginary only (samm.f90:5172-5177).
+        yinv_r[kkkk11] = 0.0
+        yinv_r[kkkk21] = 0.0
+        yinv_r[kkkk22] = 0.0
+        yinv_i[kkkk11] = -1.0 / y_i[kkkk11]
+        yinv_i[kkkk21] = 0.0
+        yinv_i[kkkk22] = -1.0 / y_i[kkkk22]
+    end
+    return nothing
 end
 
 # ---- Helper: penetrability P(rho) for pgh ----
@@ -964,6 +1128,7 @@ function _getfg(eta::Float64, rho::Float64, llmax::Int, lll::Int,
     # Continue upward recurrence for G until ratio decays
     gm2 = g[limit-1]
     gm1 = g[limit]
+    gm  = gm1
     il = -1
     j_final = limit
     for j in limit:10000
@@ -984,9 +1149,10 @@ function _getfg(eta::Float64, rho::Float64, llmax::Int, lll::Int,
         j_final = j
     end
 
-    # Downward recurrence for f
+    # Downward recurrence for f — seed with fp1 = xl/gm/sqrt(xl^2+eta^2)
+    # using the CURRENT iteration's gm at exit (samm.f90 getfg:4813-4814).
     xl = Float64(j_final)
-    fp1 = xl / gm1 / sqrt(xl^2 + eta^2)   # gm1 is gm at j_final
+    fp1 = xl / gm / sqrt(xl^2 + eta^2)
     fp2 = 0.0
     l = j_final - 1
 
@@ -1154,10 +1320,17 @@ function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
     end
 
     # ---- Downward recurrence to lambda=0 (if l > 0) ----
-    gc_store = zeros(l + 3)  # storage for RL values
+    # Matches Fortran coulfg samm.f90:4135-4155.  Stores fc and fcp at every
+    # lambda so that the upward recurrence can re-normalize them by w
+    # (samm.f90:4245-4246).
+    gc_store = zeros(l + 3)   # RL values
+    fc_saved  = zeros(l + 2)  # fc at each lambda (index 1..l+1)
+    fcp_saved = zeros(l + 2)  # fcp at each lambda
     if l > 0
         fcl = fcl * 1.0e-30
         fpl = fcl * f
+        fc_saved[l + 1]  = fcl
+        fcp_saved[l + 1] = fpl
         xl = xll
         for lp in 1:l
             el = eta / xl
@@ -1166,11 +1339,17 @@ function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
             fcl1 = (fcl * sl + fpl) / rl
             fpl = fcl1 * sl - fcl * rl
             fcl = fcl1
-            gc_store[l + 1 - lp + 1] = rl
+            idx = l + 1 - lp      # store at the new (lower) lambda
+            fc_saved[idx]  = fcl
+            fcp_saved[idx] = fpl
+            gc_store[idx + 1] = rl
             xl -= 1.0
         end
         if fcl == 0.0; fcl = acc; end
         f = fpl / fcl
+    else
+        fc_saved[1]  = fcl
+        fcp_saved[1] = fcl * f
     end
 
     # ---- CF2 or JWKB approximation ----
@@ -1240,6 +1419,9 @@ function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
     gcp0 = gc0 * (p_val - q_val / gam)
 
     # ---- Upward recurrence to lambda=l ----
+    # Matches Fortran coulfg samm.f90:4231-4247.  gc, gcp advance via upward
+    # recurrence; fc, fcp are looked up from the downward-saved arrays and
+    # normalized by w_norm = w/|fcl_at_lambda_0|.
     fc_l = fc0
     gc_l = gc0
     fcp_l = fcp0
@@ -1255,10 +1437,9 @@ function _coulomb_pen_shift(rho::Float64, l::Int, eta::Float64)
             gcl1 = (sl * gc_l - gcp_l) / rl
             gcp_l = rl * gc_l - sl * gcl1
             gc_l = gcl1
-            xl_up_next = xl_up
         end
-        # Re-normalize fc at lambda=l
-        fc_l = fc0  # simplified; full version tracks fc through recurrence
+        fc_l  = w_norm * fc_saved[l + 1]
+        fcp_l = w_norm * fcp_saved[l + 1]
     end
 
     # ---- Compute penetrability and shift factor at lambda=l ----
