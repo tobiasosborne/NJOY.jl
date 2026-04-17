@@ -73,6 +73,45 @@ Add resonance energy nodes from MF2 data:
 - Resonance peak energies Er
 - Half-width offsets Er +/- Gamma_total/2
 """
+# Remove URR upper-boundary shading node sigfig(EH_URR,7,+1) when no MF3 section
+# has a breakpoint at that energy. Matches Fortran lunion: the last enode in the
+# sorted enode list is a sentinel via ig.ge.ngo at label 240 (reconr.f90:2051) —
+# only written when an MF3 section has an explicit breakpoint there.
+function _drop_unsupported_urr_plus_boundary!(grid::Vector{Float64},
+                                               mf2::MF2Data,
+                                               sections::Vector{MF3Section})
+    small = 1.0e-9
+    for iso in mf2.isotopes
+        for rng in iso.ranges
+            Int(rng.LRU) == 2 || continue
+            eh = rng.EH
+            eh_p = round_sigfig(eh, 7, +1)
+            idx = searchsortedfirst(grid, eh_p * (1 - small))
+            idx <= length(grid) || continue
+            abs(grid[idx] - eh_p) <= small * eh_p || continue
+            # Supported if any section has (a) an explicit breakpoint at
+            # sigfig(EH,7,+1) — e.g. Pu-239 MT=2 x[87]=30000.01 — or (b) a
+            # duplicate breakpoint pair at EH which lunion_grid shades to
+            # produce sigfig(EH,7,+1). Both paths place the value in grid
+            # via per-section processing; only the lone sentinel case (T49
+            # Zr-90, MT=2 has a single x=EH) should be dropped.
+            supported = any(sections) do sec
+                x = sec.tab.x
+                any(v -> abs(v - eh_p) <= small * eh_p, x) && return true
+                for k in 1:(length(x) - 1)
+                    if abs(x[k] - eh) <= small * eh && abs(x[k + 1] - eh) <= small * eh
+                        return true
+                    end
+                end
+                return false
+            end
+            supported && continue
+            deleteat!(grid, idx)
+        end
+    end
+    return grid
+end
+
 function _add_mf2_nodes!(nodes::Vector{Float64}, mf2::MF2Data)
     elow = 1.0e-5
     small = 1.0e-6

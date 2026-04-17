@@ -591,17 +591,40 @@ All values within 1e-11 of the 0.5 boundary at 7 sigfigs. Both codes use identic
 
 **Possible approach (not yet tried)**: Match the Fortran's exact loop order for the R-matrix accumulation. The Fortran accumulates `r(1,1) += gg4*a1*a1` sequentially over all resonances with matching J-value. Julia does the same loop but the IEEE 754 intermediates may differ due to compiler optimizations. Try: (a) force sequential accumulation with `@fastmath false`, (b) match Fortran's `per=res(in+1)` precomputed penetrability instead of on-the-fly computation (the `in` index in csrmat line 3340 reads precomputed values from `rdf2bw` line 1002).
 
-### 3. RECONR: Fix T49 (Zr-90, 41/46) — GRID ISSUE
+### 3. RECONR: T49 (Zr-90) — URR sentinel FIXED, 44/46 (2 FP diffs remain)
 
-**Status**: 41/46. 1 extra grid point at E=1780461 causing 5 MT diffs (MT=1,2,4,91,102).
+**Status (2026-04-17)**: **44/46** after URR upper-boundary sentinel fix
+(was 41/46). Remaining 2 MTs (MT=1, MT=2) differ by ±1 in 7th sigfig at
+E=110487.7 eV — MLBW elastic evaluation FP class. No regressions across 16
+other bit-identical tests.
 
-**Phase 14 investigation (println debugging + gdb)**: The extra point comes from MF2 peak/width nodes. The `_add_mf2_nodes!` function creates a shaded pair {1780459, 1780461} from a resonance near 1780460 eV. MT=2 also has a breakpoint at x[78]=1780460. Julia pushes all three to the grid: {1780459, 1780460, 1780461}. The Fortran's inline grid merge absorbs 1780460 into the existing shaded pair.
+**Root cause (corrected — HANDOFF's prior Phase 14 analysis was wrong)**:
+`_add_mf2_nodes!` added `sigfig(EH_URR,7,+1) = 1780461` as the last enode.
+In Fortran lunion, the last enode is a *sentinel* — label 240's check
+`ig.ge.ngo` at reconr.f90:2051 routes control past `en=abs(eg)`, so the
+last enode never becomes a sub-panel boundary. It only reaches `inew` if
+some MF3 section contributes it via per-section processing (e.g. Pu-239
+T27 has MT=2 x[87]=30000.01; Pu-238/Cf-252/Pu-240 have duplicate EH
+breakpoints that lunion_grid shades). Zr-90 has neither — MT=2 has only
+`x[78]=1780460` — so Fortran drops 1780461 but Julia kept it.
 
-**gdb confirmed**: Fortran's lunion does NOT process MT=2's x[78]=1780460 through label 220 at all — the breakpoint is absorbed during the panel processing. The Fortran grid at that energy has only {1780459, 1780465}.
+HANDOFF's prior "MT=2's 1780460 gets absorbed into the shaded pair"
+diagnosis was wrong: Julia already lacks 1780460 (only Fortran writes it,
+then removes it at label 410 via `eresm` dedup). The actual bug was the
+spurious 1780461.
 
-**Why previous fix attempts failed**: Simple snapping (label 222 emulation) with any tolerance >0 caused regressions in T27/T45/T55 because it over-aggressively snapped unrelated breakpoints. Checking against initial_nodes only didn't help because the absorbed point 1780460 needs to be skipped but the MF2 node 1780461 needs to be KEPT (the Fortran keeps 1780461 only during MT=51 processing, not from the initial grid).
+**Fix (landed)**: `_drop_unsupported_urr_plus_boundary!` in
+`src/processing/reconr_grid.jl`, invoked by `reconr.jl` after
+`lunion_grid`. For each LRU=2 range, if `sigfig(EH,7,+1)` is in grid AND
+no MF3 section has (a) an explicit breakpoint at that energy OR (b) a
+duplicate pair at `EH` that lunion_grid's shading would convert into
+`sigfig(EH,7,+1)`, remove it.
 
-**Correct fix approach**: The Fortran's inline merge means that breakpoints and grid points are interleaved during processing. A breakpoint between two consecutive grid points (like 1780460 between 1780459 and 1780461) is NOT added as a separate grid point — it's used as a panel boundary. Replicating this requires either: (a) a full rewrite of lunion_grid to use Fortran-style inline merge (high risk), or (b) a targeted post-processing pass that removes breakpoints sandwiched between MF2 shaded pairs when the panel bisection didn't add any intermediate points in that interval. Approach (b) is safer.
+Worklog: `worklog/T49_urr_sentinel.md`.
+
+**Remaining**: MT=1 (6.504111 vs 6.504112) and MT=2 (6.497532 vs 6.497533)
+at E=110487.7 eV. Candidate for Fortran diagnostic on MLBW elastic eval
+(same approach that found T34's "irreducible" ±1 diffs were real bugs).
 
 ### 4. RECONR: Fix T46 MT=1 total (72/73) — SUMMATION ORDER
 
@@ -680,7 +703,7 @@ This runs ALL 84 canonical tests — reconr tests through `reconr()` with oracle
 | 17 | 9237 | U-238 | 32/36 (89%) | 0.001 | Same material (first reconr call). Has 3 reconr calls total |
 | 04 | 1395 | U-235 | 24/27 (89%) | 0.10 | SLBW+URR mode=12. ±1 at URR boundary |
 | 07 | 1395 | U-235 | 24/27 (89%) | 0.005 | Same material, different err |
-| 49 | 4025 | Zr-90 | 41/46 (89%) | 0.001 | 1 extra grid point (MF2 shaded pair absorption) |
+| 49 | 4025 | Zr-90 | 44/46 (96%) | 0.001 | URR sentinel fix landed 2026-04-17; 2 ±1 FP diffs in MT=1/MT=2 at E=110487.7 eV |
 
 ### Partial (50-85% MTs, oracle-compared)
 | Test | MAT | Material | MTs | Notes |

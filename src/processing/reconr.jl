@@ -383,6 +383,16 @@ function reconr(endf_file::AbstractString;
                               nodes=mf2_nodes, awr=mf2.AWR, elim=elim,
                               eresl=eresl, eresr=eresr, eresh=eresh)
 
+        # Remove URR upper-boundary shading nodes (sigfig(EH,7,+1)) that end up
+        # as the LAST initial enode in Fortran — these are consumed as sentinels
+        # via the `ig.ge.ngo` check at reconr.f90:2051 (label 240). They are
+        # only propagated to the final grid when an MF3 section has an explicit
+        # breakpoint at that energy (Pu-239 MT=2 x[87]=30000.01 for T27). When
+        # no such breakpoint exists (Zr-90 MT=2 has only 1780460, not 1780461
+        # for T49), Fortran silently drops the node. Julia's lunion_grid keeps
+        # it because Julia has no per-section iold/inew swap.
+        _drop_unsupported_urr_plus_boundary!(bg_grid, mf2, all_lunion_sections)
+
         # Filter to full resonance range for adaptive reconstruction
         res_grid = filter(e -> e >= eresl && e < eresh, bg_grid)
         isempty(res_grid) && error("reconr: no grid points in resonance range [$eresl, $eresh)")
