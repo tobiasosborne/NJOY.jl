@@ -70,10 +70,17 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
         return nothing
     end
 
-    # Build union energy grid from covariance energies + user boundaries
-    egn = _build_errorr_grid_from_endf(endf_path, params.mat, mfcov, params)
+    # Output group structure — matches Fortran egngpn (errorr.f90:9716).
+    # ign=-1: union of user_egn + MFcov breakpoints (replaces egn).
+    # ign=1:  user_egn exactly (2306 / 9 / 7 lines typical).
+    # ign>=2: library structure (LANL-30 for ign=3, etc.).
+    egn = if params.ign == -1
+        _build_errorr_grid_from_endf(endf_path, params.mat, mfcov, params)
+    else
+        _errorr_output_grid(params)
+    end
     ngn = length(egn) - 1
-    @info "errorr: $ngn groups"
+    @info "errorr: ign=$(params.ign) → $ngn groups"
 
     # Determine which reaction MTs are involved
     reaction_mts = sort(avail_mts)
@@ -186,7 +193,32 @@ end
 # Group structure
 # =========================================================================
 
-"""Build the errorr union energy grid directly from raw ENDF MFcov energy values."""
+"""Resolve the errorr output group structure from params.ign.
+
+Mirrors Fortran gengpn (groupr.f90:1557): user-defined grid for
+ign<0 or ign==1 (read from params.user_egn), library structure
+otherwise (LANL-30 for ign=3, WIMS-69 for ign=9, RRD-50 for ign=5,
+and whatever `get_group_structure` supports for the rest)."""
+function _errorr_output_grid(params::ErrorrParams)
+    ign = params.ign
+    if ign <= 1
+        isempty(params.user_egn) && error(
+            "errorr: ign=$ign requires user_egn, got empty — check input deck parser")
+        return collect(Float64, params.user_egn)
+    end
+    try
+        return collect(Float64, get_group_structure(ign))
+    catch
+        @warn "errorr: unsupported ign=$ign, falling back to LANL-30"
+        return collect(Float64, LANL_30)
+    end
+end
+
+"""Build the errorr union energy grid directly from raw ENDF MFcov energy values.
+
+DEPRECATED for output grid — use `_errorr_output_grid` instead. Kept
+because the union of MF33 breakpoints is still needed internally for
+covcal-style covariance expansion (see T03_phase7 T04 tape25 residual)."""
 function _build_errorr_grid_from_endf(endf_path::String, mat::Int, mfcov::Int,
                                        params::ErrorrParams)
     pts = Set{Float64}()
