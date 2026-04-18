@@ -134,7 +134,10 @@ function _read_nubar(endf_path::String, mat::Int, mt::Int)
             values = [sum(coeffs[k] * e^(k-1) for k in 1:nc) for e in energies]
             return (energies=energies, values=values)
         elseif lnu == 2
-            # Tabulated
+            # Tabulated. For MT=455 (delayed), a LIST of NNF decay
+            # constants precedes the TAB1 (ENDF-6 §1.5; Fortran groupr.f90
+            # getyld label 110 at line 6472).
+            mt == 455 && read_list(io)
             tab = read_tab1(io)
             return (energies=collect(Float64, tab.x), values=collect(Float64, tab.y))
         end
