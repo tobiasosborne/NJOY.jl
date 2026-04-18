@@ -3044,3 +3044,114 @@ MT=621 g12:     59k → 463k (target: 413k, 12% off)
 **Trap 148-158**: See worklog/T03_phase3_handoff.md for full trap descriptions.
 
 **Files changed**: `src/orchestration/modules/gaminr.jl` (heating accumulation, incoherent normalization, section ordering, MF26 writer), `src/orchestration/modules/dtfr.jl` (_dpend state machine)
+
+### Phase 44: T15/T17 JENDL U-238 — CRASH bucket drained, 30M-line errorr blowup fixed
+
+## Date: 2026-04-18
+
+**Goal**: Drain the last 2 CRASHes in the 84-test sweep (T15, T17, both
+JENDL U-238 `BoundsError`).
+
+**Fresh full sweep (93.9 min, ~42% faster than Apr-14's 163 min post-P10)**:
+
+| Status | Post-P10 (Apr-14) | Apr-18 baseline | **Post-P44** | Δ |
+|--------|-------------------|-----------------|--------------|----|
+| BIT_IDENTICAL | 1 | 1 | 1 | = |
+| NUMERIC_PASS  | 1 | 1 | 1 | = |
+| DIFFS         | 48 | 62 | **64** | **+16** |
+| MISSING_TAPE  | 17 | 17 | 17 | = |
+| NO_REFERENCE  | 1 | 1 | 1 | = |
+| **CRASH**     | **16** | **2** | **0** | **−16** |
+
+**Zero structural crashes across all 84 tests.** The Apr-14 → Apr-18
+baseline delta (+14 DIFFS) is the cumulative effect of T11-T14 stubs
+and fallbacks finally registering in the sweep framework.
+
+**Fix 1 — MT=455 LIST-skip in groupr `_read_nubar`** (commit `60f5bdc`)
+
+Root cause: MF1/MT=455 (delayed ν̄) with LNU=2 has a LIST of NNF
+precursor decay constants between the HEAD and the TAB1 (ENDF-6 §1.5;
+Fortran `groupr.f90:6472-6483` label 110). `_read_nubar` read the TAB1
+immediately, returning empty `(energies, values)`. Downstream
+`_groupr_nubar_records` → `_interp_linlin` crashed on
+`x_data[1]`. Fixed: `mt == 455 && read_list(io)` before `read_tab1`.
+Gated — MT=452/456 unchanged.
+
+The HANDOFF's prior description of this as "INT=0 fix exposing a
+downstream empty-vector indexing bug" was incomplete. The INT=0 fix
+(Phase 10) let T15/T17 run past the reader, and the real downstream
+bug turned out to be in groupr, not some unnamed "downstream" component.
+
+**Fix 2 — errorr output grid by ign** (commit `c5730f3`)
+
+Root cause: `errorr_module` used the union of user_egn + all MFcov
+breakpoints as the **output** group structure for every `ign`. For
+T15/T17 (`ign == 3`, LANL-30, 30 groups expected) this produced 2305
+groups → 2305×2305 covariance writes × 36 reactions = **30 253 210
+lines, 2.5 GB tape26**.
+
+Fortran `egngpn` (`errorr.f90:9716`): the union replaces egn only
+when `ign == -1`. For `ign == 1`, egn = user_egn. For `ign >= 2`, egn
+is the library structure (LANL-30 etc. via `gengpn`,
+`groupr.f90:1557`).
+
+Fix: dispatch grid construction on `params.ign` via new helper
+`_errorr_output_grid`. Union path preserved only for `ign == -1`.
+
+Result: T15 tape26 **30 253 210 → 7953 lines (3800× reduction)**. T17
+similar. T04 (ign=-1 + ign=1) zero regression: 81/82 NUMERIC_PASS @
+1e-7, 56/74 @ 1e-5, 107/119 DIFFS — identical to pre-fix baseline.
+
+**Still left on T15/T17 (~2k over-count remaining on tape26)**:
+
+1. **Missing MF3 sections** (−216 lines): errorr writer gates MF3
+   output on PENDF-populated `group_xs`. T15/T17 have `npend == 0`;
+   Fortran uses `colaps` (`errorr.f90:9097`) to read group-averaged
+   cross sections from the GENDF input tape (`ngout`). Julia doesn't.
+2. **MF33 over-expansion** (+2.2k lines): Julia writes full
+   `ngn × ngn` row blocks vs Fortran's LB=5 sparse triangle.
+   `_write_errorr_tape` MFcov loop needs restructuring.
+3. **Groupr `3 /` auto-expand blocker**: T15's groupr deck uses the
+   Fortran sentinel `3 /` (mfd=3 with no mtd) meaning "process all
+   MF=3 MTs automatically" (`groupr.f90:622` → label 382, `iauto=1`,
+   calls `nextr`). Julia's `parse_groupr` reads this as
+   `(mfd=3, mtd=0)` and produces a GENDF tape91 with only the 6
+   explicitly-listed MTs, so even #1 above wouldn't find the 36
+   covariance MTs. Fixing this is the top upstream blocker.
+
+Each is a half-day port-level change (Fortran `colaps`/`covout`
+reader, covariance writer restructure, groupr auto-expand). Deferred.
+
+**Traps (NEW)**
+
+- **Trap (MT=455 LIST)**: MF1/MT=455 LNU=2 has a LIST of NNF
+  precursor decay constants between the HEAD and the TAB1. MT=452
+  and MT=456 don't. Any reader handling all three must special-case
+  MT=455.
+- **Trap (errorr output grid by ign)**: `ign == -1` → union; `ign == 1`
+  → user_egn; `ign >= 2` → library structure. The MFcov breakpoint
+  union is NEVER the output grid for `ign >= 1`. Using it inflates
+  LANL-30's 30-group write to 2305-group (~4000× file size).
+- **Trap (groupr `3 /` auto-expand — unfixed)**: groupr card
+  `<mfd> /` with no mtd is a sentinel meaning "auto-process all MTs
+  for that MF". Handled at `groupr.f90:622`. Julia's parser reads
+  missing mtd as default 0. Matters for T15/T16/T17 decks.
+
+Worklogs: `worklog/T15_T17_mt455_crash.md`,
+`worklog/T15_T17_errorr_size.md`.
+
+**Files changed**: `src/orchestration/modules/groupr.jl` (1-line LIST
+skip for MT=455), `src/orchestration/modules/errorr.jl` (ign dispatch
++ `_errorr_output_grid` helper).
+
+**Immediate next-step candidates**
+
+1. **Groupr `3 /` auto-expand** (half-day) — unblocks T15/T16/T17 MF3
+   line-count parity and downstream errorr MT coverage.
+2. **Errorr `colaps`-style GENDF MF3 readback** (half-day) — once
+   groupr produces the 36 MTs, errorr must pick them up when
+   `npend == 0 && ngout > 0`.
+3. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
+   session on `csmlbw`, same recipe that fixed T34 "irreducible".
+4. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
+   covariance diffs, from T03_phase7 worklog.
