@@ -3102,25 +3102,23 @@ Result: T15 tape26 **30 253 210 → 7953 lines (3800× reduction)**. T17
 similar. T04 (ign=-1 + ign=1) zero regression: 81/82 NUMERIC_PASS @
 1e-7, 56/74 @ 1e-5, 107/119 DIFFS — identical to pre-fix baseline.
 
-**Still left on T15/T17 (~2k over-count remaining on tape26)**:
+**Still left on T15/T17** — all three items below landed in
+Phases 45-47 (2026-04-19). Summary:
 
-1. **Missing MF3 sections** (−216 lines): errorr writer gates MF3
-   output on PENDF-populated `group_xs`. T15/T17 have `npend == 0`;
-   Fortran uses `colaps` (`errorr.f90:9097`) to read group-averaged
-   cross sections from the GENDF input tape (`ngout`). Julia doesn't.
-2. **MF33 over-expansion** (+2.2k lines): Julia writes full
-   `ngn × ngn` row blocks vs Fortran's LB=5 sparse triangle.
-   `_write_errorr_tape` MFcov loop needs restructuring.
-3. **Groupr `3 /` auto-expand blocker**: T15's groupr deck uses the
-   Fortran sentinel `3 /` (mfd=3 with no mtd) meaning "process all
-   MF=3 MTs automatically" (`groupr.f90:622` → label 382, `iauto=1`,
-   calls `nextr`). Julia's `parse_groupr` reads this as
-   `(mfd=3, mtd=0)` and produces a GENDF tape91 with only the 6
-   explicitly-listed MTs, so even #1 above wouldn't find the 36
-   covariance MTs. Fixing this is the top upstream blocker.
+1. ~~**Missing MF3 sections**~~ → **FIXED Phase 46**:
+   `_errorr_read_gendf_xs` reads per-group sigma from the input GENDF
+   when `npend==0 && abs(ngout)>0`. T15 tape26 MF3 0 → 36 MTs.
+2. ~~**MF33 over-expansion**~~ → **FIXED Phase 47**: sparse per-row
+   emission in `_write_mfcov_rows` + NC-aware pair synthesis.
+   T15 tape26 8205 → 1859 lines (vs ref 5958).
+3. ~~**Groupr `3 /` auto-expand**~~ → **FIXED Phase 45**: parser emits
+   `-1000` sentinel on bare cards; `groupr_module` expands against
+   PENDF MF=3 keys via `_nextr_filter`. T15 tape91 3 → 39 MTs.
 
-Each is a half-day port-level change (Fortran `colaps`/`covout`
-reader, covariance writer restructure, groupr auto-expand). Deferred.
+Remaining T15 tape26 gap (~100 lines total after the three fixes):
+- −2300 lines on MT=2/MT=4 self-cov from NC-derived cross-MT
+  covariance not yet expanded (`NJOY.jl-km1`).
+- Content drift in several MT self-cov matrices (`NJOY.jl-f8k`).
 
 **Traps (NEW)**
 
