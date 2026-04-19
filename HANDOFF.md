@@ -3166,14 +3166,34 @@ groupr decks use only explicit-mtd cards; untouched.
 - `NJOY.jl-5oi`: groupr must skip MTs with all-zero group-averaged XS
   (U-238 MT=37 threshold 17.82 MeV > LANL-30 top 17.0 MeV).
 
+### Phase 46: errorr GENDF MF3 readback (same-ign `colaps`) — T15 tape26 MF3 0 → 36
+
+## Date: 2026-04-19
+
+**Fix**: `_errorr_read_gendf_xs` walks MF=3 on the input GENDF and
+populates `group_xs` when `npend==0 && abs(ngout)>0 && iread==0`.
+Position 2 of the per-group LIST body (sigma for standard MTs, nubar
+for 452/455/456) gets extracted directly. Scoped to same-ign only
+(groupr ign == errorr ign). Cross-ign flux-weighted collapse deferred.
+
+T15 tape25 MF3: 0 → 3 MTs (nubar). T15 tape26 MF3: 0 → 36 MTs; line
+count 7953 → 8205 (reference 5958; remaining +2247 is the known MF33
+over-expansion).
+
+T04 zero regression (tape23/24/25 identical to Phase-45 baseline).
+
+Worklog: `worklog/T15_errorr_gendf_readback.md`.
+
 **Immediate next-step candidates**
 
-1. **Errorr `colaps`-style GENDF MF3 readback** (half-day) — now that
-   groupr emits 35+ extra MTs, errorr must pick them up when
-   `npend == 0 && ngout > 0`. Top T15/T17 tape26 blocker.
+1. **T15 tape26 MF33 over-expansion** (~half-day) — Julia writes full
+   NGN×NGN row blocks; Fortran writes LB=5 sparse triangles. +2247
+   lines. `_write_errorr_tape` MFcov loop + `covout` comparison.
 2. **Groupr empty-MT skip + MT=251/252 derivation**
    (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close the remaining tape91 gap.
-3. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
+3. **Cross-ign colaps flux-weighted collapse** — errorr.f90:9255-9283.
+   Not blocking T15/T16/T17 (same ign); file when a test needs it.
+4. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
    session on `csmlbw`, same recipe that fixed T34 "irreducible".
-4. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
+5. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
    covariance diffs, from T03_phase7 worklog.

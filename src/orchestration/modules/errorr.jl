@@ -86,11 +86,18 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     reaction_mts = sort(avail_mts)
     @info "errorr: reactions: $reaction_mts"
 
-    # Compute group-averaged cross sections from PENDF
+    # Compute group-averaged cross sections from PENDF, or read them back
+    # from an input GENDF when no PENDF is supplied. Ref: errorr.f90:9097-
+    # 9532 (`colaps` — walks MF=3 on ngout, emits one LIST per group).
+    # We implement the same-ign path only (GENDF group structure matches
+    # `egn`); cross-ign flux-weighted collapse deferred.
     group_xs = Dict{Int, Vector{Float64}}()
     if params.npend > 0 && params.iread == 0
         pendf_path = resolve(tapes, params.npend)
         group_xs = _errorr_group_average(pendf_path, params.mat, egn, params.iwt)
+    elseif params.npend == 0 && abs(params.ngout) > 0 && params.iread == 0
+        gendf_path = resolve(tapes, abs(params.ngout))
+        group_xs = _errorr_read_gendf_xs(gendf_path, params.mat, egn)
     end
 
     # Compute multigroup covariance matrices
@@ -592,6 +599,81 @@ function _read_gendf_nubar(gendf_path::String, mat::Int, egn::Vector{Float64})
         end
     end
     values
+end
+
+"""
+    _errorr_read_gendf_xs(gendf_path, mat, egn) -> Dict{Int,Vector{Float64}}
+
+Read per-group cross sections from a GENDF tape (groupr output). For each
+MF=3 MT under `mat`, walk the LIST-per-group records and extract position
+2 of the body — which is sigma for standard MTs and nubar for MT=452/455/
+456. Returns one `Vector{Float64}` of length `ngn = length(egn)-1` per MT.
+
+This is a scoped port of Fortran `colaps` (errorr.f90:9097-9532): the
+cross-ign flux-weighted collapse is NOT implemented — this routine only
+handles the case where the GENDF group structure matches `egn`. A warning
+is logged on mismatch and the MT is skipped.
+
+GENDF record layout (see Julia groupr output at groupr.jl:317, matching
+Fortran `grpav` emission):
+- MF=3/MT HEAD:  ZA, 0, NL=1, NZ=1, 0, NGN
+- Per group g:   CONT (0/300K, 0, NG2, NL, NW, IG=g)
+                 body line with `NW` floats — position 2 is always sigma
+                 (standard MTs) or nubar (MT=452/455/456)
+"""
+function _errorr_read_gendf_xs(gendf_path::String, mat::Int,
+                                egn::Vector{Float64})
+    result = Dict{Int, Vector{Float64}}()
+    ngn = length(egn) - 1
+
+    gendf_egn = _read_gendf_group_bounds(gendf_path, mat)
+    if length(gendf_egn) != length(egn)
+        @warn "errorr: GENDF has $(max(0,length(gendf_egn)-1)) groups vs \
+               errorr output $ngn — cross-ign collapse not yet implemented"
+        return result
+    end
+
+    lines = readlines(gendf_path)
+    idx = 1
+    while idx <= length(lines)
+        line = lines[idx]
+        length(line) < 75 && (idx += 1; continue)
+        p = rpad(line, 80)
+        mat_val = _parse_int(p[67:70])
+        mf      = _parse_int(p[71:72])
+        mt      = _parse_int(p[73:75])
+        seq     = _parse_int(p[76:80])
+
+        if mat_val == mat && mf == 3 && mt > 0 && seq == 1
+            # MF=3/MT section HEAD — next records are per-group LISTs.
+            values = zeros(Float64, ngn)
+            idx += 1
+            while idx <= length(lines)
+                length(lines[idx]) < 75 && (idx += 1; continue)
+                p2 = rpad(lines[idx], 80)
+                m2  = _parse_int(p2[67:70])
+                mf2 = _parse_int(p2[71:72])
+                mt2 = _parse_int(p2[73:75])
+                (m2 != mat || mf2 != 3 || mt2 != mt) && break
+
+                # Group record header: IG in cols 56-66, NW in cols 45-55.
+                ig = _parse_int(p2[56:66])
+                nw = _parse_int(p2[45:55])
+                if ig > 0 && nw > 0 && ig <= ngn && idx + 1 <= length(lines)
+                    p3 = rpad(lines[idx + 1], 80)
+                    # Position 2 is sigma (or nubar for MT=452/455/456).
+                    values[ig] = parse_endf_float(p3[12:22])
+                    idx += 2
+                else
+                    idx += 1
+                end
+            end
+            result[mt] = values
+        else
+            idx += 1
+        end
+    end
+    return result
 end
 
 """Read group boundaries from a GENDF tape's MF1/MT451."""
