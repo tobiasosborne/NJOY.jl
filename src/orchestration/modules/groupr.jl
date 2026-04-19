@@ -38,11 +38,18 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
     tape = read_pendf(pendf_path)
     mf3 = extract_mf3_all(tape, params.mat)
 
+    # Expand Fortran auto-reaction sentinel. Ref: groupr.f90:622,628-632 +
+    # nextr at groupr.f90:1104-1123. A deck card like `3 /` (mfd=3, mtd
+    # absent) leaves mtdp=-1000; Fortran then walks MF=3 on the PENDF and
+    # yields every MT passing: mt<=200 OR 203<=mt<=207 OR mt>300 (thermal
+    # 201-202 and derived 208-300 excluded; those must be named explicitly).
+    mt_list = _groupr_expand_auto(params.mt_list, mf3)
+
     # Process each MT request
     mt_results = Vector{NamedTuple{(:mfd,:mt,:name,:records),
                                    Tuple{Int,Int,String,Vector{NTuple{3,Float64}}}}}()
 
-    for (mfd, mtd, name) in params.mt_list
+    for (mfd, mtd, name) in mt_list
         if mfd == 3
             if mtd == 452 || mtd == 455 || mtd == 456
                 # Nubar: read from ENDF MF1, weight by fission XS from PENDF
@@ -74,6 +81,49 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
     lines = countlines(nout_path)
     @info "groupr: wrote $nout_path ($lines lines, $ngn groups)"
     nothing
+end
+
+# =========================================================================
+# Auto-reaction expansion (Fortran nextr sentinel)
+# =========================================================================
+
+"""
+    _nextr_filter(mt) -> Bool
+
+Inclusion predicate for Fortran `nextr`'s MF<=3 branch
+(groupr.f90:1115-1117). Returns true iff `mt` would be yielded by the
+auto-walk of MF=3 on the PENDF tape. Excludes thermal (201-202) and
+engineering/derived (208-300) reactions — those must be named
+explicitly in the deck.
+"""
+_nextr_filter(mt::Integer) =
+    mt > 0 && (mt <= 200 || (203 <= mt <= 207) || mt > 300)
+
+"""
+    _groupr_expand_auto(mt_list, mf3) -> Vector{Tuple{Int,Int,String}}
+
+Expand any `(mfd, -1000, name)` sentinel entries into the full set of
+auto-yielded MTs from the PENDF MF=3 dict. Scoped to mfd=3, matching
+Fortran nextr's MF<=3 branch; other mfd sentinels are currently passed
+through unchanged (the mfd=6/8/10/16-36 auto-paths depend on `conver`
+lists not yet ported).
+
+Ref: groupr.f90:622 (detect), 628-635 (iauto=1), 1087-1123 (nextr body).
+"""
+function _groupr_expand_auto(mt_list::Vector{Tuple{Int,Int,String}},
+                             mf3::AbstractDict)
+    expanded = Tuple{Int,Int,String}[]
+    auto_mts = sort!(filter(_nextr_filter, collect(keys(mf3))))
+    for (mfd, mtd, name) in mt_list
+        if mtd == -1000 && mfd == 3
+            for mt in auto_mts
+                push!(expanded, (mfd, mt, ""))
+            end
+        else
+            push!(expanded, (mfd, mtd, name))
+        end
+    end
+    return expanded
 end
 
 # =========================================================================

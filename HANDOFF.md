@@ -3132,25 +3132,47 @@ reader, covariance writer restructure, groupr auto-expand). Deferred.
   → user_egn; `ign >= 2` → library structure. The MFcov breakpoint
   union is NEVER the output grid for `ign >= 1`. Using it inflates
   LANL-30's 30-group write to 2305-group (~4000× file size).
-- **Trap (groupr `3 /` auto-expand — unfixed)**: groupr card
-  `<mfd> /` with no mtd is a sentinel meaning "auto-process all MTs
-  for that MF". Handled at `groupr.f90:622`. Julia's parser reads
-  missing mtd as default 0. Matters for T15/T16/T17 decks.
+- **Trap (groupr `3 /` auto-expand — FIXED Phase 45)**: groupr card
+  `<mfd> /` with no mtd is a Fortran sentinel (`mtdp=-1000`) meaning
+  "auto-process all MF=3 MTs passing `mt<=200 OR 203<=mt<=207 OR
+  mt>300`" (groupr.f90:622 → nextr at 1087-1123). Thermal 201-202 and
+  derived 208-300 must be named explicitly. Julia parser now emits the
+  sentinel; `_groupr_expand_auto` in `groupr_module` expands against
+  PENDF `keys(mf3)`. T15 tape91 MF=3: **3 → 39 MTs** (ref 40).
 
 Worklogs: `worklog/T15_T17_mt455_crash.md`,
-`worklog/T15_T17_errorr_size.md`.
+`worklog/T15_T17_errorr_size.md`,
+`worklog/T15_groupr_auto_expand.md`.
 
 **Files changed**: `src/orchestration/modules/groupr.jl` (1-line LIST
 skip for MT=455), `src/orchestration/modules/errorr.jl` (ign dispatch
 + `_errorr_output_grid` helper).
 
+### Phase 45: groupr `3 /` auto-expand — 3 → 39 MTs on T15 tape91
+
+## Date: 2026-04-19
+
+**Fix**: Parser distinguishes "missing mtd" (emit `-1000` sentinel)
+from explicit `0` by token count. `groupr_module` expands sentinels
+against the PENDF MF=3 dict, applying the Fortran nextr filter. Scoped
+to `mfd=3`; other mfd auto-paths need `conver` port (deferred).
+
+T04 regression: zero (tape23 BIT_IDENTICAL, tape24 NUMERIC_PASS
+56/74, tape25 DIFFS 108/119 — identical to Phase-44 baseline). T01/T02
+groupr decks use only explicit-mtd cards; untouched.
+
+**Orthogonal follow-ups surfaced** (filed as beads):
+- `NJOY.jl-cdy`: groupr MT=251/252 need MF=4/6 derivation.
+- `NJOY.jl-5oi`: groupr must skip MTs with all-zero group-averaged XS
+  (U-238 MT=37 threshold 17.82 MeV > LANL-30 top 17.0 MeV).
+
 **Immediate next-step candidates**
 
-1. **Groupr `3 /` auto-expand** (half-day) — unblocks T15/T16/T17 MF3
-   line-count parity and downstream errorr MT coverage.
-2. **Errorr `colaps`-style GENDF MF3 readback** (half-day) — once
-   groupr produces the 36 MTs, errorr must pick them up when
-   `npend == 0 && ngout > 0`.
+1. **Errorr `colaps`-style GENDF MF3 readback** (half-day) — now that
+   groupr emits 35+ extra MTs, errorr must pick them up when
+   `npend == 0 && ngout > 0`. Top T15/T17 tape26 blocker.
+2. **Groupr empty-MT skip + MT=251/252 derivation**
+   (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close the remaining tape91 gap.
 3. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
    session on `csmlbw`, same recipe that fixed T34 "irreducible".
 4. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual

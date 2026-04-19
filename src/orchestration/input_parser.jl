@@ -434,12 +434,18 @@ function parse_groupr(mc::ModuleCall)::GrouprParams
         ci += 1
     end
     # MT list: read (mfd, mtd, name) until mfd=0 — first temperature block only
-    # (Fortran groupr uses the first block's MT list for all temperatures)
+    # (Fortran groupr uses the first block's MT list for all temperatures).
+    #
+    # Ref: njoy-reference/src/groupr.f90:610-634. Fortran inits mtdp=-1000
+    # before the list-directed `read(nsysi,*) mfd,mtdp,strng`, so a card with
+    # only mfd (e.g. `3 /`) leaves mtdp at -1000, which triggers auto-expand
+    # via `nextr` (label 382, iauto=1). We preserve the sentinel verbatim;
+    # groupr_module expands it against the PENDF MF=3 MT set.
     mt_list = Tuple{Int,Int,String}[]
     while ci <= length(cards)
         mfd = _fint(cards[ci], 1; default=0)
         mfd == 0 && break
-        mtd = _fint(cards[ci], 2; default=0)
+        mtd = length(cards[ci]) >= 2 ? _parse_int_token(cards[ci][2]) : -1000
         name = length(cards[ci]) >= 3 ?
             strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
         push!(mt_list, (mfd, mtd, name))
