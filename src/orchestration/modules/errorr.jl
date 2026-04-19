@@ -105,7 +105,17 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # Only use NI blocks from standalone sub-sections (NC=0).
     # Sub-sections with NC>0 contain derived covariance that requires
     # NC processing (linear combinations of other MTs) — skip for now.
+    # Track (mt, mt2) pairs declared in the ENDF NL sub-section list, plus
+    # every MT that has any NC>0 derived sub-section. Fortran's covout
+    # (errorr.f90:7206+) writes cross-pair sub-sections for NC-derived MTs
+    # because the NC coefficients reference other MTs; we can't yet do
+    # full NC expansion (NJOY.jl-km1) but still need to emit the per-pair
+    # last-row zero stubs so the NL count on the section header matches
+    # the reference. MTs without any NC sub-section don't get synthesized
+    # stubs (that would recreate the pre-Phase-47 over-emission for T15).
     cov_matrices = Dict{Tuple{Int,Int}, Matrix{Float64}}()
+    listed_pairs = Set{Tuple{Int,Int}}()
+    nc_derived_mts = Set{Int}()
     for mt in avail_mts
         try
             open(endf_path) do io
@@ -115,7 +125,9 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                 for _ in 1:nl
                     sh = read_cont(io)
                     mt2 = Int(sh.L2); mt2 == 0 && (mt2 = mt)
+                    push!(listed_pairs, (mt, mt2))
                     nc = Int(sh.N1); ni = Int(sh.N2)
+                    nc > 0 && push!(nc_derived_mts, mt)
                     # Read NC sub-subsections
                     for _ in 1:nc
                         try; read_list(io); catch; break; end
@@ -166,7 +178,8 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # Write output tape
     open(nout_path, "w") do io
         _write_errorr_tape(io, params.mat, za, awr, egn, group_xs,
-                          cov_matrices, reaction_mts, mfcov)
+                          cov_matrices, reaction_mts, mfcov;
+                          listed_pairs, nc_derived_mts)
     end
     register!(tapes, params.nout, nout_path)
 
@@ -769,7 +782,10 @@ end
 function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
                             egn::Vector{Float64}, group_xs::Dict{Int,Vector{Float64}},
                             cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
-                            reaction_mts::Vector{Int}, mfcov::Int)
+                            reaction_mts::Vector{Int}, mfcov::Int;
+                            listed_pairs::Set{Tuple{Int,Int}} =
+                                Set{Tuple{Int,Int}}(),
+                            nc_derived_mts::Set{Int} = Set{Int}())
     ngn = length(egn) - 1
     nw = length(egn)
 
@@ -814,15 +830,23 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     end
     _write_fend_line(io, mat)
 
-    # MFcov — covariance matrices
+    # MFcov — covariance matrices. Sub-sections correspond to (mt, mt2)
+    # pairs declared in the ENDF NL count (listed_pairs), union with any
+    # pairs in cov_matrices. Pairs listed but with no expanded data get an
+    # all-zero last-row stub, matching Fortran covout (errorr.f90:7574).
+    # We no longer synthesize pairs for every mt2 > mt in reaction_mts —
+    # that over-counted for MTs where the evaluation declared only
+    # self-covariance.
     for mt in reaction_mts
-        sub_keys = [(mt, mt2) for (mt1, mt2) in keys(cov_matrices) if mt1 == mt]
-        for mt2 in reaction_mts
-            mt2 <= mt && continue
-            (mt, mt2) in sub_keys || push!(sub_keys, (mt, mt2))
+        pair_set = Set{Tuple{Int,Int}}()
+        for (m1, m2) in keys(cov_matrices); m1 == mt && push!(pair_set, (m1, m2)); end
+        for (m1, m2) in listed_pairs; m1 == mt && push!(pair_set, (m1, m2)); end
+        if mt in nc_derived_mts
+            for mt2 in reaction_mts
+                mt2 > mt && push!(pair_set, (mt, mt2))
+            end
         end
-        sort!(sub_keys, by = x -> x[2])
-
+        sub_keys = sort!(collect(pair_set), by = x -> x[2])
         isempty(sub_keys) && continue
         nl = length(sub_keys)
         seq = 1
@@ -831,24 +855,7 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
         for (mt1, mt2) in sub_keys
             matrix = get(cov_matrices, (mt1, mt2), nothing)
             _write_cont_line(io, 0.0, 0.0, 0, mt2, 0, ngn, mat, mfcov, mt, seq); seq += 1
-
-            if matrix !== nothing && any(!iszero, matrix)
-                for row in 1:ngn
-                    _write_cont_line(io, 0.0, 0.0, ngn, 1, ngn, row, mat, mfcov, mt, seq); seq += 1
-                    idx_v = 1
-                    while idx_v <= ngn
-                        buf = ""
-                        for col in 1:6
-                            idx_v > ngn && break
-                            buf *= _fmt_errorr_cov(matrix[row, idx_v]); idx_v += 1
-                        end
-                        _write_data_line(io, buf, mat, mfcov, mt, seq); seq += 1
-                    end
-                end
-            else
-                _write_cont_line(io, 0.0, 0.0, 1, 9, 1, ngn, mat, mfcov, mt, seq); seq += 1
-                _write_data_line(io, format_endf_float(0.0), mat, mfcov, mt, seq); seq += 1
-            end
+            seq = _write_mfcov_rows(io, matrix, ngn, mat, mfcov, mt, seq)
         end
         _write_send_line(io, mat, mfcov)
     end
@@ -857,6 +864,71 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     # MEND + TEND
     _write_fend_line(io, 0)
     @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
+end
+
+"""
+    _write_mfcov_rows(io, matrix, ngn, mat, mfcov, mt, seq) -> Int
+
+Emit the per-row covariance LIST records for one (mt, mt2) sub-section.
+Matches Fortran `covout` at errorr.f90:7530-7605 — for each row:
+
+1. Scan to find `ig2lo` (first nonzero column) and `ng2` (last nonzero
+   column) with the `|v| <= eps` threshold Fortran uses at line 7567.
+2. If `ng2 == 0` (entire row is zero):
+      - if this is NOT the last row (ig < ngn): **skip it entirely**;
+      - if it IS the last row: emit one zero at `ig2lo = ng2 = ig`
+        (Fortran lines 7574-7576).
+3. Otherwise emit `LIST(0, 0, L1=count, L2=ig2lo, N1=count, N2=ig)`
+   + `count = ng2 - ig2lo + 1` floats from row `[ig2lo..ng2]`.
+
+Returns the next sequence number. Handles a nothing/all-zero matrix
+by emitting the last-row stub once.
+"""
+function _write_mfcov_rows(io::IO, matrix::Union{Nothing,Matrix{Float64}},
+                           ngn::Int, mat::Int, mfcov::Int, mt::Int, seq::Int)
+    # No matrix or fully-zero matrix → emit one last-row stub (matches
+    # Fortran behavior when all rows collapse to ng2==0).
+    if matrix === nothing || !any(!iszero, matrix)
+        _write_cont_line(io, 0.0, 0.0, 1, ngn, 1, ngn, mat, mfcov, mt, seq)
+        seq += 1
+        _write_data_line(io, format_endf_float(0.0), mat, mfcov, mt, seq)
+        return seq + 1
+    end
+
+    eps = 1e-20  # Fortran errorr covout `eps` parameter (errorr.f90:7064)
+    for ig in 1:ngn
+        ig2lo = 0; ng2 = 0
+        @inbounds for igp in 1:ngn
+            v = matrix[ig, igp]
+            if abs(v) > eps
+                ig2lo == 0 && (ig2lo = igp)
+                ng2 = igp
+            end
+        end
+
+        if ng2 == 0
+            # All-zero row. Fortran skips except for the last row, which
+            # emits one zero at column = ig (errorr.f90:7574-7576).
+            ig < ngn && continue
+            ig2lo = ig; ng2 = ig
+        end
+
+        count = ng2 - ig2lo + 1
+        _write_cont_line(io, 0.0, 0.0, count, ig2lo, count, ig,
+                         mat, mfcov, mt, seq); seq += 1
+        idx_v = ig2lo
+        while idx_v <= ng2
+            buf = ""
+            for _ in 1:6
+                idx_v > ng2 && break
+                v = (ng2 == ig2lo && ng2 == ig && matrix[ig, idx_v] == 0.0) ?
+                    0.0 : matrix[ig, idx_v]
+                buf *= _fmt_errorr_cov(v); idx_v += 1
+            end
+            _write_data_line(io, buf, mat, mfcov, mt, seq); seq += 1
+        end
+    end
+    return seq
 end
 
 # =========================================================================

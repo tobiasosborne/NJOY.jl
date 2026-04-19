@@ -3184,16 +3184,42 @@ T04 zero regression (tape23/24/25 identical to Phase-45 baseline).
 
 Worklog: `worklog/T15_errorr_gendf_readback.md`.
 
+### Phase 47: errorr MF33 sparse per-row emission + NC-aware stubs — T15 tape26 8205 → 1859
+
+## Date: 2026-04-19
+
+**Fix**: `_write_mfcov_rows` helper emits each row as a LIST with
+`(L1=count, L2=ig2lo, N1=count, N2=ig)` where `[ig2lo, ng2]` is the
+nonzero column range (threshold `|v|>1e-20`). All-zero rows dropped
+except the last (stub at `ig2lo=ng2=ig`), matching Fortran covout at
+errorr.f90:7530-7605. NC-aware pair synthesis: MTs with any NC>0
+sub-section get cross-pair stubs for `mt2>mt` in reaction_mts —
+preserves T04's (18,102) NC-derived pair without over-emitting for
+T15 MTs with pure self-cov NI.
+
+T15 tape26: **8205 → 1859 lines** (reference 5958). Remaining gap
+(−2300 from MT=2/4 self-cov) is NJOY.jl-km1 (NC expansion for cross-MT
+values). T04 tape23 **BIT_IDENTICAL 82/82 preserved**; phase-45/46
+tests no regression.
+
+Worklog: `worklog/T15_errorr_mf33_sparse.md`.
+
 **Immediate next-step candidates**
 
-1. **T15 tape26 MF33 over-expansion** (~half-day) — Julia writes full
-   NGN×NGN row blocks; Fortran writes LB=5 sparse triangles. +2247
-   lines. `_write_errorr_tape` MFcov loop + `covout` comparison.
-2. **Groupr empty-MT skip + MT=251/252 derivation**
-   (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close the remaining tape91 gap.
-3. **Cross-ign colaps flux-weighted collapse** — errorr.f90:9255-9283.
+1. **NC-block expansion** (`NJOY.jl-km1`, ~1 day) — compute cross-MT
+   covariance values from NC coefficients. Unlocks +2300 lines of real
+   data on T15 MT=2/MT=4. After this, T15 tape26 should be within
+   ~100 lines of the reference 5958.
+2. **Covcal content drift** (`NJOY.jl-f8k`, ~half-day) — Julia's
+   covariance matrix values/extents differ from Fortran's
+   `covcal`+`resprp` for MT=77 and similar. Surfaced by sparse
+   emission. Investigate `expand_covariance_block` vs the Fortran
+   pipeline at errorr.f90:7170-7188.
+3. **Groupr empty-MT skip + MT=251/252 derivation**
+   (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close tape91 gap.
+4. **Cross-ign colaps flux-weighted collapse** — errorr.f90:9255-9283.
    Not blocking T15/T16/T17 (same ign); file when a test needs it.
-4. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
+5. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
    session on `csmlbw`, same recipe that fixed T34 "irreducible".
-5. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
+6. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
    covariance diffs, from T03_phase7 worklog.
