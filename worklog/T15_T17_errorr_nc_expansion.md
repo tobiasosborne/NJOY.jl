@@ -183,3 +183,14 @@ replace-not-add semantics for the (mt, mt) diagonal entry.
   tape26 5958 is content drift on the *other* 34 MTs' self-cov
   (covcal/resprp pipeline at errorr.f90:7170-7188), independent of
   NC expansion.
+
+## Beads status note (2026-04-20)
+
+Beads DB is broken on this machine — orphaned IDs referenced here
+(`NJOY.jl-km1`, `NJOY.jl-f8k`) no longer resolve via `bd show`. The
+authoritative open-work list is `HANDOFF.md` "Open Work" section.
+Mapping for this worklog:
+
+- `NJOY.jl-km1` → "NC-block expansion v1" (closed here) + "NC-block
+  expansion v2 (double-NC-derived + LTY≥1)" (P1 in Open Work).
+- `NJOY.jl-f8k` → "Covcal content drift" (P1 in Open Work).

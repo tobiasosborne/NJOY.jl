@@ -61,6 +61,256 @@ Launch multiple **research** subagents in parallel for maximum efficiency:
 
 ---
 
+## Beads Status (2026-04-20) — **READ FIRST**
+
+**Beads database is broken** on this machine — the local Dolt server lost
+its `NJOY_jl` database during a server restart and **no git remote is
+configured**. `bd ready`, `bd show`, `bd remember`, etc. all return
+`database "NJOY_jl" not found`. `bd bootstrap` creates a fresh empty
+database that doesn't persist across restarts.
+
+**Implication**: every `NJOY.jl-xxx` bead ID referenced in this HANDOFF
+or any `worklog/*.md` is an orphan — the bead text is gone from the DB.
+The work tracked by those IDs is re-captured in full in the "Open Work"
+section below so nothing is lost. Use that section as the authoritative
+work list until beads is restored.
+
+**Recovery options** (not attempted yet; ask before trying):
+- `bd bootstrap` with a working `.beads/config.yaml` `sync.git-remote`
+  entry, then `bd dolt pull` — if the project ever had a Dolt remote.
+- Reinstall beads CLI fresh and re-init: destructive, loses any bead
+  history the current `.beads/dolt` directory might still hold.
+- Leave beads disabled and track work entirely in HANDOFF + worklogs.
+
+Session rules during the outage:
+- **Do not invent new `NJOY.jl-xxx` IDs** — beads won't allocate them.
+  Refer to open work by the descriptive names in the table below
+  (e.g. "covcal content drift", "groupr empty-MT skip").
+- `bd dolt push` / `bd remember` in the session-close protocol become
+  no-ops; still write the worklog and update HANDOFF.
+
+---
+
+## Open Work (Authoritative — Bead-Independent)
+
+Each entry below is fully self-contained: scope, file locations, Fortran
+references, acceptance criteria, and notes. Retired bead IDs are listed
+for cross-reference with older worklogs but are not required to pick up
+the work.
+
+### P1 — NC-block expansion v2 (double-NC-derived + LTY≥1)
+
+- **Retired bead**: `NJOY.jl-km1` v2 (v1 landed in Phase 48, 2026-04-20).
+- **Scope**: Two separate sub-items.
+  1. **Double-NC-derived cross-pairs**: when both endpoints of an
+     output pair are NC-derived MTs (e.g. T15 `Cov(2, 4)`), the current
+     `_expand_nc_blocks!` emits a zero stub because neither endpoint is
+     in the other's NC ref list. Fortran `covout` at
+     errorr.f90:7431-7438 computes it via the full double sum over
+     input pairs; for U-238 (diagonal-only input cov) this collapses
+     to `Σ_{iy ∈ MT2_refs ∩ MT4_refs} c_iy(MT2) * c_iy(MT4) *
+     Cov(iy, iy)`. For T15: `Cov(2, 4) = −Σ Cov(iy, iy)` over
+     iy ∈ {51..77, 91}.
+  2. **LTY=1/2/3 standards / ratio blocks**: `_read_nc_subsection`
+     currently returns `nothing` for these. Fortran handles them via
+     `stand` around errorr.f90:7800 (NDS-standard covariance + ratio
+     synthesis). T04 U-235 MT=18 has 4 LTY=3 cross-material
+     sub-subsections currently emitted as zero stubs (matches existing
+     reference behaviour by coincidence — verify what Fortran actually
+     emits before treating as correct).
+- **Where**: `src/orchestration/modules/errorr.jl`
+  (`_expand_nc_blocks!`, `_read_nc_subsection`); Fortran
+  `njoy-reference/src/errorr.f90` `covout` (7431-7438) + `stand`
+  (~7800).
+- **Acceptance**: T15 `test_errorr_nc_expansion.jl` MT=2 line count
+  within ±5 of reference 1400 (vs current +29 over, absorbing the
+  missing 40-line Cov(2,4)). T04 reference test must not regress
+  below current NUMERIC_PASS 81/82 on tape23.
+- **Notes**: TDD hook is extending the existing Phase-48 test with
+  strict `|Julia − Ref| ≤ 5` per-MT assertions. Start by making
+  `_expand_nc_blocks!` iterate all MTs as both `ix` and `ixp` for a
+  full `C^T Σ C` sum, using `cov_matrices` as the `Σ_in` source.
+
+### P1 — Covcal content drift
+
+- **Retired bead**: `NJOY.jl-f8k`.
+- **Scope**: Julia's covariance matrix *values* (not just line counts)
+  drift from Fortran for several MTs on T15 tape26. MT=77 self-cov is
+  a known canary — Julia emits 30 lines, reference 20, values differ.
+  Same pattern surfaced on other high-MT inelastic channels and
+  MT=18 (T15_errorr_mf33_sparse.md "MT=77 +10 (NJOY.jl-f8k)").
+  After Phase-48 NC expansion the residual −1780-line T15 tape26 gap
+  (4178 Julia vs 5958 ref) is overwhelmingly concentrated here
+  (specifically in the 34 non-NC-derived MTs' self-cov matrices —
+  those went from 1347 pre-fix to 1347 post-fix unchanged, target
+  3149 from reference; gap = 1802).
+- **Where**: `src/orchestration/modules/errorr.jl`
+  `expand_covariance_block` (called from the NI-expansion loop ~line
+  160) vs. Fortran `covcal` + `resprp` pipeline at errorr.f90:7170-7188.
+  Root cause almost certainly an LB=5/6 LT=1 (symmetric) reconstruction
+  or row-extent (nonzero bounds) mismatch.
+- **Acceptance**: T15 tape26 total grows past 5500 lines;
+  `test_errorr_mf33_sparse.jl` `populated_self_cov_mts` loop asserts
+  `jl <= ref + 5` instead of `ref + 15`.
+- **Notes**: estimated ~half day. Build a RED→GREEN test that compares
+  a single-MT (MT=77) matrix element-wise against reference extracted
+  from `njoy-reference/tests/15/referenceTape26` MF=33 MT=77 —
+  pin the exact divergent cell before touching code.
+
+### P2 — groupr: skip empty-MT, derive MT=251/252
+
+- **Retired beads**: `NJOY.jl-5oi` (empty-MT skip), `NJOY.jl-cdy`
+  (MT=251/252 derivation).
+- **Scope**:
+  1. **5oi**: U-238 MT=37 emits all-zero groups (threshold 17.82 MeV
+     above LANL-30 top 17.0 MeV). Fortran skips such MTs; Julia
+     emits them, producing an extra 3-line block per MT. Surfaced
+     from T15 tape91 `MF=3: 3 → 39 MTs (ref 40)` mismatch
+     (`worklog/T15_groupr_auto_expand.md`).
+  2. **cdy**: MT=251 (mubar, average cosine of scattering) and
+     MT=252 (xi, average logarithmic energy decrement) are derived
+     by Fortran groupr from MF=4/6 angular distributions. Julia
+     emits them only if already present on the PENDF. Needs a
+     dedicated derivation path modelled on the Fortran `gendir` /
+     `convr` data flow.
+- **Where**: `src/orchestration/modules/groupr.jl` (`_groupr_expand_auto`,
+  plus a new MT=251/252 builder); Fortran `njoy-reference/src/groupr.f90`
+  around `nextr` (1087-1123) and MT=251/252 derivation (search for
+  `mt251`, `mt252`).
+- **Acceptance**: T15 tape91 MF=3 MT count exactly 40 (matches
+  reference), no all-zero groups in Julia output, MT=251 and MT=252
+  values within 1e-7 of reference.
+- **Notes**: `worklog/T15_groupr_auto_expand.md` has the full
+  context. The Phase 45 auto-expand work is the upstream entry
+  point. Scope-creep risk: MT=251/252 derivation pulls in the MF=6
+  reader which is partially implemented.
+
+### P2 — Cross-ign flux-weighted collapse (colaps)
+
+- **Retired bead**: none (never filed).
+- **Scope**: `errorr_module` currently handles only same-ign (groupr
+  ign == errorr ign) GENDF readback. For cross-ign (coarser output
+  grid than input), Fortran `colaps` (errorr.f90:9255-9283) does a
+  flux-weighted sum of σ over fine groups falling inside each coarse
+  group. No Julia port yet.
+- **Where**: Build `_errorr_colaps` helper in
+  `src/orchestration/modules/errorr.jl`; read flux from input
+  GENDF's MF=3/MT=0 or compute from user_egn.
+- **Acceptance**: A test case where input GENDF uses one group
+  structure and errorr's `ign` is a coarser one produces
+  flux-weighted σ matching reference.
+- **Notes**: NOT blocking T15/T16/T17 (same ign). File a trigger
+  when a sweep failure points here.
+
+### P2 — T49 MLBW ±1 at E=110487.7 eV (MT=1, MT=2)
+
+- **Retired bead**: none.
+- **Scope**: T49 RECONR passes 44/46 MTs PERFECT; MT=1 and MT=2 have
+  ±1 in last sigfig at a single energy E=110487.7 eV. Looks like the
+  same "irreducible FP precision" class that Phases 12-14 proved is
+  always a real bug (see T34 Frobenius-Schur fix).
+- **Where**: `src/resonances/mlbw.jl` `cross_section_mlbw`; Fortran
+  `njoy-reference/src/reconr.f90` `csmlbw` (~2988-3023 area).
+- **Acceptance**: T49 reports 46/46 PERFECT, no ±1 at
+  E=110487.7 eV.
+- **Notes**: Use gdb to trace Fortran csmlbw intermediate values at
+  that energy (same recipe used to diagnose T34). Patch Julia to
+  match the exact intermediate-rounding order.
+
+### P2 — T04 tape25 MF31 LB=2 union-grid collapse (11 residual diffs)
+
+- **Retired bead**: none.
+- **Scope**: T04 tape25 is the MF=31 (nubar cov) output from the
+  second errorr call. 11 lines differ from reference (currently 107
+  match out of 119). Issue noted in `worklog/T03_phase7_T04_handoff.md`:
+  the LB=2 block reconstruction uses direct group expansion while
+  Fortran `covcal` expects a union grid (all block breakpoints +
+  group boundaries) followed by collapse.
+- **Where**: `src/orchestration/modules/errorr.jl`
+  `_errorr_second_call` (the LB=2 branch inside the block-read loop).
+- **Acceptance**: T04 tape25 DIFFS 118/119 or better.
+- **Notes**: Orthogonal to Phase-48 work; touches MF=31 (nubar) not
+  MF=33. Port the Fortran union-grid path.
+
+### P2 — broadr U-238 JENDL performance (TIMEOUT)
+
+- **Retired bead**: `NJOY.jl-326`.
+- **Scope**: T15 and T17 full-pipeline reference tests TIMEOUT in
+  broadr. Latest measurement (Phase 48 post-fix run): broadr
+  completes in 1039 s, exceeding the 300 s soft cap and the 1800 s
+  hard timeout (the framework actually gives ~1168 s wallclock, but
+  the reference-test harness enforces its own limits).
+- **Where**: `src/orchestration/modules/broadr.jl`; Fortran
+  `njoy-reference/src/broadr.f90`. The slow case is sigma1 Doppler
+  broadening over U-238's dense URR tabulation.
+- **Acceptance**: T15 broadr under 300 s, tapes 22/23 produced.
+- **Notes**: Profile first with `@profile` / flamegraph; don't
+  refactor blind. The Fortran version of this exact case runs in
+  ~30 s, so a 30× speedup is plausible from hot-loop
+  devectorization or preallocation wins.
+
+### P3 — T65 errorr performance (U-235 MF34)
+
+- **Retired bead**: none (noted under `NJOY.jl-326` but orthogonal).
+- **Scope**: T65 errorr MF=34 (angular distribution cov) is slow
+  enough to be on the sweep watchlist. Not yet profiled.
+- **Where**: `src/orchestration/modules/errorr.jl` MF=34 path
+  (grep `mfcov.*34`).
+- **Acceptance**: T65 under sweep default timeout with real output.
+- **Notes**: Worth re-measuring first — may have been subsumed by
+  Phase 44's 30M-line MF=33 fix.
+
+### P3 — ~55 DIFFS cases — per-tape bisection (Grind Method)
+
+- **Retired bead**: none.
+- **Scope**: After Phases 10-48, the post-sweep state is roughly
+  ~64 DIFFS, 17 MISSING_TAPE, 0 CRASH, and 2 NUMERIC_PASS + 1
+  BIT_IDENTICAL on the 84-test suite. Most DIFFS are small last-digit
+  or structural issues per the Grind Method.
+- **Where**: Each test's section in `reports/REFERENCE_SWEEP.md`.
+  Use the Grind Method (HANDOFF "The Grind Method" section + Rule 0
+  oracle-driven TDD).
+- **Acceptance**: each DIFFS → NUMERIC_PASS or better.
+- **Notes**: Re-run a fresh full sweep first to get the post-Phase-48
+  baseline. Expected ~90-100 min.
+
+### P3 — MF7/MT2 Bragg reader
+
+- **Retired bead**: none.
+- **Scope**: thermr currently uses a hardcoded `BRAGG_LATTICE_PARAMS`
+  table for the small set of materials it supports. For general
+  ENDF-6 thermal evaluations (T25, T67-T74) the per-material Bragg
+  lattice parameters should be read directly from the evaluation's
+  MF=7 MT=2 section.
+- **Where**: `src/processing/thermr.jl` (or wherever the hardcoded
+  constants live — grep `BRAGG_LATTICE_PARAMS`); Fortran
+  `njoy-reference/src/thermr.f90` `bragg` subroutine.
+- **Acceptance**: BRAGG_LATTICE_PARAMS constant removed; T25, T67,
+  T68, T69, T70, T74 all use real MF7/MT2 reads.
+- **Notes**: landed as a stub in Phases 12-14 gating; unblocks a
+  cluster of 6-7 tests when done.
+
+### P3 — Real plotr / covr / leapr / purr output
+
+- **Retired bead**: none.
+- **Scope**: Dispatchers landed in Phases 11-13 as stubs; each
+  unblocks 5-10 tests when real output is wired up. leapr has the
+  richest downstream chain (thermal scattering → thermr → groupr →
+  errorr).
+- **Acceptance**: per-module real output matches reference within
+  1e-7 for at least one test each.
+- **Notes**: These are multi-session efforts each; tackle only after
+  Phase-48 follow-ups and the DIFFS bisection.
+
+### Known completed (retired bead IDs, do not re-do)
+
+| Retired ID | Scope | Resolved in |
+|------------|-------|-------------|
+| `NJOY.jl-327` | heatr plot-tape stub | Phase 14 |
+| `NJOY.jl-km1` | NC-block expansion v1 | Phase 48 (2026-04-20) |
+
+---
+
 ## Test Infrastructure
 
 ### Fortran-faithful reference test framework (Phase 8 — 2026-04-13)
@@ -139,29 +389,20 @@ per-test detail:
 - Bragg gating + graceful degrade (7 tests): T25, T32, T67, T68, T69, T70, T74.
 - INT=0 (2 tests): T15/T17 progress past reader; new downstream bug revealed.
 
-**Priority follow-ups (post-Phase-14, 2026-04-15)**:
-1. ~~**Dispatch `covr`**~~ — Phase 11.
-2. ~~**Dispatch `plotr`** (stub)~~ — Phase 12.
-3. ~~**T20 errorr 999-mode stub**~~ — Phase 12.
-4. ~~**T43 broadr T=0 pass-through**~~ — Phase 12.
-5. ~~**moder iopt=1 extract + gaspr stub**~~ — Phase 13.
-6. ~~**heatr plot-tape stub** (`NJOY.jl-327`)~~ — Phase 14. T24 unblocked.
-7. ~~**T60 broadr MT=1 fallback** (dosimetry)~~ — Phase 14.
-8. ~~**T09 thermr → free-gas fallback for empty SAB tape**~~ — Phase 14.
-9. **Run a full sweep** — six phases of progress (P10→P14); the
-   HANDOFF's 16-CRASH taxonomy is now estimated ≈0 structural crashes.
-   Re-sweep to confirm across all 84 tests (~2–3 h).
-10. **TIMEOUTs**: `NJOY.jl-326` (broadr U-238 JENDL, T15/T17), T65
-    errorr perf on U-235 MF34.
-11. **Real plotr / covr / leapr / purr output** — each bit-converges
-    5–10 tests; leapr has the richest downstream chain.
-12. **MF7/MT2 Bragg reader** → replaces hardcoded
-    `BRAGG_LATTICE_PARAMS` for ENDF-6 evaluations (T25/T67–T74).
-13. The ~55 DIFFS cases — per-tape bisection (Grind Method).
+**Priority follow-ups**: historical post-Phase-14 list superseded by
+the "Open Work" section at the top of this file. Items 1-8 of the old
+list all landed in Phases 11-14 (covr, plotr, errorr 999-mode stub,
+broadr T=0, moder iopt=1, heatr nplot, broadr MT=1 fallback, thermr
+free-gas fallback). The remaining items are folded into the current
+Open Work entries: the fresh sweep re-run is pending; TIMEOUTs tie
+into "broadr U-238 JENDL performance" and "T65 errorr performance";
+"Real plotr / covr / leapr / purr output" is its own P3 entry; the
+MF7/MT2 Bragg reader is unfiled (add it to Open Work if a test needs
+it); the DIFFS bisection is "~55 DIFFS cases" P3.
 
 See `worklog/T10_phase10_batch_dispatch.md`, `T11_covr_dispatch.md`,
 `T12_small_batch.md`, `T13_moder_gaspr.md`, `T14_drain_crash.md` for
-implementation detail.
+implementation detail on the completed items.
 
 ### Legacy oracle system (superseded by above for cross-module tests, still useful for reconr-only grind)
 Each test's Fortran reference output is cached in `test/validation/oracle_cache/testNN/`. The `diagnose_harness.jl` script generates these by running the Fortran NJOY binary with truncated input decks. Each oracle directory contains:
@@ -3237,22 +3478,13 @@ still emit zero stubs — port `stand` (errorr.f90 ~7800) when needed.
 
 Worklog: `worklog/T15_T17_errorr_nc_expansion.md`.
 
-**Immediate next-step candidates**
+**Immediate next-step candidates**: see the authoritative "Open Work"
+section at the top of this file. P1 items closest to the current
+context are:
 
-1. **NC v2 — double-NC-derived cross-pairs + LTY=1/2/3 standards** —
-   close the residual T15 (~+40 lines) and unlock T04 cross-material
-   covariance.
-2. **Covcal content drift** (`NJOY.jl-f8k`, ~half-day) — Julia's
-   covariance matrix values/extents differ from Fortran's
-   `covcal`+`resprp` for MT=77 and similar. The −1780-line residual
-   on T15 tape26 is concentrated here. Investigate
-   `expand_covariance_block` vs the Fortran pipeline at
-   errorr.f90:7170-7188.
-3. **Groupr empty-MT skip + MT=251/252 derivation**
-   (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close tape91 gap.
-4. **Cross-ign colaps flux-weighted collapse** — errorr.f90:9255-9283.
-   Not blocking T15/T16/T17 (same ign); file when a test needs it.
-5. **T49 MLBW ±1 at E=110487.7 eV** (MT=1, MT=2) — gdb diagnostic
-   session on `csmlbw`, same recipe that fixed T34 "irreducible".
-6. **T04 tape25 MF31 LB=2 union-grid collapse** — 11 residual
-   covariance diffs, from T03_phase7 worklog.
+1. **NC-block expansion v2** — double-NC-derived cross-pairs + LTY=1/2/3
+   standards. Closes T15 tape26 MT=2/MT=4 residual (~+40 lines);
+   unlocks T04 U-235 cross-material covariance.
+2. **Covcal content drift** — Julia covariance matrix values/extents
+   differ from Fortran for non-NC-derived MTs. The −1780-line
+   residual on T15 tape26 after Phase 48 is concentrated here.
