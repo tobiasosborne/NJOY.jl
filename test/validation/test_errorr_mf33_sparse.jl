@@ -87,18 +87,20 @@ end
         @test jl <= rf + 15
     end
 
-    # Total tape26 should drop well below post-Phase-46 baseline (8205).
-    # Sparse emission alone drives this under the reference (5958) because
-    # MT=2/4 cross-MT data is still missing (NJOY.jl-km1). Not asserting
-    # ≥ ref — just that the raw over-expansion is gone.
+    # Total tape26 should stay well below post-Phase-46 baseline (8205).
+    # NC-block expansion (Phase 48 / NJOY.jl-km1 v1) raises this past the
+    # original 1859 baseline by ~2300 lines (real Cov(MT2/MT4, *) values),
+    # so the cap reflects "no row-density blowup" — not the original
+    # post-Phase-47 minimum.
     total_lines = countlines(tape26)
     ref_total = countlines(T15_REF)
     @info "T15 tape26 total — Julia: $total_lines, ref: $ref_total"
-    @test total_lines < 4000  # post-Phase-46 was 8205
+    @test total_lines < 5000  # post-Phase-46 was 8205, post-Phase-48 ≈ 4178
 
-    # Document the remaining under-emission gap for MT=2/MT=4 (known).
+    # Document any residual gap for MT=2/MT=4 (≈0 post-NC, modulo
+    # the v1 limit on double-NC-derived cross-pairs and f8k drift).
     mt2_gap = get(ref, 2, 0) - get(jul, 2, 0)
     mt4_gap = get(ref, 4, 0) - get(jul, 4, 0)
-    @info "Known gap (NJOY.jl-km1): MT=2 under by $mt2_gap lines, \
+    @info "Residual gap: MT=2 under by $mt2_gap lines, \
            MT=4 under by $mt4_gap lines"
 end

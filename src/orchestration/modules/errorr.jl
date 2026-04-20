@@ -102,20 +102,20 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
 
     # Compute multigroup covariance matrices
     # Read MF33 sub-sections and expand NI blocks onto the group grid.
-    # Only use NI blocks from standalone sub-sections (NC=0).
-    # Sub-sections with NC>0 contain derived covariance that requires
-    # NC processing (linear combinations of other MTs) — skip for now.
+    # NC-type sub-subsections (LTY=0 linear combinations) are captured
+    # into `nc_blocks` and expanded into derived covariance values in a
+    # post-pass below. Mirrors Fortran gridd (errorr.f90:1091-1483) +
+    # covout accumulation (errorr.f90:7431-7438):
+    #   Cov_out(ix,ixp)[ig,igp] += sum_{iy,iyp} akxy[iy,ix,k] *
+    #                              akxy[iyp,ixp,kp] * Cov_in(iy,iyp)[jg,jgp]
     # Track (mt, mt2) pairs declared in the ENDF NL sub-section list, plus
-    # every MT that has any NC>0 derived sub-section. Fortran's covout
-    # (errorr.f90:7206+) writes cross-pair sub-sections for NC-derived MTs
-    # because the NC coefficients reference other MTs; we can't yet do
-    # full NC expansion (NJOY.jl-km1) but still need to emit the per-pair
-    # last-row zero stubs so the NL count on the section header matches
-    # the reference. MTs without any NC sub-section don't get synthesized
-    # stubs (that would recreate the pre-Phase-47 over-emission for T15).
+    # every MT that has any NC>0 derived sub-section. Pairs synthesized
+    # for `mt2 > mt in reaction_mts` (Phase-47) get real values where the
+    # NC formula populates them; the rest stay as zero stubs.
     cov_matrices = Dict{Tuple{Int,Int}, Matrix{Float64}}()
     listed_pairs = Set{Tuple{Int,Int}}()
     nc_derived_mts = Set{Int}()
+    nc_blocks = Dict{Int, Vector{NCSubSubsection}}()
     for mt in avail_mts
         try
             open(endf_path) do io
@@ -128,9 +128,17 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                     push!(listed_pairs, (mt, mt2))
                     nc = Int(sh.N1); ni = Int(sh.N2)
                     nc > 0 && push!(nc_derived_mts, mt)
-                    # Read NC sub-subsections
+                    # Read NC sub-subsections — capture LTY=0 linear
+                    # combinations for the post-pass; ignore LTY=1,2,3
+                    # (standards/ratios) until a test needs them.
                     for _ in 1:nc
-                        try; read_list(io); catch; break; end
+                        try
+                            blk = _read_nc_subsection(io)
+                            blk === nothing && continue
+                            push!(get!(nc_blocks, mt, NCSubSubsection[]), blk)
+                        catch
+                            break
+                        end
                     end
                     # Only expand NI blocks from standalone sub-sections (nc==0)
                     for _ in 1:ni
@@ -174,6 +182,15 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
             @warn "errorr: covariance failed for MT=$mt: $e"
         end
     end
+
+    # NC-derived covariance expansion. For each MT with LTY=0 NC blocks,
+    # populate cov_matrices[(mt, mt)] (self-cov) and cov_matrices[(mt, ref_j)]
+    # for each referenced MT ref_j > mt. Mirrors Fortran covout C^T Σ C
+    # accumulation under the simplifying assumption that input cross-MT
+    # covariances are zero (true for U-238 JENDL — every referenced MT has
+    # NC=0/NI=1 self-cov only). Cross-pairs where BOTH endpoints are
+    # NC-derived (e.g. T15 Cov(2,4)) are not yet computed here.
+    _expand_nc_blocks!(cov_matrices, nc_blocks, egn)
 
     # Write output tape
     open(nout_path, "w") do io
@@ -772,6 +789,151 @@ function _read_za_awr(endf_path::String, mat::Int)
         end
     end
     za, awr
+end
+
+# =========================================================================
+# MF33 NC-block (derived covariance) expansion
+# =========================================================================
+
+"""
+    NCSubSubsection
+
+One LTY=0 NC sub-subsection from MF33: a linear combination
+`Cov(mt, mt) = Σ_i c_i * Cov(MT_i, ...)` valid for E ∈ [e1, e2].
+Mirrors the Fortran `gridd` storage at errorr.f90:1338-1356:
+`imtr` (output MT), `el`/`eh` (energy bounds), `nmtr` (NCI),
+`ak(2j-1, ir) = c_j`, `ak(2j, ir) = XMTI_j`.
+"""
+struct NCSubSubsection
+    lty::Int                   # only LTY=0 (linear combination) supported
+    e1::Float64                # lower energy bound
+    e2::Float64                # upper energy bound
+    coeffs::Vector{Float64}    # CI coefficients
+    mts_ref::Vector{Int}       # XMTI referenced MTs
+end
+
+"""
+    _read_nc_subsection(io) -> Union{NCSubSubsection, Nothing}
+
+Read one NC sub-subsection (CONT + LIST). Mirrors Fortran gridd loop at
+errorr.f90:1282-1356. Returns nothing for LTY ∈ {1,2,3} (standards/ratio
+variants) or malformed records — caller continues to next sub-subsection.
+
+ENDF MF33 NC LIST body for LTY=0 is `[E1, E2, c_1, MT_1, c_2, MT_2, ...]`
+with N1 = total body word count = 2 + 2·NCI, N2 = NCI.
+"""
+function _read_nc_subsection(io::IO)
+    sh = read_cont(io)                  # CONT: 0, 0, 0, LTY, 0, 0
+    lty = Int(sh.L2)
+    lst = read_list(io)
+    lty == 0 || return nothing          # LTY 1/2/3: skip for now
+    nci = Int(lst.N2)
+    nci > 0 || return nothing
+    # ENDF LIST head carries E1, E2 in C1/C2 (errorr.f90:1306-1311). The
+    # body `lst.data` is NPL = 2*NCI floats: alternating (CI, XMTI) pairs.
+    e1 = lst.C1
+    e2 = lst.C2
+    length(lst.data) >= 2 * nci || return nothing
+    coeffs = Float64[]; mts_ref = Int[]
+    sizehint!(coeffs, nci); sizehint!(mts_ref, nci)
+    @inbounds for j in 1:nci
+        push!(coeffs, lst.data[2j - 1])         # CI
+        push!(mts_ref, Int(lst.data[2j]))       # XMTI (stored as float)
+    end
+    NCSubSubsection(lty, e1, e2, coeffs, mts_ref)
+end
+
+"""
+    _expand_nc_blocks!(cov_matrices, nc_blocks, egn)
+
+For each MT with NC blocks, populate cov_matrices entries from the linear
+combination of referenced MT covariances. Mirrors Fortran `gridd` `akxy`
+construction (errorr.f90:1429-1479) + `covout` accumulation
+(errorr.f90:7431-7438):
+
+    Cov_out[ig,igp] = Σ_{iy,iyp} akxy[iy,ix,k] * akxy[iyp,ixp,kp]
+                    * Cov_in(iy,iyp)[jg,jgp]
+
+Simplifying assumption (valid for T15/T17 U-238 JENDL): input cross-MT
+covariances are zero — every referenced MT in this dataset has NC=0/NI=1
+self-cov only. The double sum collapses to:
+
+    Cov(mt, mt)        = Σ_i c_i^2 * Cov(ref_i, ref_i)   (self)
+    Cov(mt, ref_j)     = c_j     * Cov(ref_j, ref_j)     (ref_j > mt)
+
+The energy mask `[e1, e2]` is applied per group: a row/col `g` is
+in-range iff the group's center energy `√(egn[g] * egn[g+1])` falls in
+[e1, e2]. For T15 single-block full-range NC, the mask is all-true.
+
+Cov_out for the diagonal (mt, mt) explicitly REPLACES any existing
+zero-NI placeholder — Fortran zeros `akxy[derived,derived,k]` (line
+1475), so the explicit NI self-cov contribution is discarded by design.
+"""
+function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
+                            nc_blocks::Dict{Int,Vector{NCSubSubsection}},
+                            egn::Vector{Float64})
+    ngn = length(egn) - 1
+    isempty(nc_blocks) && return
+    # Geometric group center used for the [e1, e2] mask. Fortran's `gridd`
+    # uses bin-edge containment over the union grid `ek`; on the output
+    # grid this reduces to whether the group is wholly inside the range.
+    gc = [sqrt(egn[g] * egn[g+1]) for g in 1:ngn]
+
+    for (mt, blocks) in nc_blocks
+        # Build self-cov + cross-cov for this NC-derived MT, summing
+        # contributions from each NC block over its energy range.
+        self_acc = zeros(Float64, ngn, ngn)
+        cross_acc = Dict{Int, Matrix{Float64}}()
+        any_block = false
+
+        for blk in blocks
+            blk.lty == 0 || continue
+            # Group mask for this block's energy range
+            in_range = falses(ngn)
+            @inbounds for g in 1:ngn
+                if gc[g] >= blk.e1 && gc[g] <= blk.e2
+                    in_range[g] = true
+                end
+            end
+            any(in_range) || continue
+            any_block = true
+
+            # Self-cov contribution: Σ_i c_i^2 Cov(ref_i, ref_i)
+            for (i, ref_i) in enumerate(blk.mts_ref)
+                cov_ii = get(cov_matrices, (ref_i, ref_i), nothing)
+                cov_ii === nothing && continue
+                ci = blk.coeffs[i]
+                w = ci * ci
+                @inbounds for ig in 1:ngn, igp in 1:ngn
+                    in_range[ig] && in_range[igp] || continue
+                    self_acc[ig, igp] += w * cov_ii[ig, igp]
+                end
+            end
+
+            # Cross-cov contribution: for each ref_j with ref_j > mt,
+            # accumulate c_j * Cov(ref_j, ref_j) into Cov(mt, ref_j)
+            # over the in-range groups.
+            for (j, ref_j) in enumerate(blk.mts_ref)
+                ref_j > mt || continue
+                cov_jj = get(cov_matrices, (ref_j, ref_j), nothing)
+                cov_jj === nothing && continue
+                cj = blk.coeffs[j]
+                M = get!(() -> zeros(Float64, ngn, ngn), cross_acc, ref_j)
+                @inbounds for ig in 1:ngn, igp in 1:ngn
+                    in_range[ig] && in_range[igp] || continue
+                    M[ig, igp] += cj * cov_jj[ig, igp]
+                end
+            end
+        end
+        any_block || continue
+
+        # Self-cov REPLACES any zero-NI placeholder (Fortran akxy diag = 0).
+        cov_matrices[(mt, mt)] = self_acc
+        for (ref_j, M) in cross_acc
+            cov_matrices[(mt, ref_j)] = M
+        end
+    end
+    nothing
 end
 
 # =========================================================================

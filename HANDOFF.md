@@ -3202,17 +3202,52 @@ tests no regression.
 
 Worklog: `worklog/T15_errorr_mf33_sparse.md`.
 
+### Phase 48: errorr MF33 NC-block expansion (LTY=0) — T15 tape26 1859 → 4178
+
+## Date: 2026-04-20
+
+**Fix**: Implement Fortran NJOY's NC-derived covariance via the
+collapsed `Σᵢ cᵢ² Cov(refᵢ, refᵢ)` (self) and `cⱼ Cov(refⱼ, refⱼ)`
+(cross-pair) formulas — valid where input cross-MT covariances are
+zero (true for U-238 JENDL). New `NCSubSubsection` struct, new
+`_read_nc_subsection` parser (CONT + LIST = 2 records, not 1), new
+`_expand_nc_blocks!` post-processing pass between read loop and
+writer. The diagonal `(mt, mt)` entry is **replaced**, not summed,
+matching Fortran `akxy[derived,derived,k]=0` (errorr.f90:1475).
+
+**Results** (T15 tape26):
+
+| Quantity | Pre-Phase-48 | Post-Phase-48 | Reference |
+|----------|--------------|---------------|-----------|
+| MF33 MT=2 lines | 106 | **1429** | 1400 |
+| MF33 MT=4 lines | 103 | **1099** | 1106 |
+| MF33 total | 1556 | **3875** | 5655 |
+| Tape26 total | 1859 | **4178** | 5958 |
+
+T04 tape23 unchanged (NUMERIC_PASS 81/82 — already at this status on
+master; HANDOFF Phase 47's "BIT_IDENTICAL" claim was inaccurate);
+phase-46/47 tests no regression (one stale `total < 4000` cap relaxed
+to `< 5000` to admit NC's legitimate +2300-line growth).
+
+**Limitation v1**: cross-pairs where both endpoints are NC-derived
+(T15 Cov(2, 4) = `−Σ Cov(iy, iy)` over `iy ∈ MT2_refs ∩ MT4_refs`)
+not yet computed. ~40 lines per pair; one such on T15.
+LTY=1/2/3 NC sub-subsections (T04 U-235 cross-material standards)
+still emit zero stubs — port `stand` (errorr.f90 ~7800) when needed.
+
+Worklog: `worklog/T15_T17_errorr_nc_expansion.md`.
+
 **Immediate next-step candidates**
 
-1. **NC-block expansion** (`NJOY.jl-km1`, ~1 day) — compute cross-MT
-   covariance values from NC coefficients. Unlocks +2300 lines of real
-   data on T15 MT=2/MT=4. After this, T15 tape26 should be within
-   ~100 lines of the reference 5958.
+1. **NC v2 — double-NC-derived cross-pairs + LTY=1/2/3 standards** —
+   close the residual T15 (~+40 lines) and unlock T04 cross-material
+   covariance.
 2. **Covcal content drift** (`NJOY.jl-f8k`, ~half-day) — Julia's
    covariance matrix values/extents differ from Fortran's
-   `covcal`+`resprp` for MT=77 and similar. Surfaced by sparse
-   emission. Investigate `expand_covariance_block` vs the Fortran
-   pipeline at errorr.f90:7170-7188.
+   `covcal`+`resprp` for MT=77 and similar. The −1780-line residual
+   on T15 tape26 is concentrated here. Investigate
+   `expand_covariance_block` vs the Fortran pipeline at
+   errorr.f90:7170-7188.
 3. **Groupr empty-MT skip + MT=251/252 derivation**
    (`NJOY.jl-5oi`, `NJOY.jl-cdy`) — close tape91 gap.
 4. **Cross-ign colaps flux-weighted collapse** — errorr.f90:9255-9283.
