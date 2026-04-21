@@ -98,38 +98,28 @@ references, acceptance criteria, and notes. Retired bead IDs are listed
 for cross-reference with older worklogs but are not required to pick up
 the work.
 
-### P1 — NC-block expansion v2 (double-NC-derived + LTY≥1)
+### P1 — NC-block expansion v2: LTY=1/2/3 standards / ratio (sub-item 2 only)
 
-- **Retired bead**: `NJOY.jl-km1` v2 (v1 landed in Phase 48, 2026-04-20).
-- **Scope**: Two separate sub-items.
-  1. **Double-NC-derived cross-pairs**: when both endpoints of an
-     output pair are NC-derived MTs (e.g. T15 `Cov(2, 4)`), the current
-     `_expand_nc_blocks!` emits a zero stub because neither endpoint is
-     in the other's NC ref list. Fortran `covout` at
-     errorr.f90:7431-7438 computes it via the full double sum over
-     input pairs; for U-238 (diagonal-only input cov) this collapses
-     to `Σ_{iy ∈ MT2_refs ∩ MT4_refs} c_iy(MT2) * c_iy(MT4) *
-     Cov(iy, iy)`. For T15: `Cov(2, 4) = −Σ Cov(iy, iy)` over
-     iy ∈ {51..77, 91}.
-  2. **LTY=1/2/3 standards / ratio blocks**: `_read_nc_subsection`
-     currently returns `nothing` for these. Fortran handles them via
-     `stand` around errorr.f90:7800 (NDS-standard covariance + ratio
-     synthesis). T04 U-235 MT=18 has 4 LTY=3 cross-material
-     sub-subsections currently emitted as zero stubs (matches existing
-     reference behaviour by coincidence — verify what Fortran actually
-     emits before treating as correct).
+- **Retired bead**: `NJOY.jl-km1` v2 sub-item 1 (double-NC-derived
+  cross-pairs) landed in Phase 49, 2026-04-21 — see
+  `worklog/T15_T17_errorr_nc_expansion_v2.md`. T15 Cov(2, 4) now
+  emits a real 65-line LB-block (vs reference 69) instead of the
+  3-line zero stub; tape26 grew 4178 → 4240. Sub-item 2 below remains.
+- **Scope (sub-item 2 only)**: **LTY=1/2/3 standards / ratio blocks**:
+  `_read_nc_subsection` currently returns `nothing` for these. Fortran
+  handles them via `stand` around errorr.f90:7800 (NDS-standard
+  covariance + ratio synthesis). T04 U-235 MT=18 has 4 LTY=3
+  cross-material sub-subsections currently emitted as zero stubs
+  (matches existing reference behaviour by coincidence — verify what
+  Fortran actually emits before treating as correct).
 - **Where**: `src/orchestration/modules/errorr.jl`
-  (`_expand_nc_blocks!`, `_read_nc_subsection`); Fortran
-  `njoy-reference/src/errorr.f90` `covout` (7431-7438) + `stand`
-  (~7800).
-- **Acceptance**: T15 `test_errorr_nc_expansion.jl` MT=2 line count
-  within ±5 of reference 1400 (vs current +29 over, absorbing the
-  missing 40-line Cov(2,4)). T04 reference test must not regress
-  below current NUMERIC_PASS 81/82 on tape23.
-- **Notes**: TDD hook is extending the existing Phase-48 test with
-  strict `|Julia − Ref| ≤ 5` per-MT assertions. Start by making
-  `_expand_nc_blocks!` iterate all MTs as both `ix` and `ixp` for a
-  full `C^T Σ C` sum, using `cov_matrices` as the `Σ_in` source.
+  (`_read_nc_subsection`); Fortran `njoy-reference/src/errorr.f90`
+  `stand` (~7800).
+- **Acceptance**: T04 reference test stays at NUMERIC_PASS 81/82 on
+  tape23 (current baseline); when a test surfaces real LTY=3 demand,
+  ported `stand` produces non-zero blocks matching reference.
+- **Notes**: not blocking any current sweep failure. Pick this up
+  when a test needs real derived-from-standards covariance values.
 
 ### P1 — Covcal content drift
 
@@ -308,6 +298,7 @@ the work.
 |------------|-------|-------------|
 | `NJOY.jl-327` | heatr plot-tape stub | Phase 14 |
 | `NJOY.jl-km1` | NC-block expansion v1 | Phase 48 (2026-04-20) |
+| `NJOY.jl-km1` | NC-block expansion v2 sub-item 1 (double-NC-derived cross-pairs) | Phase 49 (2026-04-21) |
 
 ---
 

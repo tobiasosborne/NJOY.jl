@@ -855,52 +855,72 @@ construction (errorr.f90:1429-1479) + `covout` accumulation
                     * Cov_in(iy,iyp)[jg,jgp]
 
 Simplifying assumption (valid for T15/T17 U-238 JENDL): input cross-MT
-covariances are zero — every referenced MT in this dataset has NC=0/NI=1
-self-cov only. The double sum collapses to:
+covariances are zero — every non-NC referenced MT in this dataset has
+NC=0/NI=1 self-cov only. The double sum collapses to (with `iz` over
+`refs(ix) ∩ refs(ixp)` for double-NC, or just self for single):
 
-    Cov(mt, mt)        = Σ_i c_i^2 * Cov(ref_i, ref_i)   (self)
-    Cov(mt, ref_j)     = c_j     * Cov(ref_j, ref_j)     (ref_j > mt)
+    Cov(mt, mt)            = Σ_i c_i^2 * Cov_in(ref_i, ref_i)   (self)
+    Cov(mt, ref_j)         = c_j      * Cov_in(ref_j, ref_j)    (single-NC, ref_j > mt)
+    Cov(mt_a, mt_b) [v2]   = Σ_{iz}   c_iz^(a) c_iz^(b) Cov_in(iz, iz)
+                              for both mt_a, mt_b NC-derived (mt_a < mt_b)
 
 The energy mask `[e1, e2]` is applied per group: a row/col `g` is
 in-range iff the group's center energy `√(egn[g] * egn[g+1])` falls in
 [e1, e2]. For T15 single-block full-range NC, the mask is all-true.
 
-Cov_out for the diagonal (mt, mt) explicitly REPLACES any existing
-zero-NI placeholder — Fortran zeros `akxy[derived,derived,k]` (line
-1475), so the explicit NI self-cov contribution is discarded by design.
+Order-independence: input covariances are read once from `cov_matrices`
+into the snapshot `cov_in` before any writes — so an MT's NC-derived
+self-cov is never reused as input to another MT's NC formula. References
+to other NC-derived MTs (whose `Cov_in` self-cov is implicitly zero per
+Fortran `akxy[derived,derived,k]=0`, errorr.f90:1475) are skipped in the
+single-NC pass; their cross-pair entries are computed in the double-NC
+pass instead.
 """
 function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                             nc_blocks::Dict{Int,Vector{NCSubSubsection}},
                             egn::Vector{Float64})
     ngn = length(egn) - 1
     isempty(nc_blocks) && return
+    # Snapshot input covariances. Fortran covout (errorr.f90:7431-7438)
+    # sums over `cov_in` — the explicit NI input — NOT the NC-derived
+    # output. Without this snapshot, processing-order accidents could
+    # let an MT's NC-derived self-cov flow into another MT's NC formula.
+    cov_in = copy(cov_matrices)
+    nc_set = Set(keys(nc_blocks))  # MTs whose Cov_in self is implicitly 0
+
     # Geometric group center used for the [e1, e2] mask. Fortran's `gridd`
     # uses bin-edge containment over the union grid `ek`; on the output
     # grid this reduces to whether the group is wholly inside the range.
     gc = [sqrt(egn[g] * egn[g+1]) for g in 1:ngn]
 
+    function _range_mask(e1::Float64, e2::Float64)
+        m = falses(ngn)
+        @inbounds for g in 1:ngn
+            if gc[g] >= e1 && gc[g] <= e2
+                m[g] = true
+            end
+        end
+        m
+    end
+
+    # ---- Single-NC pass: per-MT self-cov + cross-cov to NON-NC refs ----
     for (mt, blocks) in nc_blocks
-        # Build self-cov + cross-cov for this NC-derived MT, summing
-        # contributions from each NC block over its energy range.
         self_acc = zeros(Float64, ngn, ngn)
         cross_acc = Dict{Int, Matrix{Float64}}()
         any_block = false
 
         for blk in blocks
             blk.lty == 0 || continue
-            # Group mask for this block's energy range
-            in_range = falses(ngn)
-            @inbounds for g in 1:ngn
-                if gc[g] >= blk.e1 && gc[g] <= blk.e2
-                    in_range[g] = true
-                end
-            end
+            in_range = _range_mask(blk.e1, blk.e2)
             any(in_range) || continue
             any_block = true
 
-            # Self-cov contribution: Σ_i c_i^2 Cov(ref_i, ref_i)
+            # Self-cov contribution: Σ_i c_i² Cov_in(ref_i, ref_i). NC-derived
+            # ref_i contributes 0 (Cov_in self-cov is implicitly zero — the
+            # NI input was empty for those MTs).
             for (i, ref_i) in enumerate(blk.mts_ref)
-                cov_ii = get(cov_matrices, (ref_i, ref_i), nothing)
+                ref_i in nc_set && continue
+                cov_ii = get(cov_in, (ref_i, ref_i), nothing)
                 cov_ii === nothing && continue
                 ci = blk.coeffs[i]
                 w = ci * ci
@@ -910,12 +930,12 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                 end
             end
 
-            # Cross-cov contribution: for each ref_j with ref_j > mt,
-            # accumulate c_j * Cov(ref_j, ref_j) into Cov(mt, ref_j)
-            # over the in-range groups.
+            # Cross-cov to NON-NC refs only: c_j · Cov_in(ref_j, ref_j) for
+            # ref_j > mt. Double-NC pairs handled in the next pass.
             for (j, ref_j) in enumerate(blk.mts_ref)
                 ref_j > mt || continue
-                cov_jj = get(cov_matrices, (ref_j, ref_j), nothing)
+                ref_j in nc_set && continue
+                cov_jj = get(cov_in, (ref_j, ref_j), nothing)
                 cov_jj === nothing && continue
                 cj = blk.coeffs[j]
                 M = get!(() -> zeros(Float64, ngn, ngn), cross_acc, ref_j)
@@ -933,6 +953,54 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
             cov_matrices[(mt, ref_j)] = M
         end
     end
+
+    # ---- Double-NC pass: cross-pairs where BOTH endpoints are NC-derived ----
+    # For T15 U-238: Cov(2, 4) = -Σ_{iz ∈ refs(2) ∩ refs(4)} Cov_in(iz, iz)
+    # since refs(4)={51..77,91} are all in refs(2) with c=-1, and in refs(4)
+    # with c=+1, so the per-iz product is -1.
+    mt_keys = sort!(collect(keys(nc_blocks)))
+    for ia in 1:(length(mt_keys) - 1)
+        mt_a = mt_keys[ia]
+        for ib in (ia + 1):length(mt_keys)
+            mt_b = mt_keys[ib]
+            pair_acc::Union{Nothing, Matrix{Float64}} = nothing
+            for blk_a in nc_blocks[mt_a]
+                blk_a.lty == 0 || continue
+                # Coefficient lookup table for blk_a's references.
+                coeff_a = Dict{Int, Float64}()
+                for i in 1:length(blk_a.mts_ref)
+                    coeff_a[blk_a.mts_ref[i]] = blk_a.coeffs[i]
+                end
+                for blk_b in nc_blocks[mt_b]
+                    blk_b.lty == 0 || continue
+                    e1 = max(blk_a.e1, blk_b.e1)
+                    e2 = min(blk_a.e2, blk_b.e2)
+                    e1 < e2 || continue
+                    in_range = _range_mask(e1, e2)
+                    any(in_range) || continue
+
+                    for (j, ref_j) in enumerate(blk_b.mts_ref)
+                        ref_j in nc_set && continue
+                        ca = get(coeff_a, ref_j, nothing)
+                        ca === nothing && continue
+                        cov_jj = get(cov_in, (ref_j, ref_j), nothing)
+                        cov_jj === nothing && continue
+                        w = ca * blk_b.coeffs[j]
+                        if pair_acc === nothing
+                            pair_acc = zeros(Float64, ngn, ngn)
+                        end
+                        @inbounds for ig in 1:ngn, igp in 1:ngn
+                            in_range[ig] && in_range[igp] || continue
+                            pair_acc[ig, igp] += w * cov_jj[ig, igp]
+                        end
+                    end
+                end
+            end
+            pair_acc === nothing && continue
+            cov_matrices[(mt_a, mt_b)] = pair_acc
+        end
+    end
+
     nothing
 end
 
