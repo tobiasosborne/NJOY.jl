@@ -91,6 +91,23 @@ Session rules during the outage:
 
 ---
 
+## Recent Phases (Authoritative — Bead-Independent)
+
+Beads-DB outage means the canonical phase log is here + per-phase worklogs
+under `worklog/T*.md`. Most-recent first.
+
+| Phase | Date       | Topic | Outcome | Worklog |
+|-------|------------|-------|---------|---------|
+| 50    | 2026-04-21 | T15 covcal MT=77 diagnosis (NJOY.jl-f8k) | ROOT CAUSE PINNED — Bug A (writer NK count) + Bug B (midpoint sampling vs XS·flux-weighted union-grid expansion). Fortran trace in `/tmp/t15_fortran_diag/stdout.log`. **No code changes** — implementation deferred. | `worklog/T15_covcal_mt77_diagnosis.md` |
+| 49    | 2026-04-21 | T15 errorr MF33 NC v2 sub-item 1 (double-NC cross-pairs) | Cov(2, 4) sub-section 3 → 65 lines (ref 69). T15 tape26 4178 → 4240. T04 baseline preserved. | `worklog/T15_T17_errorr_nc_expansion_v2.md` |
+| 48    | 2026-04-20 | T15 errorr MF33 NC v1 (LTY=0 single-NC) | Cov(MT=2, *) and Cov(MT=4, *) cross-pairs to non-NC refs computed. T15 tape26 1859 → 4178. | `worklog/T15_T17_errorr_nc_expansion.md` |
+| 47    | 2026-04-20 | errorr MF33 sparse per-row emission | T15 tape26 8205 → 1859 via Fortran-style ng2==0 row skip. | `worklog/T15_errorr_mf33_sparse.md` |
+| 46    | 2026-04-19 | errorr GENDF MF3 readback | T15 tape26 MF3 0 → 36 MTs. | `worklog/T15_errorr_gendf_readback.md` |
+| 45    | 2026-04-19 | groupr auto-expand reaction MTs from PENDF | T15 tape91 MF3 7 → 39 MTs (ref 40). | `worklog/T15_groupr_auto_expand.md` |
+| 44    | 2026-04-18 | T15/T17 errorr MF33 size cap | Avoid 30M-line MF33 OOM by per-row sparse emission. | `worklog/T15_T17_errorr_size.md` |
+
+Older phases (10-43) are recorded in commit messages and individual worklogs.
+
 ## Open Work (Authoritative — Bead-Independent)
 
 Each entry below is fully self-contained: scope, file locations, Fortran
@@ -121,31 +138,164 @@ the work.
 - **Notes**: not blocking any current sweep failure. Pick this up
   when a test needs real derived-from-standards covariance values.
 
-### P1 — Covcal content drift
+### P1 — Covcal content drift (NJOY.jl-f8k) — ROOT CAUSE PINNED 2026-04-21
 
 - **Retired bead**: `NJOY.jl-f8k`.
-- **Scope**: Julia's covariance matrix *values* (not just line counts)
-  drift from Fortran for several MTs on T15 tape26. MT=77 self-cov is
-  a known canary — Julia emits 30 lines, reference 20, values differ.
-  Same pattern surfaced on other high-MT inelastic channels and
-  MT=18 (T15_errorr_mf33_sparse.md "MT=77 +10 (NJOY.jl-f8k)").
-  After Phase-48 NC expansion the residual −1780-line T15 tape26 gap
-  (4178 Julia vs 5958 ref) is overwhelmingly concentrated here
-  (specifically in the 34 non-NC-derived MTs' self-cov matrices —
-  those went from 1347 pre-fix to 1347 post-fix unchanged, target
-  3149 from reference; gap = 1802).
-- **Where**: `src/orchestration/modules/errorr.jl`
-  `expand_covariance_block` (called from the NI-expansion loop ~line
-  160) vs. Fortran `covcal` + `resprp` pipeline at errorr.f90:7170-7188.
-  Root cause almost certainly an LB=5/6 LT=1 (symmetric) reconstruction
-  or row-extent (nonzero bounds) mismatch.
-- **Acceptance**: T15 tape26 total grows past 5500 lines;
-  `test_errorr_mf33_sparse.jl` `populated_self_cov_mts` loop asserts
-  `jl <= ref + 5` instead of `ref + 15`.
-- **Notes**: estimated ~half day. Build a RED→GREEN test that compares
-  a single-MT (MT=77) matrix element-wise against reference extracted
-  from `njoy-reference/tests/15/referenceTape26` MF=33 MT=77 —
-  pin the exact divergent cell before touching code.
+- **Status (2026-04-21, post Phase 50 diagnosis)**: Two distinct bugs
+  pinned via the Grind Method and a Fortran `write(*,...)` trace. See
+  `worklog/T15_covcal_mt77_diagnosis.md` for the full walkthrough
+  (extracted MT=77 sub-sections, 990-line Fortran trace, exact
+  algorithm derivation). **Implementation deferred** — substantial
+  refactor; nothing landed yet on this front.
+
+- **Scope (overall)**: Julia's covariance matrix *values* (not just
+  line counts) drift from Fortran on T15/T17 tape26 for the 34
+  non-NC-derived MTs. After Phase-49 NC v2 the residual gap is
+  4240 Julia vs 5958 ref = −1718 lines, almost entirely from this.
+
+#### Bug A — writer: missing zero-stub cross-pairs (small)
+
+- **Symptom**: Reference T15 MF33 MT=77 has NK=3 sub-sections (self
+  + zero-stub crosses with MT=91 and MT=102). Julia emits NK=1 (only
+  self). Generalises across other MTs.
+- **Where**: `src/orchestration/modules/errorr.jl` `_write_errorr_tape`
+  pair iteration (lines ~1002-1011). Currently auto-synthesises pairs
+  only for `mt in nc_derived_mts` (`mt2 > mt in reaction_mts`); should
+  do the same for any non-NC MT whose ENDF input declares multiple
+  sub-sections in `listed_pairs` (or, more simply, always synthesize
+  zero-stubs for `mt2 > mt in reaction_mts` and let the writer's
+  `_write_mfcov_rows` last-row-stub branch emit a 2-line stub for the
+  empty matrix).
+- **Risk**: needs to verify which pairs Fortran actually writes —
+  not every (mt, mt2) cross is emitted, only those that appear in the
+  input ENDF or are computed downstream. Look at how `iy/iyp` indexing
+  in covout (errorr.f90:7393-7400) selects pairs to emit, and confirm
+  on a non-MT=77 sample (e.g. MT=51 should emit crosses with all
+  partials 52-77 + 91 + 102).
+- **Acceptance**: T15 MT=77 NK = 3 (matches ref). Generalised across
+  the 34 non-NC-derived MTs.
+- **Estimated cost**: 1-2 hours.
+
+#### Bug B — `expand_lb5_symmetric` midpoint sampling (large)
+
+- **Symptom (canary)**: T15 MAT=9237 MF=33 MT=77 self-cov, output
+  group 20 (LANL [1.353e6, 1.738e6]):
+  - **Reference**: `2.987998e-2`
+  - **Julia**: `4.000000e-2` (exactly the input bin's verbatim value)
+  - The "round" Julia values across the entire matrix (4.0e-2,
+    3.8e-2, 3.6e-2, etc.) are direct samples from MT=77's LB=5
+    block with NO group averaging.
+- **Where (bug)**: `src/processing/errorr.jl:70-82`
+  `expand_lb5_symmetric` does midpoint-sampling: for each output group
+  pair (g_i, g_j) it copies the single input bin value at the
+  midpoint via `_find_bin(0.5*(egrid[i]+egrid[i+1]), ek)`. No
+  group averaging at all. Same issue in `expand_lb5_full` (LB=6).
+  `expand_lb1`/`expand_lb2` likely have analogous midpoint-only bugs
+  but smaller blast radius (LB=1/2 are diagonal, simpler structure).
+- **Where (caller)**: `src/orchestration/modules/errorr.jl:168` calls
+  `expand_covariance_block(block, egn)` directly with the OUTPUT
+  group grid `egn`, bypassing the union-grid + flux/XS-weighted
+  collapse path. The `multigroup_covariance` path in
+  `src/processing/errorr.jl:137` exists with a union-grid collapse
+  but is unused by the orchestration.
+
+- **Reference algorithm (Fortran covcal, errorr.f90:1770-2417)**:
+  Build union grid `un = sort(unique(egn ∪ all_input_bin_edges))`.
+  For each (jg, jh) of union groups (jh ≤ jg, symmetric):
+  1. Find input bin `k = bin(un[jg])`, `l = bin(un[jh])`.
+  2. Look up cov: `LB5_fvals[k, l]` (upper-tri index for LT=1).
+  3. Accumulate `cov[jh] += LB5_fvals[k, l] * sig(jg) * sig1(jh)`
+     (errorr.f90:2233 — XS·XS weighted at union-group level).
+  4. After per-row accumulation, write
+     `b[jg, jh] = cov[jh] * flx(jg) * flx(jh)` (errorr.f90:2341 —
+     also flux-weighted).
+  In `covout` (errorr.f90:7431-7438), collapse to output by summation
+  over (jg→ig, jh→igp). Final relative cov (per the writer's reverse
+  conversion):
+  ```
+  C_out_rel[ig, igp] = (Σ b[jg,jh]) / (sig_out[ig]·sig_out[igp]·flx_out[ig]·flx_out[igp])
+  ```
+  For piecewise-constant XS within an output group this collapses to
+  pure flux-weighted averaging of the input fvals over (ig × igp).
+
+- **Trace evidence (Phase 50)**: 990 DIAG lines in
+  `/tmp/t15_fortran_diag/stdout.log` (regenerable — patch
+  `errorr.f90:2230` per the diagnosis worklog). For LANL group 20
+  there are **9 union groups** (jg ∈ 56..64) covering 1.35e6 → 1.738e6,
+  with `sig` varying 7.46e-5 → 8.13e-3 across them. Bin 1
+  (`[1e-5, 1.4e6]`) is sub-threshold (zero LB-block contribution) and
+  drags the average from 4.0e-2 down to the reference 2.988e-2.
+
+- **Implementation plan (next session)**:
+  1. **Union grid**: in `errorr_module`, compute
+     `ugrid = sort(unique([egn..., (b.energies for b in all_blocks)..., ...]))`.
+  2. **Per-union-group XS** `sig_u[g]`: assign piecewise-constant from
+     `group_xs[mt][ig_containing(g)]` as a first pass; later iteration
+     can interpolate from the PENDF for higher fidelity.
+  3. **Per-union-group flux** `flx_u[g]`: first pass use lethargy
+     `log(ugrid[g+1]/ugrid[g])` or bin width `ugrid[g+1] - ugrid[g]`;
+     real flux from groupr's GENDF tape (the `flx` array) in a
+     follow-up.
+  4. **Sandwich on union grid**:
+     ```julia
+     b[g, h] = LB5_fvals[k(g), k(h)] * sig_u[g] * sig_u[h] * flx_u[g] * flx_u[h]
+     ```
+  5. **Collapse to output**:
+     ```julia
+     for ig in 1:ngn, igp in 1:ngn
+       num = sum(b[g,h] for g→ig, h→igp)
+       den = (Σ sig_u[g]·flx_u[g] for g→ig) · (Σ sig_u[h]·flx_u[h] for h→igp)
+       C_out[ig, igp] = num / den
+     end
+     ```
+  6. **Bug A in same pass**: writer auto-synthesis of zero-stub
+     cross-pairs for non-NC MTs.
+
+- **TDD hook (RED → GREEN)**:
+  Extend `test/validation/test_errorr_mf33_sparse.jl` with element-wise
+  assertions on the MT=77 canary cell:
+  ```julia
+  @test abs(jul_mt77[20, 20] - 2.987998e-2) < 1e-6
+  @test jul_pair_lines[(77, 91)] >= 2     # zero-stub presence
+  @test jul_pair_lines[(77, 102)] >= 2
+  ```
+  Plus relax/tighten the global gap assertion as expected line counts
+  shift (target T15 tape26 total > 5500 lines).
+
+- **Acceptance**:
+  - MT=77 self-cov C[20,20] within 1e-6 of reference 2.987998e-2.
+  - MT=77 NK = 3 sub-sections (self + 2 zero stubs).
+  - MT=77 total line count drops from 30 → ~20.
+  - T15 tape26 total > 5500 lines (vs current 4240, ref 5958).
+  - T04 reference test does NOT regress below NUMERIC_PASS 81/82 on
+    tape23 (the MF31 path uses the same expand pipeline; LB=2 nubar
+    blocks are smaller and may already be close, but verify).
+  - `test_errorr_mf33_sparse.jl` and `test_errorr_gendf_readback.jl`
+    must still pass; the per-MT line-count bands in the sparse test
+    will need re-tuning as line counts fall toward reference.
+
+- **Estimated cost**: ~half day for first iteration (piecewise-constant
+  XS + lethargy flux); another ~half day for fidelity work (real
+  per-bin XS + GENDF flux read).
+
+- **Risk / known scope-creep**:
+  - LB=6 (asymmetric) needs the same union-grid treatment.
+  - LB=1/2 (diagonal) probably needs the same averaging — currently
+    `expand_lb1` and `expand_lb2` also bin-sample at midpoint, so they
+    likely have the same class of bug for fine-output / coarse-input
+    cases. Worth checking once LB=5 lands.
+  - Bug A change in the writer affects every MT, not just MT=77 —
+    will likely shift the T15 tape26 line count by hundreds of lines
+    via zero-stub additions to each non-NC MT's sub-section list.
+
+- **Where to look in Fortran (subroutines to read first)**:
+  - `covcal` (errorr.f90:1770-2417) — main loop
+  - `covcal` LB=5 branch (errorr.f90:2208-2235) — the per-pair lookup
+  - `covcal` per-row write (errorr.f90:2336-2353) — flux multiplication
+  - `covout` (errorr.f90:7018-7787) — collapse from union grid to
+    output groups; pair iteration (lines ~7393-7440)
+  - `resprp` (errorr.f90:8009-8511) — NOT relevant for MT=77 (that's
+    resonance-parameter covariance, used only when MF=32 present).
 
 ### P2 — groupr: skip empty-MT, derive MT=251/252
 
