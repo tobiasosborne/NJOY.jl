@@ -2,8 +2,9 @@
 
 A Julia port of [NJOY2016](https://github.com/njoy/NJOY2016) — the standard
 nuclear data processing system used worldwide for reactor physics, criticality
-safety, and radiation transport. The original is ~120,000 lines of Fortran 90;
-this port is ~15,000 lines of idiomatic Julia.
+safety, and radiation transport. The Fortran reference is ~100 k lines of
+Fortran 90 in `njoy-reference/src/`; this port is ~24 k lines of idiomatic
+Julia in `src/` (cloc, code-only, as of Phase 51).
 
 **Goal**: bit-identical output on all 84 of NJOY's own reference tests. Same
 ENDF input, same `tapeNN` output, byte-for-byte (or within published
