@@ -23,11 +23,20 @@ cross-compiler tolerance; see `reports/ACCEPTANCE_CRITERIA.md`).
 - **Active front**: `errorr` covariance. T15/T17 (U-238 JENDL) MF33
   matrix values now match Fortran covcal exactly for LB=5 blocks after
   Phase 51's σ·flx-weighted union-grid collapse fix.
-- **Active gaps**: `leapr`, `purr`, `covr`, `plotr`, `gaspr`, `ccccr` are
-  dispatch stubs that copy/touch tapes without computing real output.
-  Thermal-scattering (`thermr`) supports free-gas and S(α, β) but falls
-  back to a hardcoded Debye-Waller integral. `acer` covers `iopt=1` fast
-  neutron ACE; thermal/photo/dosimetry ACE paths are stubs.
+- **Unwired algorithms**: `leapr` (S(α, β) phonon expansion), `purr`
+  (probability tables via Monte-Carlo ladders), `covr` (correlation
+  matrix + boxer output), `gaspr` (MT203-207 gas-production), and the
+  CCCC ISOTXS/BRKOXS/DLAYXS writers each have a working implementation
+  in `src/processing/` or `src/formats/` (~200-280 LOC of real physics
+  per module), but the orchestration wrappers in
+  `src/orchestration/modules/` just copy/touch tapes — the connecting
+  plumbing (input-deck parsing, tape splicing, ENDF/CCCC emit) has not
+  been wired up.
+- **Other gaps**: `plotr` (plot-command tape emission) has no backing
+  implementation yet. `thermr` supports free-gas and S(α, β) but
+  hard-codes the Debye-Waller integral to graphite. `acer` covers
+  `iopt=1` fast-neutron ACE; thermal/photo/dosimetry ACE paths are
+  stubs.
 
 See [HANDOFF.md](HANDOFF.md) for the living project state (current phase,
 open work, traps, per-test status) and `worklog/T*.md` for per-session
@@ -111,13 +120,17 @@ table lives in `src/orchestration/pipeline.jl`.
 
 ### Module status
 
-Classification:
-- **Real** — dispatches to substantial processing code with output
-  matching Fortran (not just a tape copy).
-- **Partial** — real implementation but key features or reaction classes
-  missing; may degrade gracefully on unsupported inputs.
-- **Stub** — tape copy / empty touch / warn-and-skip; output does not
-  carry physics.
+Classification refers to the **orchestration wrapper** in
+`src/orchestration/modules/`, which is what `run_njoy` actually invokes:
+- **Real** — wrapper dispatches to substantial processing code; output
+  matches Fortran to a documented tolerance.
+- **Partial** — wrapper dispatches real code, but key features or
+  reaction classes are missing; may degrade gracefully on unsupported
+  inputs.
+- **Unwired** — algorithm is implemented in `src/processing/` or
+  `src/formats/`, but the orchestration wrapper is a tape copy / empty
+  touch / marker file; the connecting plumbing (input-deck parsing,
+  tape splicing, ENDF emit) has not been wired up.
 
 | Module | Class | Backing files | Notes |
 |--------|-------|---------------|-------|
@@ -134,12 +147,12 @@ Classification:
 | `dtfr` | Partial | `src/formats/dtfr.jl` | DTF table + 3D photon-scatter plot tape; accuracy unverified |
 | `matxsr` | Partial | `src/formats/matxsr*.jl` | MATXS record layout; scatter matrices P0-only |
 | `viewr` | Partial | `src/viewr/*.jl` | Renders real tapes when upstream plot module populated |
-| `purr` | Stub | `src/processing/purr.jl` | Pass-through; `generate_ptable` exists but not wired |
-| `leapr` | Stub | `src/processing/leapr.jl` | Empty touch; thermr degrades to free-gas |
-| `covr` | Stub | `src/processing/covr.jl` | Empty touch |
-| `plotr` | Stub | — | Empty touch |
-| `gaspr` | Stub | `src/processing/gaspr.jl` | PENDF pass-through |
-| `ccccr` | Stub | `src/formats/ccccr*.jl` | Marker files only |
+| `purr` | Unwired | `src/processing/purr.jl` (255 LOC) | `generate_ptable` (MC ladders + chi²/Wigner sampling + Doppler + Bondarenko self-shielding) ported; wrapper copies PENDF, MT152 emission not wired |
+| `leapr` | Unwired | `src/processing/leapr.jl` (264 LOC) | `generate_sab` (phonon expansion, convolution, discrete oscillators, SCT fallback) ported; wrapper touches empty file, MF7 emission not wired |
+| `covr` | Unwired | `src/processing/covr.jl` (283 LOC) | Correlation conversion + relative std dev + boxer format ported; wrapper touches empty file, plotr-format emission not wired |
+| `gaspr` | Unwired | `src/processing/gaspr.jl` (252 LOC) | `gas_production` + `gas_multiplicity` (MT203-207) ported; wrapper copies PENDF, MT20x splicing not wired |
+| `ccccr` | Unwired | `src/formats/ccccr*.jl` (399 LOC) | `write_isotxs` / `write_brkoxs` / `write_dlayxs` (CCCC-IV binary record format) ported; wrapper writes marker files, GENDF parsing not wired |
+| `plotr` | Stub | — | No backing implementation yet; wrapper touches empty file |
 
 ### Resonance formalisms (RECONR)
 
