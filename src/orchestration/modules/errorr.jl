@@ -113,6 +113,7 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # for `mt2 > mt in reaction_mts` (Phase-47) get real values where the
     # NC formula populates them; the rest stay as zero stubs.
     cov_matrices = Dict{Tuple{Int,Int}, Matrix{Float64}}()
+    pair_blocks = Dict{Tuple{Int,Int}, Vector{CovarianceBlock}}()
     listed_pairs = Set{Tuple{Int,Int}}()
     nc_derived_mts = Set{Int}()
     nc_blocks = Dict{Int, Vector{NCSubSubsection}}()
@@ -140,7 +141,10 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                             break
                         end
                     end
-                    # Only expand NI blocks from standalone sub-sections (nc==0)
+                    # Only collect NI blocks from standalone sub-sections (nc==0).
+                    # Actual expansion happens in `_collapse_pair_blocks!`
+                    # below, which routes LB=5/6 through covcal-style
+                    # σ·flx-weighted union-grid collapse.
                     for _ in 1:ni
                         try
                             lst = read_list(io)
@@ -165,13 +169,7 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                             else
                                 continue
                             end
-                            C = expand_covariance_block(block, egn)
-                            key = (mt, mt2)
-                            if haskey(cov_matrices, key)
-                                cov_matrices[key] .+= C
-                            else
-                                cov_matrices[key] = C
-                            end
+                            push!(get!(pair_blocks, (mt, mt2), CovarianceBlock[]), block)
                         catch e
                             @debug "errorr: skipping NI block: $e"
                         end
@@ -182,6 +180,17 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
             @warn "errorr: covariance failed for MT=$mt: $e"
         end
     end
+
+    # Expand collected NI blocks into per-pair matrices. LB=5/6 routes
+    # through the Fortran covcal σ·flx-weighted union-grid collapse:
+    #   b[jg,jh] = fvals · sig(jg)·sig1(jh) · flx(jg)·flx(jh)
+    # (errorr.f90:2208-2235 LB=5 accumulate, 2336-2353 per-row write);
+    # covout collapses Σ b over (jg→ig, jh→igp) and divides by
+    # (Σ sig·flx for ig)·(Σ sig·flx for igp), which equals σ·flx-weighted
+    # averaging of the relative LB=5 fvals within each (ig, igp)
+    # rectangle. LB=0/1/2 stay on direct midpoint expansion onto `egn`
+    # until a canary for that class surfaces.
+    _collapse_pair_blocks!(cov_matrices, pair_blocks, egn, group_xs)
 
     # NC-derived covariance expansion. For each MT with LTY=0 NC blocks,
     # populate cov_matrices[(mt, mt)] (self-cov) and cov_matrices[(mt, ref_j)]
@@ -841,6 +850,126 @@ function _read_nc_subsection(io::IO)
         push!(mts_ref, Int(lst.data[2j]))       # XMTI (stored as float)
     end
     NCSubSubsection(lty, e1, e2, coeffs, mts_ref)
+end
+
+"""
+    _collapse_pair_blocks!(cov_matrices, pair_blocks, egn, group_xs)
+
+Expand collected NI blocks per (mt, mt2) pair. LB=5/6 blocks are routed
+through a Fortran covcal σ·flx-weighted union-grid collapse; LB=0/1/2
+fall back to direct midpoint expansion onto `egn` (unchanged behaviour).
+
+For LB=5/6 the union grid is `egn ∪ ⋃ block.energies` clipped to `egn`'s
+range. Each union cell's midpoint falls in exactly one input bin, so the
+block expansion is piecewise-constant per cell. Per-union-cell σ comes
+from `group_xs[mt][ig]` for the output group `ig` containing the cell
+(piecewise-constant — TODO: interpolate from PENDF for higher fidelity).
+Per-union-cell flux is lethargy `log(E_hi / E_lo)` — a 1/E approximation
+that matches Fortran iwt=2/3 behaviour for the resonance + fast regions.
+Real per-union-cell flux from groupr's GENDF tape is a follow-up.
+
+When `group_xs[mt]` or `group_xs[mt2]` is missing (rare — signals an MT
+with covariance but no MF3 XS), the pair falls back to direct expansion
+to preserve existing test outputs.
+
+Ref: errorr.f90:1770-2417 `covcal`; 2208-2235 LB=5 branch; 2336-2353
+per-row b = cov·flx(jg)·flx(jh); 7431-7438 `covout` collapse.
+"""
+function _collapse_pair_blocks!(
+    cov_matrices::Dict{Tuple{Int,Int}, Matrix{Float64}},
+    pair_blocks::Dict{Tuple{Int,Int}, Vector{CovarianceBlock}},
+    egn::Vector{Float64},
+    group_xs::Dict{Int, Vector{Float64}})
+    ngn = length(egn) - 1
+    elo, ehi = egn[1], egn[end]
+
+    for ((mt, mt2), blocks) in pair_blocks
+        isempty(blocks) && continue
+
+        # Split by LB class. LB=5/6 go through the weighted-collapse
+        # path; LB=0/1/2 keep direct-expansion (legacy).
+        weighted_blocks = [b for b in blocks if b.lb in (5, 6)]
+        direct_blocks   = [b for b in blocks if b.lb in (0, 1, 2)]
+
+        acc::Union{Nothing, Matrix{Float64}} = nothing
+        function _accumulate!(M::Matrix{Float64})
+            if acc === nothing
+                acc = copy(M)
+            else
+                acc .+= M
+            end
+        end
+
+        xs_mt  = get(group_xs, mt,  Float64[])
+        xs_mt2 = get(group_xs, mt2, Float64[])
+        have_xs = !isempty(xs_mt) && !isempty(xs_mt2) &&
+                  length(xs_mt) == ngn && length(xs_mt2) == ngn
+
+        if !isempty(weighted_blocks) && have_xs
+            # Union grid: output bounds ∪ all block breakpoints, clipped.
+            pts = Set{Float64}(Float64.(egn))
+            for b in weighted_blocks, e in b.energies
+                elo <= e <= ehi && push!(pts, Float64(e))
+            end
+            ugrid = sort!(collect(pts))
+            nu = length(ugrid) - 1
+            if nu >= 1
+                xs_u_row = zeros(Float64, nu)
+                xs_u_col = zeros(Float64, nu)
+                flx_u    = zeros(Float64, nu)
+                for k in 1:nu
+                    u_lo = ugrid[k]; u_hi = ugrid[k+1]
+                    # σ per union cell: output-group-averaged σ, keyed by
+                    # the LANL group containing the cell's lower bound
+                    # (Fortran covcal uses `eg = un(jg)` = lower bound;
+                    # see errorr.f90:2088). The cell lies entirely within
+                    # one output group because `ugrid` includes every
+                    # `egn` boundary.
+                    ig = _find_output_group(u_lo, egn, ngn)
+                    ig == 0 && continue
+                    xs_u_row[k] = xs_mt[ig]
+                    xs_u_col[k] = xs_mt2[ig]
+                    # Per-union-cell integrated flux. For iwt=2 (flat
+                    # weight, T15), GENDF group flux is proportional to
+                    # the group's energy width, so assigning bin width
+                    # to the union cell matches Fortran's flx(jg). For
+                    # iwt=3 (1/E), lethargy `log(u_hi/u_lo)` is the right
+                    # shape. Mixed / analytic weights need a real flux
+                    # read from the GENDF MT=1 records — deferred.
+                    flx_u[k] = u_hi - u_lo
+                end
+                cm = multigroup_covariance(weighted_blocks, egn;
+                    xs_row=xs_u_row, xs_col=xs_u_col,
+                    flux=flx_u, ugrid=ugrid)
+                _accumulate!(cm.matrix)
+            end
+        else
+            # Fallback: σ missing → legacy direct expansion on egn.
+            for b in weighted_blocks
+                _accumulate!(expand_covariance_block(b, egn))
+            end
+        end
+
+        for b in direct_blocks
+            _accumulate!(expand_covariance_block(b, egn))
+        end
+
+        acc === nothing && continue
+        if haskey(cov_matrices, (mt, mt2))
+            cov_matrices[(mt, mt2)] .+= acc
+        else
+            cov_matrices[(mt, mt2)] = acc
+        end
+    end
+    return cov_matrices
+end
+
+"Output-group index containing `e`; 0 if outside `egn`."
+function _find_output_group(e::Float64, egn::Vector{Float64}, ngn::Int)
+    @inbounds for g in 1:ngn
+        egn[g] <= e < egn[g+1] && return g
+    end
+    e == egn[end] ? ngn : 0
 end
 
 """

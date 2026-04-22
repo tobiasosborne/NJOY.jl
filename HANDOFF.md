@@ -98,6 +98,7 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
+| 51    | 2026-04-22 | T15 covcal LB=5 σ·flx-weighted collapse (NJOY.jl-f8k Bug B) | **FIX LANDED.** MT=77 self-cov C[20,20] 0.04 → 0.02987998 (exact match to ref). `multigroup_covariance` extended with xs_row/xs_col/ugrid kwargs; orchestration refactored to collect blocks per (mt, mt2) pair and route LB=5/6 through union-grid σ·flx-weighted collapse. For iwt=2, flux = bin width (matches GENDF). T04 MF31 unchanged. | `worklog/T15_covcal_lb5_weighted.md` |
 | 50    | 2026-04-21 | T15 covcal MT=77 diagnosis (NJOY.jl-f8k) | ROOT CAUSE PINNED — Bug A (writer NK count) + Bug B (midpoint sampling vs XS·flux-weighted union-grid expansion). Fortran trace in `/tmp/t15_fortran_diag/stdout.log`. **No code changes** — implementation deferred. | `worklog/T15_covcal_mt77_diagnosis.md` |
 | 49    | 2026-04-21 | T15 errorr MF33 NC v2 sub-item 1 (double-NC cross-pairs) | Cov(2, 4) sub-section 3 → 65 lines (ref 69). T15 tape26 4178 → 4240. T04 baseline preserved. | `worklog/T15_T17_errorr_nc_expansion_v2.md` |
 | 48    | 2026-04-20 | T15 errorr MF33 NC v1 (LTY=0 single-NC) | Cov(MT=2, *) and Cov(MT=4, *) cross-pairs to non-NC refs computed. T15 tape26 1859 → 4178. | `worklog/T15_T17_errorr_nc_expansion.md` |
@@ -138,15 +139,16 @@ the work.
 - **Notes**: not blocking any current sweep failure. Pick this up
   when a test needs real derived-from-standards covariance values.
 
-### P1 — Covcal content drift (NJOY.jl-f8k) — ROOT CAUSE PINNED 2026-04-21
+### P1 — Covcal content drift (NJOY.jl-f8k) — BUG B LANDED 2026-04-22; BUG A OPEN
 
 - **Retired bead**: `NJOY.jl-f8k`.
-- **Status (2026-04-21, post Phase 50 diagnosis)**: Two distinct bugs
-  pinned via the Grind Method and a Fortran `write(*,...)` trace. See
-  `worklog/T15_covcal_mt77_diagnosis.md` for the full walkthrough
-  (extracted MT=77 sub-sections, 990-line Fortran trace, exact
-  algorithm derivation). **Implementation deferred** — substantial
-  refactor; nothing landed yet on this front.
+- **Status (2026-04-22, post Phase 51)**: **Bug B fixed** —
+  `multigroup_covariance` extended with xs/flx weighting; orchestration
+  refactored to route LB=5/6 through union-grid σ·flx-weighted collapse
+  matching Fortran covcal. T15 MT=77 C[20, 20] = 0.02987998 (exact
+  match to reference). Full walkthrough in
+  `worklog/T15_covcal_lb5_weighted.md`. **Bug A (writer NK count) still
+  open** — see below.
 
 - **Scope (overall)**: Julia's covariance matrix *values* (not just
   line counts) drift from Fortran on T15/T17 tape26 for the 34

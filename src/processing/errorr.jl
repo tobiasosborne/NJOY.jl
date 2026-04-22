@@ -132,12 +132,27 @@ end
 When `is_relative` is not explicitly provided, it is inferred from the LB flags:
 LB=0 indicates absolute covariance, so if all blocks have LB=0 the result is
 marked absolute. Otherwise the result is marked relative (the common case for
-LB=1..6). An optional `flux` vector (one value per fine-grid bin) enables
-flux-weighted collapse matching the Fortran ERRORR module."""
+LB=1..6). An optional `flux` vector (one value per union-grid cell) enables
+flux-weighted collapse matching the Fortran ERRORR module.
+
+`xs_row` and `xs_col` (per union-grid cell) enable the Fortran covcal
+σ·flx-weighted collapse used for LB=5/LB=6 blocks — see errorr.f90:2233
+(`cov(jh) += fvals · sig(jg) · sig1(jh)`) + errorr.f90:2341
+(`b[jg,jh] = cov(jh) · flx(jg) · flx(jh)`). When either is given, the row
+and column collapse weights are built from `xs_row·flux` and `xs_col·flux`
+independently, giving `C_out = T_row · C_fine · T_col'` — the correct
+averaging of a relative covariance over an output (ig, igp) rectangle.
+
+`ugrid` allows the caller to supply a pre-computed union grid (e.g. one
+already aligned with `xs_row` / `xs_col` / `flux`). Otherwise the union
+of `group_bounds` with each block's energies is used."""
 function multigroup_covariance(blocks::AbstractVector{CovarianceBlock},
                                 group_bounds::AbstractVector{<:Real};
                                 is_relative::Union{Bool,Nothing}=nothing,
-                                flux::Union{Nothing,AbstractVector{<:Real}}=nothing)
+                                flux::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                                xs_row::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                                xs_col::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                                ugrid::Union{Nothing,AbstractVector{<:Real}}=nothing)
     isempty(blocks) && error("no covariance blocks provided")
     ng = length(group_bounds) - 1
     mt1, mt2 = blocks[1].mt1, blocks[1].mt2
@@ -150,20 +165,41 @@ function multigroup_covariance(blocks::AbstractVector{CovarianceBlock},
         is_relative = !all(b -> b.lb == 0, blocks)
     end
 
-    # Check total fine grid size to avoid OOM
+    weighted = xs_row !== nothing || xs_col !== nothing
+
+    # OOM guard — legacy direct-to-group path when no σ/flx weighting
+    # is requested. Bypassed entirely for the covcal-style collapse.
     total_e = sum(length(b.energies) for b in blocks) + ng + 1
-    if total_e > 10000
-        # Direct expansion onto group grid (no fine-grid intermediate)
+    if total_e > 10000 && !weighted
         C_group = zeros(Float64, ng, ng)
         for block in blocks; C_group .+= expand_covariance_block(block, gb); end
+        C_group = 0.5 * (C_group + C_group')
+        return CovarianceMatrix(mt1, mt2, gb, C_group, is_relative)
+    end
+
+    ug = ugrid === nothing ? _build_union_grid(blocks, gb) : collect(Float64, ugrid)
+    nu = length(ug) - 1
+    nu <= 0 && error("union grid has no cells")
+
+    C_fine = zeros(Float64, nu, nu)
+    for block in blocks; C_fine .+= expand_covariance_block(block, ug); end
+
+    if weighted
+        flx = flux === nothing ? fill(1.0, nu) : collect(Float64, flux)
+        length(flx) == nu ||
+            error("flux length $(length(flx)) ≠ nu=$nu (ugrid cells)")
+        xr = xs_row === nothing ? fill(1.0, nu) : collect(Float64, xs_row)
+        xc = xs_col === nothing ? fill(1.0, nu) : collect(Float64, xs_col)
+        length(xr) == nu || error("xs_row length $(length(xr)) ≠ nu=$nu")
+        length(xc) == nu || error("xs_col length $(length(xc)) ≠ nu=$nu")
+        T_row = _collapse_matrix(ug, gb; weights=xr .* flx)
+        T_col = _collapse_matrix(ug, gb; weights=xc .* flx)
+        C_group = T_row * C_fine * T_col'
     else
-        ugrid = _build_union_grid(blocks, gb)
-        nu = length(ugrid) - 1
-        C_fine = zeros(Float64, nu, nu)
-        for block in blocks; C_fine .+= expand_covariance_block(block, ugrid); end
-        T = _collapse_matrix(ugrid, gb; flux=flux)
+        T = _collapse_matrix(ug, gb; flux=flux)
         C_group = T * C_fine * T'
     end
+
     C_group = 0.5 * (C_group + C_group')
     CovarianceMatrix(mt1, mt2, gb, C_group, is_relative)
 end
@@ -290,24 +326,28 @@ function _build_union_grid(blocks::AbstractVector{CovarianceBlock}, gb::Abstract
 end
 
 function _collapse_matrix(ugrid::AbstractVector{<:Real}, gb::AbstractVector{<:Real};
-                          flux::Union{Nothing,AbstractVector{<:Real}}=nothing)
+                          flux::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                          weights::Union{Nothing,AbstractVector{<:Real}}=nothing)
     ng = length(gb)-1; nu = length(ugrid)-1; T = zeros(Float64, ng, nu)
-    if flux !== nothing && length(flux) == nu
-        # Flux-weighted collapse (matching Fortran ERRORR)
-        # T[g,k] = flux[k] * overlap / (sum of flux*overlap in group g)
-        group_flux = zeros(Float64, ng)
+    # `weights` is the unified per-union-cell weight API (e.g. σ·flx for
+    # Fortran covcal). `flux` is retained for backward compat — used when
+    # no `weights` is provided.
+    w = weights === nothing ? flux : weights
+    if w !== nothing && length(w) == nu
+        group_w = zeros(Float64, ng)
         for k in 1:nu
             u_lo, u_hi = ugrid[k], ugrid[k+1]; u_w = u_hi - u_lo; u_w <= 0 && continue
             for g in 1:ng
                 ov = min(u_hi, gb[g+1]) - max(u_lo, gb[g])
                 if ov > 0
-                    T[g,k] = flux[k] * ov / u_w
-                    group_flux[g] += flux[k] * ov / u_w
+                    contrib = w[k] * ov / u_w
+                    T[g,k] = contrib
+                    group_w[g] += contrib
                 end
             end
         end
         for g in 1:ng
-            group_flux[g] > 0 && (T[g,:] ./= group_flux[g])
+            group_w[g] > 0 && (T[g,:] ./= group_w[g])
         end
     else
         # Area-weighted collapse (flat flux assumption)
