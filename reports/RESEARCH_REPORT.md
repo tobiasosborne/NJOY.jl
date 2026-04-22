@@ -12,7 +12,7 @@
 
 ### 1.1 All 39 Source Files
 
-NJOY2016 consists of 119,613 total lines of Fortran 90 across 39 files:
+NJOY2016 consists of 39 Fortran 90 files totalling 119 613 lines (100 323 code + 13 900 comment + 5 390 blank, per cloc):
 
 | File | Lines | Module Name | Purpose |
 |------|-------|-------------|---------|

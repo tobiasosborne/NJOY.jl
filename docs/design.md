@@ -2,7 +2,7 @@
 
 ## Mission
 
-Port the NJOY2016 nuclear data processing system (120k lines of Fortran 90) to idiomatic, composable, differentiable Julia. The result — `NJOY.jl` — must pass NJOY's own 87 reference test problems and produce bit-for-bit compatible PENDF/ACE output for the full ENDF/B-VIII.1 library. The port must not be a transliteration; it must be a clean reimagining that enables differentiable processing, on-the-fly reconstruction, uncertainty quantification, and compositional module development.
+Port the NJOY2016 nuclear data processing system (~100k lines of Fortran 90 code, `njoy-reference/src/`) to idiomatic, composable, differentiable Julia. The result — `NJOY.jl` — must pass NJOY's own 87 reference test problems and produce bit-for-bit compatible PENDF/ACE output for the full ENDF/B-VIII.1 library. The port must not be a transliteration; it must be a clean reimagining that enables differentiable processing, on-the-fly reconstruction, uncertainty quantification, and compositional module development.
 
 ---
 
@@ -277,7 +277,7 @@ The port is complete when:
 2. `NJOY.jl` can process the full ENDF/B-VIII.0 neutron sublibrary (~560 materials) through the RECONR→BROADR→ACER chain without failure.
 3. `cross_section(E, material)` works as a standalone function call without running a full processing chain.
 4. `ForwardDiff.gradient(E -> cross_section(E, material).capture, E₀)` returns a finite, correct derivative.
-5. Total Julia source is < 20,000 lines (vs 120,000 lines of Fortran).
+5. Total Julia source is kept under ~30 k lines (vs ~100 k lines of Fortran code; current: ~24 k).
 6. All tests pass in CI.
 7. Documentation includes a tutorial processing U-238 from ENDF to ACE.
 

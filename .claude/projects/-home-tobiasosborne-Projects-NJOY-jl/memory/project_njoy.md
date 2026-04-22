@@ -4,7 +4,7 @@ description: Port of NJOY2016 Fortran nuclear data processing to Julia — scope
 type: project
 ---
 
-Port of NJOY2016 (120k lines Fortran 90) to idiomatic Julia. Target: bit-compatible PENDF/ACE output, differentiable processing chain, <20k lines Julia.
+Port of NJOY2016 (~100k lines of Fortran 90 code) to idiomatic Julia. Target: bit-compatible PENDF/ACE output, differentiable processing chain, ~24k lines Julia as of Phase 51 (code-only, per cloc).
 
 **Why:** Enable differentiable nuclear data processing, uncertainty quantification, and compositional module development. NJOY2016 is the standard tool but monolithic Fortran.
 
@@ -24,4 +24,4 @@ Port of NJOY2016 (120k lines Fortran 90) to idiomatic Julia. Target: bit-compati
 - Wave 3 (BROADR/HEATR/THERMR): NOT STARTED
 - Reference repos: njoy-reference/, endftk-reference/
 - Issue tracker: beads (bd) initialized, issues tracked
-- Total Julia source: ~2800 lines across 14 files
+- Total Julia source: ~24 k code lines across 87 files (as of Phase 51, 2026-04-22)

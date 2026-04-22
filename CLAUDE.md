@@ -1,7 +1,7 @@
 # CLAUDE.md — NJOY.jl
 
 ## What is this?
-NJOY.jl is a **100% faithful drop-in Julia replacement** for NJOY2016 — the standard nuclear data processing system (ENDF → PENDF / ACE / GENDF / covariance). 23 Fortran modules, 84 reference tests, ~15k lines of Julia replacing ~120k lines of Fortran 90. No GUI. No new features. No reinterpretation. Only bit-for-bit reproduction of the canonical output, expressed in idiomatic Julia.
+NJOY.jl is a **100% faithful drop-in Julia replacement** for NJOY2016 — the standard nuclear data processing system (ENDF → PENDF / ACE / GENDF / covariance). 23 Fortran modules, 84 reference tests, ~24k lines of Julia (cloc code-only, `src/`) replacing ~100k lines of Fortran 90 (`njoy-reference/src/`). No GUI. No new features. No reinterpretation. Only bit-for-bit reproduction of the canonical output, expressed in idiomatic Julia.
 
 See `HANDOFF.md` for the living state (current phase, sweep results, per-test status).
 See `worklog/T*.md` for per-session debug journals.
