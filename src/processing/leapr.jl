@@ -903,3 +903,59 @@ function coldh!(ssm::AbstractArray{Float64,3}, ssp::AbstractArray{Float64,3},
     return nothing
 end
 
+"""
+    skold!(ssm, itemp, temp, alpha_grid, beta_grid, ska, nka, dka,
+           cfrac, tev, lat, arat, awr)
+
+Apply Sköld intermolecular-coherence correction to S(α,-β):
+
+    α' = α / s(κ(α))
+    S_coh(α,β) = s(κ) · S(α',β)         (log-log interp in α)
+    S_new(α,β) = (1 − cfrac) · S_old + cfrac · S_coh
+
+Triggered by the Fortran main loop when `nsk == 2 && ncold == 0`
+(leapr.f90:389). Operates on the asymmetric S(α,-β) stored in
+`ssm[β, α, T]` (Fortran column-major layout).
+
+Ref: leapr.f90:2816-2922 (skold).
+"""
+function skold!(ssm::AbstractArray{Float64,3}, itemp::Int, temp::Float64,
+                alpha_grid::Vector{Float64}, beta_grid::Vector{Float64},
+                ska::Vector{Float64}, nka::Int, dka::Float64,
+                cfrac::Float64,
+                tev::Float64, lat::Int, arat::Float64, awr::Float64)
+    therm = 0.0253; angst = 1e-8
+    sc    = lat == 1 ? therm/tev : 1.0
+    amass = awr * PhysicsConstants.amassn * PhysicsConstants.amu
+    nbeta  = length(beta_grid)
+    nalpha = length(alpha_grid)
+    scoh   = Vector{Float64}(undef, nalpha)
+
+    for i in 1:nbeta
+        for j in 1:nalpha
+            al    = alpha_grid[j] * sc / arat
+            waven = angst * sqrt(2*amass*tev*PhysicsConstants.ev*al) / PhysicsConstants.hbar
+            sk    = _terpk(ska, nka, dka, waven)
+            ap    = alpha_grid[j] / sk
+            # Fortran bracket search (leapr.f90:2848-2852): first kk with ap < alpha_grid[kk]
+            kk = nalpha
+            for k in 1:nalpha
+                if ap < alpha_grid[k]; kk = k; break; end
+            end
+            kk == 1 && (kk = 2)
+            s1 = ssm[i, kk-1, itemp]
+            s2 = ssm[i, kk,   itemp]
+            scoh[j] = if s1 == 0.0 || s2 == 0.0
+                0.0
+            else
+                terp1(alpha_grid[kk-1], s1, alpha_grid[kk], s2, ap, LogLog)
+            end
+            scoh[j] *= sk
+        end
+        for j in 1:nalpha
+            ssm[i, j, itemp] = (1 - cfrac)*ssm[i, j, itemp] + cfrac*scoh[j]
+        end
+    end
+    return nothing
+end
+

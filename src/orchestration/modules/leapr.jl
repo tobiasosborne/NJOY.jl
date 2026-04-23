@@ -36,12 +36,9 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
     tempr = copy(params.temperatures)
     tempf = copy(params.temperatures)   # updated in-place by trans!/coldh!
 
-    # Coher / skold / secondary-scatterer guards
+    # Coher / secondary-scatterer guards (not yet ported)
     if params.iel > 0
         @warn "leapr: iel=$(params.iel) (coher) not yet ported — MF7/MT2 elastic will be stub"
-    end
-    if params.nsk == 2 && params.ncold == 0
-        @warn "leapr: nsk=2 (skold) not yet ported — output numerics will deviate"
     end
     if params.nss > 0
         @warn "leapr: nss=$(params.nss) (secondary scatterer) not yet ported — treating as primary only"
@@ -106,6 +103,19 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
                        params.ncold, params.nsk,
                        T, tev, params.twt[itemp], params.tbeta[itemp],
                        params.lat, 1.0, tempr, tempf)
+            end
+        end
+
+        # Sköld intermolecular-coherence (nsk=2 AND ncold=0)
+        if params.nsk == 2 && params.ncold == 0
+            if params.nka[itemp] == 0 || isempty(params.ska[itemp])
+                @warn "leapr: nsk=2 but no s(κ) data — skipping skold"
+            else
+                cfrac = isempty(params.cfrac) ? 1.0 : params.cfrac[itemp]
+                skold!(ssm, itemp, T,
+                       params.alpha, params.beta,
+                       params.ska[itemp], params.nka[itemp], params.dka[itemp],
+                       cfrac, tev, params.lat, 1.0, params.awr)
             end
         end
     end
