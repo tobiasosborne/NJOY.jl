@@ -518,3 +518,387 @@ function trans!(ssm::AbstractArray{Float64,3}, itemp::Int,
     tempf[itemp] = (tbeta * tempf[itemp] + twt * tempr[itemp]) / (tbeta + twt)
     return nothing
 end
+
+# =================================================================
+# coldh — ortho/para H₂ and D₂ discrete-rotational convolutions.
+# Ref: leapr.f90:1936-2183 (coldh) and helpers (bt/sumh/cn/sjbes/
+# terpk/bfill/exts/sint).
+# =================================================================
+
+"Statistical weight p_j for rotational state j at x = δE/kT.
+Ref: leapr.f90:2185-2209 (bt)."
+function _bt(j::Int, x::Float64)
+    a = (2j+1) * exp(-0.5 * j * (j+1) * x)
+    b = 0.0
+    for i in 1:10
+        k = 2i - 2
+        isodd(j) && (k += 1)
+        b += (2k+1) * exp(-0.5 * k * (k+1) * x)
+    end
+    return a / (2b)
+end
+
+"Spherical Bessel function j_n(x) via Miller's downward recurrence.
+Ref: leapr.f90:2342-2442 (sjbes)."
+function _sjbes(n::Int, x::Float64)
+    HUGE = 1e25; SMALL = 2e-38
+    (n >= 30000 || x > 3e4) && return 0.0
+    (x < 0.0 || n < 0) && error("sjbes: invalid args n=$n x=$x")
+
+    if x <= 7e-4
+        n == 0 && return 1.0
+        n > 10 && return 0.0
+        t1 = 3.0; t2 = 1.0; t3 = 1.0
+        for _ in 1:n
+            t3 = t2 * x / t1
+            t1 += 2.0
+            t2  = t3
+        end
+        return t3
+    else
+        w = x < 0.2 ? 1 - x^2*(1 - x^2/20)/6 : sin(x)/x
+        n == 0 && return w
+        l = x >= 100.0 ? floor(Int, x/50 + 18) :
+            x >= 10.0  ? floor(Int, x/10 + 10) :
+            x >  1.0   ? floor(Int, x/2  + 5)  : 5
+        iii  = floor(Int, x)
+        kmax = max(n, iii)
+        nm   = kmax + l
+        z    = 1.0 / x
+        t3   = 0.0; t2 = SMALL
+        sj   = 0.0; t1 = 0.0
+        for i in 1:nm
+            k  = nm - i
+            t1 = (2k + 3) * z * t2 - t3
+            k == n && (sj = t1)
+            if abs(t1) >= HUGE
+                t1 /= HUGE; t2 /= HUGE; sj /= HUGE
+            end
+            t3 = t2; t2 = t1
+        end
+        return w * sj / t1
+    end
+end
+
+"Clebsch-Gordon coefficient via log-factorials.
+Ref: leapr.f90:2247-2340 (cn). Returns 0 when jj+ll+nn is odd."
+function _cn(jj::Int, ll::Int, nn::Int)
+    tot = jj + ll + nn
+    isodd(tot) && return 0.0
+    ka1 = tot
+    ka2 = jj + ll - nn
+    ka3 = jj - ll + nn
+    ka4 = ll - jj + nn
+    kb1 = ka1 ÷ 2; kb2 = ka2 ÷ 2; kb3 = ka3 ÷ 2; kb4 = ka4 ÷ 2
+
+    _logfact(k::Int) = k <= 0 ? 0.0 : sum(log, 1:k)
+    a1 = sqrt(exp(_logfact(ka1))); a2 = sqrt(exp(_logfact(ka2)))
+    a3 = sqrt(exp(_logfact(ka3))); a4 = sqrt(exp(_logfact(ka4)))
+    b1 = exp(_logfact(kb1)); b2 = exp(_logfact(kb2))
+    b3 = exp(_logfact(kb3)); b4 = exp(_logfact(kb4))
+
+    rat = (2nn + 1) / (tot + 1)
+    iwign = (jj + ll - nn) ÷ 2
+    sgn = iseven(iwign) ? 1.0 : -1.0
+    return sgn * sqrt(rat) * b1 / a1 * a2 / b2 * a3 / b3 * a4 / b4
+end
+
+"Sum over Bessel functions × Clebsch-Gordon² for j→jp rotational transition.
+Ref: leapr.f90:2211-2245 (sumh)."
+function _sumh(j::Int, jp::Int, y::Float64)
+    if j == 0
+        return (_sjbes(jp, y) * _cn(j, jp, jp))^2
+    elseif jp == 0
+        return (_sjbes(j, y) * _cn(j, 0, j))^2
+    else
+        imk = abs(j - jp) + 1
+        ipk1 = j + jp + 1
+        mpk = ipk1 - imk
+        ipk = mpk <= 9 ? ipk1 : imk + 9
+        s = 0.0
+        for n in imk:ipk
+            n1 = n - 1
+            s += (_sjbes(n1, y) * _cn(j, jp, n1))^2
+        end
+        return s
+    end
+end
+
+"Linear interpolation in `ska(κ=δ·i)` at wave number `be`. Returns 1 past table.
+Ref: leapr.f90:2444-2466 (terpk)."
+function _terpk(ska::Vector{Float64}, nka::Int, delta::Float64, be::Float64)
+    be > nka * delta && return 1.0
+    i0 = floor(Int, be / delta)
+    i0 < nka - 1 || return 1.0
+    bt = i0 * delta
+    i  = i0 + 1
+    return ska[i] + (be - bt) * (ska[i+1] - ska[i]) / delta
+end
+
+"""
+Build extended β grid spanning ±β from the input negative-β grid `betan[1..nbeta]`.
+`bex[1..nbx]` receives monotone [-βmax ... 0 ... +βmax]; `rdbex[i] = 1/(bex[i+1]-bex[i])`.
+Returns `nbx`. If `betan[1] ≈ 0`, the zero point is not duplicated.
+
+Ref: leapr.f90:1798-1832 (bfill).
+"""
+function _bfill!(bex::Vector{Float64}, rdbex::Vector{Float64},
+                 betan::Vector{Float64}, nbeta::Int, maxbb::Int)
+    SMALL = 1e-9
+    k = nbeta
+    for i in 1:nbeta
+        bex[i] = -betan[k]
+        k -= 1
+    end
+    if betan[1] <= SMALL
+        bex[nbeta] = 0.0
+        k = nbeta + 1
+    else
+        k = nbeta + 2
+        bex[nbeta+1] = betan[1]
+    end
+    for i in 2:nbeta
+        bex[k] = betan[i]
+        k += 1
+    end
+    nbxm = k - 2
+    nbx  = k - 1
+    for i in 1:nbxm
+        rdbex[i] = 1.0 / (bex[i+1] - bex[i])
+    end
+    return nbx
+end
+
+"Extend S(α,-β) slice `sexpb` to full ±β array `sex` via detailed balance
+(`sex[k] = sexpb[i]·exp(-β_i)` on the positive branch).
+Ref: leapr.f90:1834-1865 (exts)."
+function _exts!(sexpb::AbstractVector{Float64}, sex::Vector{Float64},
+                exb::Vector{Float64}, betan::Vector{Float64},
+                nbeta::Int, maxbb::Int)
+    SMALL = 1e-9
+    k = nbeta
+    for i in 1:nbeta
+        sex[i] = sexpb[k]
+        k -= 1
+    end
+    if betan[1] <= SMALL
+        sex[nbeta] = sexpb[1]
+        k = nbeta + 1
+    else
+        k = nbeta + 2
+        sex[nbeta+1] = sexpb[1]
+    end
+    for i in 2:nbeta
+        sex[k] = sexpb[i] * exb[i] * exb[i]
+        k += 1
+    end
+    return nothing
+end
+
+"""
+Interpolate S(α,β) at β=x in the extended table, or use SCT approximation
+when |x| > βmax. Log-linear in β.
+
+Ref: leapr.f90:1867-1934 (sint).
+"""
+function _sint(x::Float64, bex::Vector{Float64}, rdbex::Vector{Float64},
+               sex::Vector{Float64}, nbx::Int, alph::Float64, wt::Float64,
+               tbart::Float64, betan::Vector{Float64}, nbeta::Int, maxbb::Int)
+    SLIM = -225.0
+    PI = Float64(pi)
+    # SCT approximation beyond the β-table
+    if abs(x) > betan[nbeta]
+        alph <= 0 && return 0.0
+        ex = -(wt*alph - abs(x))^2 / (4*wt*alph*tbart)
+        x > 0 && (ex -= x)
+        return exp(ex) / (4*PI*wt*alph*tbart)
+    end
+    # Bisection for x in bex
+    k1 = 1; k2 = nbeta; k3 = nbx
+    while true
+        if x == bex[k2]
+            return sex[k2]
+        elseif x > bex[k2]
+            k1 = k2
+            k2 = (k3 - k2) ÷ 2 + k2
+            k3 - k1 <= 1 && break
+        else
+            k3 = k2
+            k2 = (k2 - k1) ÷ 2 + k1
+            k3 - k1 <= 1 && break
+        end
+    end
+    ss1 = sex[k1] <= 0 ? SLIM : log(sex[k1])
+    ss3 = sex[k3] <= 0 ? SLIM : log(sex[k3])
+    ex = ((bex[k3] - x)*ss1 + (x - bex[k1])*ss3) * rdbex[k1]
+    return ex > SLIM ? exp(ex) : 0.0
+end
+
+"""
+    coldh!(ssm, ssp, itemp, alpha_grid, beta_grid,
+           ska, nka, dka, ncold, nsk,
+           temp, tev, twt, tbeta, lat, arat, tempr, tempf; ifree=0)
+
+Convolve the current S(α,-β) in `ssm[β,α,T]` with discrete rotational modes
+for ortho/para H₂ (`ncold=1,2`) or ortho/para D₂ (`ncold=3,4`). Populates
+both `ssm` (for negative β) and `ssp` (for positive β) → final S is
+**asymmetric**.
+
+`ssp` must be pre-allocated with the same shape as `ssm`. Caller passes in
+the static structure factor table `ska[1..nka]` sampled at `κ = dka·i`
+(from Card 17-18 of the leapr deck).
+
+Ref: leapr.f90:1936-2183 (coldh).
+"""
+function coldh!(ssm::AbstractArray{Float64,3}, ssp::AbstractArray{Float64,3},
+                itemp::Int,
+                alpha_grid::Vector{Float64}, beta_grid::Vector{Float64},
+                ska::Vector{Float64}, nka::Int, dka::Float64,
+                ncold::Int, nsk::Int,
+                temp::Float64, tev::Float64,
+                twt::Float64, tbeta::Float64,
+                lat::Int, arat::Float64,
+                tempr::Vector{Float64}, tempf::Vector{Float64};
+                ifree::Int=0, nokap::Int=0, jterm::Int=3)
+
+    # Hardcoded Fortran constants (leapr.f90:1962-1976)
+    pmass  = 1.6726231e-24
+    dmass  = 3.343586e-24
+    deh    = 0.0147
+    ded    = 0.0074
+    sampch = 0.356
+    sampcd = 0.668
+    sampih = 2.526
+    sampid = 0.403
+    therm  = 0.0253
+    angst  = 1e-8
+    SMALL  = 1e-6
+    PI     = Float64(pi)
+
+    nbeta  = length(beta_grid)
+    nalpha = length(alpha_grid)
+    maxbb  = 2 * nbeta + 1
+    betan  = Vector{Float64}(undef, nbeta)
+    exb    = Vector{Float64}(undef, nbeta)
+    bex    = Vector{Float64}(undef, maxbb)
+    rdbex  = Vector{Float64}(undef, maxbb)
+    sex    = Vector{Float64}(undef, maxbb)
+
+    sc  = lat == 1 ? therm/tev : 1.0
+    law = ncold + 1
+    de  = law > 3 ? ded : deh
+    x_rot = de / tev
+
+    if law > 3
+        amassm = 6.69e-24
+        sampc  = sampcd
+        bp     = PhysicsConstants.hbar/2 * sqrt(2/ded/PhysicsConstants.ev/dmass) / angst
+        sampi  = sampid
+    else
+        amassm = 3.3464e-24
+        sampc  = sampch
+        bp     = PhysicsConstants.hbar/2 * sqrt(2/deh/PhysicsConstants.ev/pmass) / angst
+        sampi  = sampih
+    end
+    wt    = twt + tbeta
+    tbart = tempf[itemp] / tempr[itemp]
+    snorm = sampi^2 + sampc^2
+
+    nbx = 0
+    for nal in 1:nalpha
+        al    = alpha_grid[nal] * sc / arat
+        alp   = wt * al
+        waven = angst * sqrt(amassm * tev * PhysicsConstants.ev * al) / PhysicsConstants.hbar
+        y     = bp * waven
+        sk    = nokap == 1 ? 1.0 : _terpk(ska, nka, dka, waven)
+
+        # Spin-correlation weights (Fortran :2033-:2043)
+        swe, swo = if law == 2         # ortho-H₂
+            (sampi^2/3, sk*sampc^2 + 2*sampi^2/3)
+        elseif law == 3                # para-H₂
+            (sk*sampc^2, sampi^2)
+        elseif law == 4                # ortho-D₂
+            (sk*sampc^2 + 5*sampi^2/8, 3*sampi^2/8)
+        elseif law == 5                # para-D₂
+            (3*sampi^2/4, sk*sampc^2 + sampi^2/4)
+        else
+            error("coldh: unsupported ncold=$ncold (expected 1..4)")
+        end
+        swe /= snorm
+        swo /= snorm
+
+        # One-time β-grid extension at first α
+        if nal == 1
+            for i in 1:nbeta
+                be = beta_grid[i]
+                lat == 1 && (be *= therm/tev)
+                exb[i]   = exp(-be/2)
+                betan[i] = be
+            end
+            nbx = _bfill!(bex, rdbex, betan, nbeta, maxbb)
+        end
+        _exts!(view(ssm, 1:nbeta, nal, itemp), sex, exb, betan, nbeta, maxbb)
+
+        # Extended-β loop (jj = 1..2·nbeta-1)
+        jjmax = 2*nbeta - 1
+        for jj in 1:jjmax
+            k = jj < nbeta ? (nbeta - jj + 1) : (jj - nbeta + 1)
+            be = betan[k]
+            jj < nbeta && (be = -be)
+            sn = 0.0
+
+            # Rotational state j loop (ipo=1 for even-j start, ipo=2 for odd)
+            ipo = (law == 2 || law == 5) ? 2 : 1
+            jt1 = 2*jterm
+            ipo == 2 && (jt1 += 1)
+
+            l = ipo
+            while l <= jt1
+                j = l - 1
+                pj = _bt(j, x_rot)
+
+                # Even j' transitions (swe weight)
+                snlg = 0.0
+                for lp in 1:2:10
+                    jp = lp - 1
+                    betap = (-j*(j+1) + jp*(jp+1)) * x_rot / 2
+                    tmp = (2*jp + 1) * pj * swe * 4 * _sumh(j, jp, y)
+                    bn = be + betap
+                    add = if ifree == 1
+                        ex = -(alp - abs(bn))^2 / (4*alp)
+                        bn > 0 && (ex -= bn)
+                        exp(ex) / sqrt(4*PI*alp)
+                    else
+                        _sint(bn, bex, rdbex, sex, nbx, al, wt, tbart, betan, nbeta, maxbb)
+                    end
+                    snlg += tmp * add
+                end
+
+                # Odd j' transitions (swo weight)
+                snlk = 0.0
+                for lp in 2:2:10
+                    jp = lp - 1
+                    betap = (-j*(j+1) + jp*(jp+1)) * x_rot / 2
+                    tmp = (2*jp + 1) * pj * swo * 4 * _sumh(j, jp, y)
+                    bn = be + betap
+                    add = if ifree == 1
+                        ex = -(alp - abs(bn))^2 / (4*alp)
+                        bn > 0 && (ex -= bn)
+                        exp(ex) / sqrt(4*PI*alp)
+                    else
+                        _sint(bn, bex, rdbex, sex, nbx, al, wt, tbart, betan, nbeta, maxbb)
+                    end
+                    snlk += tmp * add
+                end
+
+                sn += snlg + snlk
+                l += 2
+            end
+
+            # Store: negative β → ssm, positive → ssp
+            jj <= nbeta && (ssm[k, nal, itemp] = sn)
+            jj >= nbeta && (ssp[k, nal, itemp] = sn)
+        end
+    end
+    return nothing
+end
