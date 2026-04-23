@@ -690,6 +690,16 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 | Test 45 | B-10 | LRU=0 | 53/53 | 338 pts exact | **BIT-IDENTICAL** — NEW Phase 11 |
 | Test 22 | H-1 (para-H₂ 20K) | leapr (phonon + cold-H + trans) | MF7/MT4 | 4636 pts exact | **BIT-IDENTICAL** — NEW 2026-04-23 (leapr wired) |
 
+### Test 80 (H_HF, 343K) — DIFFS, structural match
+
+91453/91453 line count matches; all MF1/MF7 record layouts correct.
+Numerical: 76.8% of meaningful S(α,β) values bit-identical with Fortran,
+77.9% pass 1e-5, 81.3% pass 1e-1; ~19% differ by >10%. Gap is that
+`src/processing/leapr.jl`'s `generate_sab` is an alternative
+phonon-expansion (Proposal B, AD-compatible), not a byte-faithful
+port of Fortran `contin`. Tracked as Phase 11 (NJOY_jl-63f) — port
+contin directly to close the gap.
+
 ### In Progress — Test 07 (U-235, SLBW + URR mode=12)
 
 **Test details**: MAT=1395, err=0.005, ENDF file `t511`, resolved range [1, 82] eV (SLBW, LRF=1), unresolved range [82, 25000] eV (LRF=2, mode=12). 27 MTs total.
