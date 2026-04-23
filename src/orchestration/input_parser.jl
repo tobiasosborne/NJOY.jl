@@ -53,13 +53,16 @@ function tokenise_njoy_input(text::AbstractString)::Vector{ModuleCall}
             cards = Vector{String}[]
             while i <= length(lines)
                 cline = strip(lines[i])
-                if startswith(cline, "--") || startswith(cline, "*")
+                # Treat `*…*` as a string card (NJOY title/comment-string convention)
+                # rather than a Julia-side pure comment. Lines with only one `*`
+                # (e.g. "* explanatory note") are still skipped as comments.
+                if startswith(cline, "--") || (startswith(cline, "*") && !occursin(r"\*.*\*", cline))
                     i += 1; continue
                 end
                 occursin(r"^\[x\d+\]\s*$", cline) && (i += 1; continue)
                 cline = replace(cline, r"^\[x\d+\]\s*" => "")
                 trimmed = lstrip(cline)
-                if !(startswith(trimmed, "'") || startswith(trimmed, "\""))
+                if !(startswith(trimmed, "'") || startswith(trimmed, "\"") || startswith(trimmed, "*"))
                     cword = lowercase(replace(cline, r"\s*/.*" => ""))
                     cword = strip(replace(cword, r"['\"]" => ""))
                     if Symbol(cword) in NJOY_MODULES || cword == "stop"
@@ -103,6 +106,11 @@ function _tokenise_card(raw::AbstractString)::Vector{String}
         c = s[i]
         if c == '\'' || c == '"'
             j = findnext(c, s, i + 1)
+            j === nothing && (j = length(s))
+            push!(tokens, s[i:j]); i = j + 1
+        elseif c == '*'
+            # `*…*` alternative string delimiter (NJOY convention, e.g. T23 title).
+            j = findnext('*', s, i + 1)
             j === nothing && (j = length(s))
             push!(tokens, s[i:j]); i = j + 1
         elseif c in (' ', '\t', ',')
@@ -778,14 +786,264 @@ function parse_viewr(mc::ModuleCall)::ViewrParams
     ViewrParams(infile, nps)
 end
 
+"""
+    LeaprParams
+
+Full leapr input-deck contract. Mirrors the Fortran `leapr` reads at
+`njoy-reference/src/leapr.f90:230-400`.
+
+Per-temperature vectors have length `ntempr`. When the Fortran deck uses a
+negative temperature (`temp < 0`) to signal "reuse previous", we copy the
+prior values into the matching slot — the struct is always fully populated.
+"""
 struct LeaprParams
+    # Card 1: output ENDF tape unit
     nout::Int
+    # Card 2: title (80-char text; quotes stripped)
+    title::String
+    # Card 3: run control
+    ntempr::Int           # number of temperatures (default 1)
+    iprint::Int           # print flag (default 1)
+    nphon::Int            # phonon-expansion order (default 100)
+    # Card 4: ENDF metadata
+    mat::Int
+    za::Float64
+    isabt::Int            # default 0 (isabt=1 unsupported; Fortran warns)
+    ilog::Int             # default 0 (1 → log10(S))
+    smin::Float64         # default 1.0e-75
+    # Card 5: principal scatterer
+    awr::Float64
+    spr::Float64
+    npr::Int
+    iel::Int              # coherent-elastic option; default 0
+    ncold::Int            # cold moderator option; default 0
+    nsk::Int              # s(kappa) option; default 0
+    # Card 6: secondary scatterer (defaults for nss=0)
+    nss::Int
+    b7::Float64
+    aws::Float64
+    sps::Float64
+    mss::Int
+    # Card 7: alpha/beta control
+    nalpha::Int
+    nbeta::Int
+    lat::Int              # default 0
+    # Cards 8-9: grids
+    alpha::Vector{Float64}
+    beta::Vector{Float64}
+    # Per-temperature data (len = ntempr; mirrors Fortran copy-on-reread)
+    temperatures::Vector{Float64}
+    delta1::Vector{Float64}
+    ni::Vector{Int}
+    p1_dos::Vector{Vector{Float64}}
+    twt::Vector{Float64}
+    c::Vector{Float64}
+    tbeta::Vector{Float64}
+    nd::Vector{Int}
+    bdel::Vector{Vector{Float64}}   # oscillator energies (empty if nd=0)
+    adel::Vector{Vector{Float64}}   # oscillator weights (empty if nd=0)
+    nka::Vector{Int}
+    dka::Vector{Float64}
+    ska::Vector{Vector{Float64}}    # pair-correlation s(kappa) (empty if nsk=0 && ncold=0)
+    cfrac::Vector{Float64}          # coherent fraction (empty unless nsk>0)
+    # Card 20: MF1/MT451 descriptive lines
+    comments::Vector{String}
+end
+
+# ---------- leapr deck cursor helpers ----------
+# The Fortran `read(nsysi,*)` free-format reader treats `/` as a soft terminator:
+# unread variables keep their pre-initialised defaults. The Julia tokeniser
+# splits on `/`, so each `cards[i]` is exactly one Fortran read's worth of
+# explicit tokens (remaining variables default). For array reads like
+# `(alpha(i), i=1, nalpha)` values flow across successive cards until `nalpha`
+# are consumed — matching Fortran's "keep reading until count satisfied".
+
+"Consume one card (for a scalar Fortran read). Caller supplies defaults."
+function _leapr_scalars!(cards::Vector{Vector{String}}, ci::Base.RefValue{Int})
+    ci[] > length(cards) && return String[]
+    card = cards[ci[]]
+    ci[] += 1
+    return card
+end
+
+"Consume N tokens across consecutive cards (for array Fortran reads)."
+function _leapr_array!(cards::Vector{Vector{String}}, ci::Base.RefValue{Int}, n::Int)
+    vals = Float64[]
+    while length(vals) < n
+        ci[] > length(cards) && error("leapr deck ran out of tokens (needed $n, have $(length(vals)))")
+        for t in cards[ci[]]
+            (startswith(t, "'") || startswith(t, "\"") || startswith(t, "*")) && continue
+            push!(vals, _parse_num(t))
+            length(vals) >= n && break
+        end
+        ci[] += 1
+    end
+    return vals
+end
+
+"Strip surrounding quotes (`'…'`, `\"…\"`, `*…*`) and trim a title token."
+function _leapr_strip_title(s::AbstractString)
+    t = strip(s)
+    (startswith(t, "'") && endswith(t, "'")) && (t = t[2:end-1])
+    (startswith(t, "\"") && endswith(t, "\"")) && (t = t[2:end-1])
+    (startswith(t, "*") && endswith(t, "*"))  && (t = t[2:end-1])
+    return String(strip(t))
 end
 
 function parse_leapr(mc::ModuleCall)::LeaprParams
     cards = mc.raw_cards
-    isempty(cards) && return LeaprParams(0)
-    LeaprParams(abs(_fint(cards[1], 1)))
+    if isempty(cards)
+        return LeaprParams(
+            0, "", 1, 1, 100, 0, 0.0, 0, 0, 1e-75,
+            0.0, 0.0, 0, 0, 0, 0,
+            0, 0.0, 0.0, 0.0, 0,
+            0, 0, 0,
+            Float64[], Float64[],
+            Float64[], Float64[], Int[], Vector{Float64}[],
+            Float64[], Float64[], Float64[], Int[],
+            Vector{Float64}[], Vector{Float64}[],
+            Int[], Float64[], Vector{Float64}[], Float64[],
+            String[],
+        )
+    end
+
+    ci = Ref(1)
+
+    # Card 1: nout
+    c = _leapr_scalars!(cards, ci)
+    nout = abs(_fint(c, 1))
+
+    # Card 2: title (one quoted token, typically)
+    c = _leapr_scalars!(cards, ci)
+    title = isempty(c) ? "" : _leapr_strip_title(c[1])
+
+    # Card 3: ntempr, iprint, nphon (defaults 1, 1, 100)
+    c = _leapr_scalars!(cards, ci)
+    ntempr = _fint(c, 1; default=1)
+    iprint = _fint(c, 2; default=1)
+    nphon  = _fint(c, 3; default=100)
+
+    # Card 4: mat, za, isabt, ilog, smin
+    c = _leapr_scalars!(cards, ci)
+    mat   = _fint(c, 1)
+    za    = _fnum(c, 2)
+    isabt = _fint(c, 3; default=0)
+    ilog  = _fint(c, 4; default=0)
+    smin  = _fnum(c, 5; default=1e-75)
+
+    # Card 5: awr, spr, npr, iel, ncold, nsk
+    c = _leapr_scalars!(cards, ci)
+    awr   = _fnum(c, 1)
+    spr   = _fnum(c, 2)
+    npr   = _fint(c, 3)
+    iel   = _fint(c, 4; default=0)
+    ncold = _fint(c, 5; default=0)
+    nsk   = _fint(c, 6; default=0)
+
+    # Card 6: nss, b7, aws, sps, mss
+    c = _leapr_scalars!(cards, ci)
+    nss = _fint(c, 1; default=0)
+    b7  = _fnum(c, 2; default=0.0)
+    aws = _fnum(c, 3; default=0.0)
+    sps = _fnum(c, 4; default=0.0)
+    mss = _fint(c, 5; default=0)
+
+    # Card 7: nalpha, nbeta, lat
+    c = _leapr_scalars!(cards, ci)
+    nalpha = _fint(c, 1)
+    nbeta  = _fint(c, 2)
+    lat    = _fint(c, 3; default=0)
+
+    # Cards 8-9: alpha and beta grids
+    alpha = _leapr_array!(cards, ci, nalpha)
+    beta  = _leapr_array!(cards, ci, nbeta)
+
+    # Per-temperature loop (Fortran `do itemp = 1, ntempr`)
+    temps  = Float64[]; delta1s = Float64[]; nis = Int[]
+    p1s    = Vector{Vector{Float64}}()
+    twts   = Float64[]; cs = Float64[]; tbetas = Float64[]
+    nds    = Int[]; bdels = Vector{Vector{Float64}}(); adels = Vector{Vector{Float64}}()
+    nkas   = Int[]; dkas = Float64[]; skas = Vector{Vector{Float64}}()
+    cfracs = Float64[]
+
+    for itemp in 1:ntempr
+        c = _leapr_scalars!(cards, ci)
+        temp = _fnum(c, 1)
+        push!(temps, abs(temp))
+
+        # Reread cards 11-19 only when itemp==1 OR temp>=0
+        if itemp == 1 || temp >= 0
+            # Card 11: delta1, ni
+            c = _leapr_scalars!(cards, ci)
+            delta1 = _fnum(c, 1)
+            ni = _fint(c, 2)
+            push!(delta1s, delta1); push!(nis, ni)
+            # Card 12: p1 DOS (ni values)
+            p1 = _leapr_array!(cards, ci, ni)
+            push!(p1s, p1)
+            # Card 13: twt, c, tbeta
+            c = _leapr_scalars!(cards, ci)
+            push!(twts,   _fnum(c, 1; default=0.0))
+            push!(cs,     _fnum(c, 2; default=0.0))
+            push!(tbetas, _fnum(c, 3; default=0.0))
+            # Card 14: nd
+            c = _leapr_scalars!(cards, ci)
+            nd = _fint(c, 1; default=0)
+            push!(nds, nd)
+            if nd > 0
+                # Cards 15-16: oscillator data
+                push!(bdels, _leapr_array!(cards, ci, nd))
+                push!(adels, _leapr_array!(cards, ci, nd))
+            else
+                push!(bdels, Float64[]); push!(adels, Float64[])
+            end
+            # Cards 17-18: s(kappa) if needed
+            if nsk > 0 || ncold > 0
+                c = _leapr_scalars!(cards, ci)
+                nka = _fint(c, 1)
+                dka = _fnum(c, 2)
+                push!(nkas, nka); push!(dkas, dka)
+                push!(skas, _leapr_array!(cards, ci, nka))
+            else
+                push!(nkas, 0); push!(dkas, 0.0); push!(skas, Float64[])
+            end
+            # Card 19: cfrac (only if nsk>0)
+            if nsk > 0
+                c = _leapr_scalars!(cards, ci)
+                push!(cfracs, _fnum(c, 1; default=0.0))
+            end
+        else
+            # Reuse prior temp's data
+            push!(delta1s, delta1s[end]); push!(nis, nis[end]); push!(p1s, p1s[end])
+            push!(twts, twts[end]); push!(cs, cs[end]); push!(tbetas, tbetas[end])
+            push!(nds, nds[end]); push!(bdels, bdels[end]); push!(adels, adels[end])
+            push!(nkas, nkas[end]); push!(dkas, dkas[end]); push!(skas, skas[end])
+            nsk > 0 && push!(cfracs, cfracs[end])
+        end
+    end
+
+    # Card 20: free-form comment block (typically quoted strings) until EOF/empty
+    comments = String[]
+    while ci[] <= length(cards)
+        card = cards[ci[]]
+        ci[] += 1
+        isempty(card) && continue
+        push!(comments, _leapr_strip_title(join(card, " ")))
+    end
+
+    return LeaprParams(
+        nout, title, ntempr, iprint, nphon,
+        mat, za, isabt, ilog, smin,
+        awr, spr, npr, iel, ncold, nsk,
+        nss, b7, aws, sps, mss,
+        nalpha, nbeta, lat,
+        alpha, beta,
+        temps, delta1s, nis, p1s,
+        twts, cs, tbetas, nds,
+        bdels, adels,
+        nkas, dkas, skas, cfracs,
+        comments,
+    )
 end
 
 function parse_purr(mc::ModuleCall)::PurrParams
