@@ -881,13 +881,15 @@ function _leapr_array!(cards::Vector{Vector{String}}, ci::Base.RefValue{Int}, n:
     return vals
 end
 
-"Strip surrounding quotes (`'…'`, `\"…\"`, `*…*`) and trim a title token."
+"Strip surrounding quotes (`'…'`, `\"…\"`, `*…*`). Preserves internal
+whitespace (the NJOY convention keeps leading/trailing spaces inside
+quotes for proper MF1/MT451 hollerith formatting)."
 function _leapr_strip_title(s::AbstractString)
-    t = strip(s)
-    (startswith(t, "'") && endswith(t, "'")) && (t = t[2:end-1])
-    (startswith(t, "\"") && endswith(t, "\"")) && (t = t[2:end-1])
-    (startswith(t, "*") && endswith(t, "*"))  && (t = t[2:end-1])
-    return String(strip(t))
+    t = String(strip(s))                      # outer-only strip
+    (startswith(t, "'") && endswith(t, "'")) && return String(t[2:end-1])
+    (startswith(t, "\"") && endswith(t, "\"")) && return String(t[2:end-1])
+    (startswith(t, "*") && endswith(t, "*"))  && return String(t[2:end-1])
+    return t
 end
 
 function parse_leapr(mc::ModuleCall)::LeaprParams

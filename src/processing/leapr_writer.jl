@@ -3,8 +3,11 @@
 # Ref: leapr.f90:2972-3623 (endout).
 # =================================================================
 
-"Fortran a11-style 11-char float format, via the existing ENDF formatter."
-_leapr_a11(x::Real) = format_endf_float(Float64(x))
+"Fortran a11-style 11-char float format. leapr's endout emits values in
+7-sigfig scientific form (never the 9-sigfig fixed-point extension), so
+disable the extended form — the reference tape has e.g. `3.969624+1`,
+not `39.6962390`, even for values in (0.1, 1e7)."
+_leapr_a11(x::Real) = format_endf_float(Float64(x); extended=false)
 
 "Trailer bytes for an ENDF line: cols 67-80 = MAT/MF/MT/NS."
 @inline _leapr_trailer(mat, mf, mt, ns) = @sprintf("%4d%2d%3d%5d", mat, mf, mt, ns)
@@ -105,42 +108,34 @@ function _leapr_write_sep(io::IO, mat::Integer, mf::Integer, mt::Integer, ns::In
 end
 
 """
-Count the MF1/MT451 section NC lines (for its own DICT entry).
+Count NC for the MF1/MT451 DICT entry.
 
-    4 header CONT records + NWD hollerith lines + NXC dict entries + 1 SEND = 4 + NWD + NXC + 1
+Fortran-faithful: `4 header CONTs + NWD hollerith lines + NXC dict entries`.
+For T22: 4 + 17 + 2 = 23. NC excludes SEND.
 """
-_leapr_mf1_nc(nwd::Int, nxc::Int) = 4 + nwd + nxc + 1
+_leapr_mf1_nc(nwd::Int, nxc::Int) = 4 + nwd + nxc
 
 """
-Count the MF7/MT4 section NC (for DICT).
+Count NC for the MF7/MT4 DICT entry — mirrors Fortran endout:3147-3149
+integer arithmetic exactly.
 
-Structure: HEAD + LIST (B-coeffs, 1 header + ceil(NPL/6) data = 2 lines for NPL=6) +
-TAB2 (1 header + ceil(NR*2/6)=1 interp line) + per-β blocks + SEND.
+    per_β    = 2 + (2·nalpha + 4) ÷ 6
+    if ntempr > 1: per_β += (ntempr-1) · (1 + (nalpha+5) ÷ 6)
+    NC       = 5 + nbeta · per_β
 
-For T22 (ntempr=1, isym=1, nbeta=105, nalpha=59, NPL=6):
-  Per-β block = TAB1 (1 header + ceil(NR*2/6)=1 interp + ceil(NP/3)=20 pair lines) = 22 lines
-  Total β-rows = 2·nbeta - 1 = 209 for isym ∈ {1,3}, else nbeta.
+Fortran quirks this preserves (verbatim from leapr.f90:3147-3149):
+- Uses `nbeta`, NOT `2·nbeta-1`, even when isym is odd and the tape
+  actually writes 2·nbeta-1 β-rows. The DICT NC deliberately
+  undercounts for isym ∈ {1,3} — this is how Fortran computes it.
+- Integer division order matters: for nalpha=59, `(2·59+4) ÷ 6 = 20`;
+  per_β = 22; NC = 5 + 105·22 = 2315 for T22 (matches reference tape).
 """
 function _leapr_mf7_mt4_nc(p::LeaprParams, isym::Int)
-    nbeta  = p.nbeta
-    nalpha = p.nalpha
-    ntempr = p.ntempr
-    nbt_rows = (isym == 1 || isym == 3) ? 2*nbeta - 1 : nbeta
-    # Per-β TAB1 (first temp) = 1 header + 1 interp + ceil(nalpha/3) pair lines
-    # Per-β LIST (subsequent temps) = 1 header + ceil(nalpha/6) data lines
-    first_t = 1 + 1 + cld(nalpha, 3)
-    per_extra_t = 1 + cld(nalpha, 6)
-    per_beta = first_t + (ntempr - 1) * per_extra_t
-    # HEAD + LIST(B-coefs: 1 header + ceil(NPL/6) data)
-    npl = 6 * (p.nss + 1)
-    b_block = 1 + 1 + cld(npl, 6)
-    tab2_block = 1 + 1                   # header + 1 interp line (NR=1)
-    beta_header = cld(nbt_rows, 6)       # β-grid list in TAB2 body
-    # But TAB2 itself doesn't carry the β values as a list — the β values are the
-    # C2 field of each nested TAB1. So no separate β list block.
-    # Tail: effective-temperature TAB1s (1 each for tempf, plus tempf1 if nss>0 && b7<=0)
-    tail = 1 + 1 + cld(ntempr, 3)        # tempf TAB1 (conservative)
-    return b_block + tab2_block + per_beta * nbt_rows + tail + 1  # +1 SEND
+    per_beta = 2 + (2*p.nalpha + 4) ÷ 6
+    if p.ntempr > 1
+        per_beta += (p.ntempr - 1) * (1 + (p.nalpha + 5) ÷ 6)
+    end
+    return 5 + p.nbeta * per_beta
 end
 
 """
@@ -249,15 +244,20 @@ function _write_mf7_mt4(io::IO, p::LeaprParams,
     # HEAD: ZA, AWR, 0, LAT, LASYM, 0
     ns = _leapr_write_cont(io, p.za, p.awr, 0, p.lat, isym, 0, mat, 7, 4, ns)
 
-    # LIST: (0, 0, ilog, 0, NPL, nss) + data = [σ_b, β_max·therm, AWR, β_max·therm, 0, npr, (+nss secondary entries)]
+    # LIST: (0, 0, ilog, 0, NPL, nss) + B-coefs per leapr.f90:3301-3323.
+    # Fortran field layout (scr(7)..scr(12) for principal scatterer):
+    #   scr(7)  = σ_b · npr            (bound XS × multiplicity)
+    #   scr(8)  = β(nbeta)             (raw β_max — NOT scaled by therm)
+    #   scr(9)  = awr
+    #   scr(10) = sigfig(therm·β(nbeta), 7, 0)   (β_max in eV)
+    #   scr(11) = 0
+    #   scr(12) = npr
     therm = 0.0253
-    sc = p.lat == 1 ? therm / (PhysicsConstants.bk * p.temperatures[1]) : 1.0
-    β_max_energy = p.beta[end] * (p.lat == 1 ? therm : therm)  # β_max·therm (eV)
-    sb = p.spr * ((1 + p.awr) / p.awr)^2                  # bound scattering XS (unused but computed)
+    β_max = p.beta[end]
+    β_max_therm = therm * β_max
     npl = 6 * (p.nss + 1)
-    list_data = Float64[p.spr * p.npr, β_max_energy, p.awr, β_max_energy, 0.0, Float64(p.npr)]
+    list_data = Float64[p.spr * p.npr, β_max, p.awr, β_max_therm, 0.0, Float64(p.npr)]
     if p.nss > 0
-        sbs = p.sps * ((1 + p.aws) / p.aws)^2
         append!(list_data, [p.b7, p.sps * p.mss, p.aws, 0.0, 0.0, Float64(p.mss)])
     end
     ns = _leapr_write_cont(io, 0.0, 0.0, p.ilog, 0, npl, p.nss, mat, 7, 4, ns)
