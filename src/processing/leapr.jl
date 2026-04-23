@@ -262,3 +262,259 @@ function debye_dos(T_debye::Float64, n_points::Int; emax_factor::Float64=1.2)
     density = [e <= omega_D ? 3.0*e^2/omega_D^3 : 0.0 for e in energies]
     PhononDOS(energies, density)
 end
+
+# =================================================================
+# Fortran-faithful transport corrections for leapr (trans/coldh/skold/coher).
+#
+# These operate on a β-fastest `ssm[β, α, T]` array to match Fortran's
+# column-major `ssm(nbeta,nalpha,ntempr)` layout and IEEE-754 accumulation
+# order exactly. Ref: njoy-reference/src/leapr.f90
+# =================================================================
+
+"Modified Bessel K_1 via NJOY leapr.f90:1253 rational approximation.
+For x>1 returns e^x * K_1(x) (scaled); stable() compensates."
+function _besk1(x::Float64)
+    if x <= 1.0
+        c0=0.125
+        c1=0.442850424; c2=0.584115288;  c3=6.070134559
+        c4=17.864913364; c5=48.858995315; c6=90.924600045
+        c7=113.795967431; c8=85.331474517; c9=32.00008698; c10=3.999998802
+        c11=1.304923514; c12=1.47785657; c13=16.402802501
+        c14=44.732901977; c15=115.837493464; c16=198.437197312
+        c17=222.869709703; c18=142.216613971; c19=40.000262262; c20=1.999996391
+        c21=1.0; c22=0.5; c23=0.5772156649
+        v = c0 * x
+        u = v * v
+        bi1 = (((((((((c1*u+c2)*u+c3)*u+c4)*u+c5)*u+c6)*u+c7)*u+c8)*u+c9)*u+c10)*v
+        bi3 = (((((((((c11*u+c12)*u+c13)*u+c14)*u+c15)*u+c16)*u+c17)*u+c18)*u+c19)*u+c20)
+        return c21/x + bi1*(log(c22*x) + c23) - v*bi3
+    else
+        c25=0.0108241775; c26=0.0788000118; c27=0.2581303765
+        c28=0.5050238576; c29=0.663229543; c30=0.6283380681
+        c31=0.4594342117; c32=0.2847618149; c33=0.1736431637
+        c34=0.1280426636; c35=0.1468582957; c36=0.4699927013
+        c37=1.2533141373
+        u = 1.0 / x
+        bi3 = ((((((((((((-c25*u+c26)*u-c27)*u+c28)*u-c29)*u+c30)*u-c31)*u+c32)*u-c33)*u+c34)*u-c35)*u+c36)*u+c37)
+        return sqrt(u) * bi3
+    end
+end
+
+"""
+    _stable!(ap, sd, al, delta, twt, c_diff, ndmax) -> nsd
+
+Fill `sd[1:nsd]` with the translational transport kernel at spacing `delta`:
+diffusion kernel (`c_diff>0`, via `besk1`) or free-gas Gaussian (`c_diff==0`).
+`ap[1:nsd]` receives the matching β values. Growth stops when
+`sd[j] < 1e-7*sd[1]` or `j>=ndmax`; nsd is forced odd (Simpson).
+
+Ref: leapr.f90:1009-1122 (stable).
+"""
+function _stable!(ap::Vector{Float64}, sd::Vector{Float64},
+                  al::Float64, delta::Float64,
+                  twt::Float64, c_diff::Float64, ndmax::Int)
+    eps = 1e-7
+    PI = Float64(pi)
+    if c_diff != 0.0
+        # Diffusion branch
+        d = twt * c_diff
+        c2s = sqrt(c_diff*c_diff + 0.25)
+        c3 = 2 * d * al
+        c4 = c3 * c3
+        c8 = c2s * c3 / PI
+        c3 = 2 * d * c_diff * al
+        be = 0.0
+        j = 1
+        while true
+            c6 = sqrt(be*be + c4)
+            c7 = c6 * c2s
+            c5 = c7 <= 1.0 ? c8*exp(c3 + be/2) : c8*exp(c3 - c7 + be/2)
+            sd[j] = c5 * _besk1(c7) / c6
+            ap[j] = be
+            be += delta
+            j += 1
+            if iseven(j)
+                (j >= ndmax) && break
+                (eps * sd[1] >= sd[j-1]) && break
+            end
+        end
+        return j - 1
+    else
+        # Free-gas branch
+        be = 0.0; j = 1
+        wal = twt * al
+        while true
+            ex = -(wal - be)^2 / (4*wal)
+            sd[j] = exp(ex) / sqrt(4*PI*wal)
+            ap[j] = be
+            be += delta
+            j += 1
+            if iseven(j)
+                (j >= ndmax) && break
+                (eps * sd[1] >= sd[j-1]) && break
+            end
+        end
+        return j - 1
+    end
+end
+
+"Log-linear interpolation in `sd` (spacing delta) at β = be. Returns 0 past table.
+Ref: leapr.f90:1124-1162 (terps)."
+function _terps(sd::AbstractVector{Float64}, nsd::Int, delta::Float64, be::Float64)
+    slim = -225.0
+    be > delta * nsd && return 0.0
+    i0 = floor(Int, be / delta)
+    if i0 < nsd - 1
+        bt = i0 * delta
+        btp = bt + delta
+        i = i0 + 1
+        st  = sd[i]   <= 0 ? slim : log(sd[i])
+        stp = sd[i+1] <= 0 ? slim : log(sd[i+1])
+        stt = st + (be - bt)*(stp - st)/(btp - bt)
+        return stt > slim ? exp(stt) : 0.0
+    end
+    return 0.0
+end
+
+"""
+    _sbfill!(sb, nbt, delta, be, s, betan, nbeta, ndmax; delta_ref)
+
+Build S(β) on a symmetric grid of 2·nbt-1 points centered on −be, with
+spacing `delta`, by log-linear interpolation in the tabulated `s[1:nbeta]`
+over `betan[1:nbeta]`. Applies `sb *= exp(-bet)` for `bet>0` to map
+S(α,-|β|) onto the positive-β branch via detailed balance.
+
+Ref: leapr.f90:1164-1251 (sbfill).
+"""
+function _sbfill!(sb::Vector{Float64}, nbt::Int, delta::Float64, be::Float64,
+                  s::Vector{Float64}, betan::Vector{Float64},
+                  nbeta::Int, ndmax::Int)
+    shade = 1.00001; slim = -225.0
+    bmin = -be - (nbt-1)*delta
+    bmax = -be + (nbt-1)*delta + delta/100
+    need = 1 + floor(Int, (bmax - bmin)/delta)
+    need > ndmax && error("sbfill: need $need scratch slots, have $ndmax")
+    j = nbeta; i = 0
+    bet = bmin
+    while bet <= bmax
+        i += 1
+        b = abs(bet)
+        idone = 0
+        # Bracket search: walk j so that betan[j-1] < b <= betan[j]
+        while idone == 0
+            if b > betan[j]
+                if j == nbeta && b < shade * betan[j]
+                    idone = 1
+                elseif j == nbeta
+                    idone = 2              # out-of-range
+                else
+                    j += 1
+                end
+            else
+                if b > betan[j-1]
+                    idone = 1
+                elseif j == 2
+                    idone = 1
+                else
+                    j -= 1
+                end
+            end
+        end
+        if idone == 1
+            st  = s[j]   <= 0 ? slim : log(s[j])
+            stm = s[j-1] <= 0 ? slim : log(s[j-1])
+            sb[i] = st + (b - betan[j])*(stm - st)/(betan[j-1] - betan[j])
+            bet > 0 && (sb[i] -= bet)    # detailed balance on +β branch
+            arg = sb[i]
+            sb[i] = arg > slim ? exp(arg) : 0.0
+        else
+            sb[i] = 0.0
+        end
+        # Delta safety (FP-degenerate step)
+        while bet == bet + delta
+            delta *= 10
+        end
+        bet += delta
+    end
+    return nothing
+end
+
+"""
+    trans!(ssm, itemp, alpha_grid, beta_grid, twt, c_diff, tbeta,
+           tev, deltab, f0, lat, arat, tempr, tempf)
+
+Add translational (diffusion or free-gas) contribution to the asymmetric
+S(α,-β) stored in `ssm[β, α, T]`. Mutates `ssm[:,:,itemp]` in place and
+updates `tempf[itemp]`.
+
+Array layout: `ssm[ibeta, ialpha, itemp]` — β is the fastest axis, matching
+Fortran's `ssm(nbeta,nalpha,ntempr)` so Simpson accumulation order is
+preserved exactly.
+
+Ref: leapr.f90:844-1007 (trans).
+"""
+function trans!(ssm::AbstractArray{Float64,3}, itemp::Int,
+                alpha_grid::Vector{Float64}, beta_grid::Vector{Float64},
+                twt::Float64, c_diff::Float64, tbeta::Float64,
+                tev::Float64, deltab::Float64, f0::Float64,
+                lat::Int, arat::Float64,
+                tempr::Vector{Float64}, tempf::Vector{Float64})
+    therm = 0.0253
+    c0 = 0.4; c1 = 1.0; c2 = 1.42; c3c = 0.2; c4c = 10.0
+    TINY = 1e-30
+
+    nbeta  = length(beta_grid)
+    nalpha = length(alpha_grid)
+    sc     = lat == 1 ? therm/tev : 1.0
+
+    ndmax = max(nbeta, 1_000_000)
+    ap    = Vector{Float64}(undef, ndmax)
+    sd    = Vector{Float64}(undef, ndmax)
+    sb    = Vector{Float64}(undef, ndmax)
+    betan = Vector{Float64}(undef, nbeta)
+
+    for ialpha in 1:nalpha
+        al = alpha_grid[ialpha] * sc / arat
+
+        # Step δ — two criteria, take the smaller
+        w   = twt * c_diff * al
+        ded = c_diff != 0.0 ? c0 * w / sqrt(c1 + c2*w*c_diff) : c3c*sqrt(twt*al)
+        ded == 0.0 && (ded = c3c*sqrt(twt*al))
+        deb = c4c * al * deltab
+        delta = min(ded, deb)
+
+        nsd = _stable!(ap, sd, al, delta, twt, c_diff, ndmax)
+        nsd <= 1 && continue
+
+        for i in 1:nbeta
+            betan[i] = beta_grid[i] * sc
+            ap[i]    = ssm[i, ialpha, itemp]
+        end
+
+        nbt = nsd
+        for ibeta in 1:nbeta
+            be = betan[ibeta]
+            _sbfill!(sb, nbt, delta, be, ap, betan, nbeta, ndmax)
+
+            # Simpson convolution (left-to-right order preserved for FP)
+            s = 0.0
+            for i in 1:nbt
+                f = (i == 1 || i == nbt) ? 1.0 : 2.0 * (mod(i-1, 2) + 1)
+                s += f * sd[i] * sb[nbt + i - 1]
+                bb = (i-1) * delta
+                s += f * sd[i] * sb[nbt - i + 1] * exp(-bb)
+            end
+            s *= delta / 3.0
+            s < TINY && (s = 0.0)
+
+            st = _terps(sd, nbt, delta, be)
+            st > 0.0 && (s += exp(-al * f0) * st)
+
+            ssm[ibeta, ialpha, itemp] = s
+        end
+    end
+
+    # Effective temperature update (leapr.f90:998)
+    tempf[itemp] = (tbeta * tempf[itemp] + twt * tempr[itemp]) / (tbeta + twt)
+    return nothing
+end
