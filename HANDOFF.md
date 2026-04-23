@@ -688,6 +688,7 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 | Test 27 | Pu-239 | Reich-Moore | 49/49 | exact | **BIT-IDENTICAL** — NEW Phase 14 |
 | Test 47 | Pu-239 | Reich-Moore | 49/49 | exact | **BIT-IDENTICAL** — NEW Phase 14 |
 | Test 45 | B-10 | LRU=0 | 53/53 | 338 pts exact | **BIT-IDENTICAL** — NEW Phase 11 |
+| Test 22 | H-1 (para-H₂ 20K) | leapr (phonon + cold-H + trans) | MF7/MT4 | 4636 pts exact | **BIT-IDENTICAL** — NEW 2026-04-23 (leapr wired) |
 
 ### In Progress — Test 07 (U-235, SLBW + URR mode=12)
 
