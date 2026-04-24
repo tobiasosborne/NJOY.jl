@@ -4,6 +4,78 @@
 # available through the existing reconr/MF2 readers.
 
 # =========================================================================
+# MF1/MT451: Material descriptive header (for acer ZAID / incident particle)
+# =========================================================================
+
+"""
+    read_mf1_mt451_header(filename, mat) -> NamedTuple
+
+Parse the first three records of MF1/MT451 and return:
+  (za, awr, lrp, lfi, nlib, nmod, elis, sta, lis, liso, nfor,
+   awi, emax, lrel, nsub, nver)
+
+Ref: ENDF-6 manual section 1.1 + njoy-reference/src/endf.f90 mt451 read;
+also acefc.f90:280-360 where izai is derived from NSUB/10.
+
+NSUB encodes the incident particle:
+  10     → incident neutrons
+  0      → photon
+  10010  → protons                (IZA = 1001)
+  10020  → deuterons              (IZA = 1002)
+  10030  → tritons                (IZA = 1003)
+  20030  → He-3                   (IZA = 2003)
+  20040  → alphas                 (IZA = 2004)
+  113    → electro-nuclear
+"""
+function read_mf1_mt451_header(filename::AbstractString, mat::Integer)
+    open(filename, "r") do io
+        found = find_section(io, 1, 451; target_mat=Int(mat))
+        found || error("MF1/MT451 not found for MAT=$mat in $filename")
+        h1 = read_cont(io)
+        h2 = read_cont(io)
+        h3 = read_cont(io)
+        return (
+            za   = Int(round(Float64(h1.C1))),
+            awr  = Float64(h1.C2),
+            lrp  = Int(h1.L1),
+            lfi  = Int(h1.L2),
+            nlib = Int(h1.N1),
+            nmod = Int(h1.N2),
+            elis = Float64(h2.C1),
+            sta  = Float64(h2.C2),
+            lis  = Int(h2.L1),
+            liso = Int(h2.L2),
+            nfor = Int(h2.N2),
+            awi  = Float64(h3.C1),
+            emax = Float64(h3.C2),
+            lrel = Int(h3.L1),
+            nsub = Int(h3.N1),
+            nver = Int(h3.N2),
+        )
+    end
+end
+
+"""
+    acer_incident_letter(nsub) -> Char
+
+Map ENDF-6 NSUB (MF1/MT451 third CONT N1 field) to the single-letter ACE
+suffix tag for the incident particle. Matches Fortran acer.f90:391-407.
+Unknown NSUB → 'c' (neutron) with a warning.
+"""
+function acer_incident_letter(nsub::Integer)
+    nsub == 10    ? 'c' :
+    nsub == 0     ? 'p' :  # photons (photoatomic)
+    nsub == 3     ? 'e' :  # electrons — acer uses 'u' for electroatomic in practice; keep 'e'
+    nsub == 113   ? 'n' :  # electro-nuclear
+    nsub == 10010 ? 'h' :  # protons
+    nsub == 10020 ? 'o' :  # deuterons — NJOY MCNPX mapping uses 'o' for deuterons
+    nsub == 10030 ? 'r' :  # tritons
+    nsub == 20030 ? 's' :  # He-3
+    nsub == 20040 ? 'a' :  # alphas
+    (@warn("acer: unknown NSUB=$nsub — defaulting to 'c'"); 'c')
+end
+
+# =========================================================================
 # MF12: Photon multiplicity data (for heatr gamma recoil)
 # =========================================================================
 

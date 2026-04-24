@@ -137,16 +137,22 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
                                suffix::AbstractString = "80c",
                                temp_kelvin::Float64 = 300.0,
                                comment::AbstractString = "",
-                               mat_id::Integer = 0)
-    za = Int(pendf.mat)
-    actual_mat = mat_id > 0 ? mat_id : za
-    zaid_str = format_zaid(za, suffix)
+                               mat_id::Integer = 0,
+                               za::Integer = 0,
+                               awr::Float64 = NaN,
+                               date::AbstractString = "")
+    # Prefer explicit ZA (from MF1/MT451) over pendf.mat (which is MAT, not ZA).
+    # Same for AWR — pendf often has mass number A in place of real AWR.
+    true_za = za > 0 ? Int(za) : Int(pendf.mat)
+    actual_mat = mat_id > 0 ? mat_id : Int(pendf.mat)
+    zaid_str = format_zaid(true_za, suffix)
     temp_mev = temp_to_mev(temp_kelvin)
     mat_str = @sprintf("   mat%4d", actual_mat)
+    header_awr = isnan(awr) ? Float64(true_za % 1000) : awr
 
-    header = ACEHeader(zaid=zaid_str, awr=Float64(za % 1000),
+    header = ACEHeader(zaid=zaid_str, awr=header_awr,
                        temp_mev=temp_mev, comment=comment,
-                       mat_string=mat_str)
+                       mat_string=mat_str, date=date)
 
     n = length(pendf.energies)
     energy_mev = pendf.energies .* 1e-6

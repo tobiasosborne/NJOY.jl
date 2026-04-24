@@ -40,11 +40,14 @@ function write_ace_table(io::IO, table::ACENeutronTable; format::Symbol=:ascii)
     # Line 2: hk(a70) hm(a10)
     print(io, rpad(h.hk, 70)[1:70], rpad(h.hm, 10)[1:10], "\n")
 
-    # Lines 3-6: IZ/AW pairs, 4(i7,f11.0) per line
+    # Lines 3-6: IZ/AW pairs, Fortran format 4(i7,f11.0). Fortran's `f11.0`
+    # emits a TRAILING DECIMAL POINT with 0 fractional digits — e.g.
+    # `         0.` for 0.0 (9 leading spaces + "0."), not C's `          0`.
+    # Emulate via a 10-wide integer-style print + explicit ".".
     for row in 1:4
         for col in 1:4
             idx = (row - 1) * 4 + col
-            @printf(io, "%7d%11.0f", table.iz[idx], table.aw[idx])
+            @printf(io, "%7d%10.0f.", table.iz[idx], table.aw[idx])
         end
         print(io, "\n")
     end

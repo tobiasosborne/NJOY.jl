@@ -90,19 +90,38 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     # Construct the PointwiseMaterial that ace_builder expects
     pm = PointwiseMaterial(Int32(mat), master_e, xs_matrix, mt_sorted)
 
-    # Build the ACE table
-    temp_k = params.temp > 0 ? params.temp : 300.0
-    zaid_mat = _acer_extract_za(pendf, mat)  # MF1/MT451 HEAD gives ZA for true ZAID
-    table = build_ace_from_pendf(pm;
-                                  suffix=params.suffix,
-                                  temp_kelvin=temp_k,
-                                  mat_id=mat)
-
-    # If we extracted a real ZA from MF1, override the header's hz (the
-    # builder defaulted to `mat` which for pipeline chains != ZA).
-    if zaid_mat > 0 && zaid_mat != mat
-        table = _acer_retag_header(table, zaid_mat, params.suffix)
+    # Read MF1/MT451 from the ENDF (not PENDF): ZA, AWR, NSUB (incident particle).
+    # Fall back to PENDF if nendf<=0. Ref: njoy-reference/src/acefc.f90 first()
+    # — incident particle IZA derived from NSUB/10 at lines 305-313.
+    endf_path = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+    mf1 = try
+        read_mf1_mt451_header(endf_path, mat)
+    catch err
+        @warn "acer: read_mf1_mt451_header failed: $err — falling back to PENDF MF1"
+        (za = _acer_extract_za(pendf, mat), awr = NaN, nsub = 10,
+         lrp = 0, lfi = 0, nlib = 0, nmod = 0, elis = 0.0, sta = 0.0,
+         lis = 0, liso = 0, nfor = 6, awi = 0.0, emax = 2e7, lrel = 0, nver = 0)
     end
+
+    # Derive suffix letter from NSUB. The parser gave a provisional letter
+    # (default 'c'); replace it with the NSUB-driven one.
+    letter = acer_incident_letter(mf1.nsub)
+    # Strip trailing alpha char from params.suffix ("10c" → "10") then append
+    # the derived letter. Preserves numeric part (temperature indicator).
+    numeric_part = replace(params.suffix, r"[a-zA-Z]+$" => "")
+    final_suffix = isempty(numeric_part) ? "00$letter" : "$(numeric_part)$letter"
+
+    # Title from card 3; mat string in Fortran NJOY form "   mat%4d"
+    comment = isempty(params.title) ? "" : params.title
+
+    table = build_ace_from_pendf(pm;
+                                  suffix=final_suffix,
+                                  temp_kelvin=params.temp,
+                                  comment=comment,
+                                  mat_id=mat,
+                                  za=mf1.za,
+                                  awr=mf1.awr,
+                                  date=_acer_today_date())
 
     # Write outputs
     if params.nace > 0
@@ -213,6 +232,15 @@ function _acer_write_ndir_from_ace(ace_path::AbstractString, out_path::AbstractS
         @printf(io, "%-10s %s filename route 1   1 %8s     0     0 %s\n",
                 zaid, awr, nxs1, temp)
     end
+end
+
+"""Date string in Fortran NJOY aceout format: `MM/DD/YY`. The reference tapes
+fix this to match the regeneration date; execute.py substitutes via
+`datePattern = re.compile(r'\\d{2}/\\d{2}/\\d{2}')` before comparing, so any
+valid date passes."""
+function _acer_today_date()
+    t = Base.Libc.TmStruct(time())
+    @sprintf("%02d/%02d/%02d", t.month + 1, t.mday, (t.year + 1900) % 100)
 end
 
 """Extract ZA from MF1/MT451 HEAD record of a PENDFTape. Returns 0 on miss."""

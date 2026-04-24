@@ -307,8 +307,11 @@ function parse_acer(mc::ModuleCall)::AcerParams
         end
     end
 
-    # Card 3: title string (hz, up to 70 chars). Tokenizer strips surrounding quotes.
-    title = length(cards) >= 3 && !isempty(cards[3]) ? String(strip(join(cards[3], " "))) : ""
+    # Card 3: title string (hz, up to 70 chars). Tokenizer keeps surrounding
+    # quotes; strip them here. Same pattern used by parse_reconr for its
+    # description cards.
+    title = length(cards) >= 3 && !isempty(cards[3]) ?
+            String(strip(replace(join(cards[3], " "), r"^['\"]|['\"]$" => ""))) : ""
 
     # Card 4 (iopt=1): matd, tempd, [local], [iprint]
     mat  = 0

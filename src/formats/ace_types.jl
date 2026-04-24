@@ -96,10 +96,23 @@ function ACEHeader(; zaid::AbstractString,
                      date::AbstractString = "",
                      comment::AbstractString = "",
                      mat_string::AbstractString = "")
-    hz = rpad(strip(zaid), 10)[1:10]
-    hd = rpad(strip(date), 10)[1:10]
+    # Fortran NJOY acefc aceout uses `a10` for hz and hd — which stores the
+    # string right-justified in the 10-char buffer (leading-space padded).
+    # hk and hm are declared character(len=70/10) and stored as-assigned
+    # (left-aligned with trailing spaces). Ref: acefc.f90:12946-12957
+    #
+    # Why: mismatching justification in hz breaks every downstream comparison
+    # at byte level; T50 referenceTape34 line 1 starts `  2004.10a` (right-
+    # justified, 2 leading spaces) not `2004.10a  ` (left-justified).
+    _right10 = s -> (t = strip(s); length(t) >= 10 ? String(t[1:10]) : lpad(t, 10))
+    hz = _right10(zaid)
+    hd = _right10(date)
     hk = rpad(length(comment) > 70 ? comment[1:70] : comment, 70)[1:70]
-    hm = rpad(strip(mat_string), 10)[1:10]
+    # hm: do NOT strip — caller is responsible for correct alignment. Fortran
+    # NJOY assigns `"   mat%4d"` directly to a character(len=10) variable; the
+    # three leading spaces ARE the alignment and must survive.
+    hm_src = mat_string
+    hm = length(hm_src) >= 10 ? String(hm_src[1:10]) : rpad(hm_src, 10)
     ACEHeader(hz, awr, temp_mev, hd, hk, hm)
 end
 
