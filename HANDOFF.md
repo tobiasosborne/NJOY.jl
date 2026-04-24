@@ -98,6 +98,7 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
+| 52    | 2026-04-24 | T50 ACER promotion, phases 1-3 (α+He-4) | **PARTIAL.** AcerParams card-1 parser fixed to 5 slots (every acer test was missing `ngend`); header BIT-IDENTICAL modulo date via MF1/MT451 reader + NSUB→letter + AWR override + Fortran-faithful hz/hd/hm alignment + f11.0 trailing-dot; JXS layout corrected (MTR/LQR/TYR/LSIG/SIG always populated; LDLW/DLW sentinel; END=length). T50 tape34 11/163 exact (header 6/6 + ESZ first line + 4 JXS/NXS). Remaining: ESZ grid 29→37 (unionx port), LAND/AND angular block (418 words, MF6 LAW=5→ACE LAW=14). | `worklog/T50_acer_phase1_scaffolding.md` |
 | 51    | 2026-04-22 | T15 covcal LB=5 σ·flx-weighted collapse (NJOY.jl-f8k Bug B) | **FIX LANDED.** MT=77 self-cov C[20,20] 0.04 → 0.02987998 (exact match to ref). `multigroup_covariance` extended with xs_row/xs_col/ugrid kwargs; orchestration refactored to collect blocks per (mt, mt2) pair and route LB=5/6 through union-grid σ·flx-weighted collapse. For iwt=2, flux = bin width (matches GENDF). T04 MF31 unchanged. | `worklog/T15_covcal_lb5_weighted.md` |
 | 50    | 2026-04-21 | T15 covcal MT=77 diagnosis (NJOY.jl-f8k) | ROOT CAUSE PINNED — Bug A (writer NK count) + Bug B (midpoint sampling vs XS·flux-weighted union-grid expansion). Fortran trace in `/tmp/t15_fortran_diag/stdout.log`. **No code changes** — implementation deferred. | `worklog/T15_covcal_mt77_diagnosis.md` |
 | 49    | 2026-04-21 | T15 errorr MF33 NC v2 sub-item 1 (double-NC cross-pairs) | Cov(2, 4) sub-section 3 → 65 lines (ref 69). T15 tape26 4178 → 4240. T04 baseline preserved. | `worklog/T15_T17_errorr_nc_expansion_v2.md` |
@@ -401,6 +402,40 @@ the work.
 - **Acceptance**: T65 under sweep default timeout with real output.
 - **Notes**: Worth re-measuring first — may have been subsumed by
   Phase 44's 30M-line MF=33 fix.
+
+### P1 — ACER promotion (T50 α+He-4 and 8 sibling tests)
+
+- **Retired bead**: none.
+- **Status (Phase 52, 2026-04-24)**: parser + iopt=7 passthrough + header
+  bit-identical + JXS layout + total-XS-from-partials landed. T50
+  `tape34` 11/163 exact (up from 0). See
+  `worklog/T50_acer_phase1_scaffolding.md` for full detail.
+- **Scope**: promote `acer_module` from MF3-only stub to real ACE
+  generator passing T50 at 1e-9. Unlocks 9 sibling tests (T14, T48,
+  T50-T54, T62, T71 — all RAN_OK today without oracle comparison).
+- **Next work items**:
+  1. **ESZ grid linearization** (29 → 37 energies): port Fortran
+     `unionx` (`acefc.f90:1538-1702`). Union of MF3 + MF6 incident
+     energies + adaptive linearization at `thin(3)=0.001` (1% tol).
+     T50 adds 11 points and drops 3 vs raw MF3.
+  2. **LAND/AND elastic angular block** (418 XSS words on T50): port
+     MF6 LAW=5 (identical-particle Coulomb+nuclear) → ACE LAW=14
+     (tabulated CDF) conversion. Source: `acefc.f90:4890-6320`
+     (`acelod`). This is the main angular converter and is reusable
+     across T51-T54, T62, T71.
+  3. **NSUB → letter table verification**: speculative mappings for
+     deuteron/triton/He-3. Check T51 (proton+H-2), T53 (deuteron+H-2),
+     T54 (proton+H-3), T62 (deuteron+He-3).
+  4. **iopt=7 aplots port**: real viewr plot-tape generator, not empty
+     stub.
+- **Where**: `src/orchestration/modules/acer.jl`, `src/formats/ace_builder.jl`,
+  `src/formats/ace_writer.jl`, `src/formats/ace_types.jl`,
+  `src/endf/readers.jl`.
+- **Acceptance**: T50 `tape34` 163/163 exact at 1e-9 via execute.py;
+  no regression on T01 ACE or any currently-passing test.
+- **Estimated cost**: ~1 session for `unionx` port, ~2-3 sessions for
+  MF6 LAW=5 → ACE LAW=14 converter. The acer port is a multi-session
+  grind comparable to leapr or heatr.
 
 ### P3 — ~55 DIFFS cases — per-tape bisection (Grind Method)
 
