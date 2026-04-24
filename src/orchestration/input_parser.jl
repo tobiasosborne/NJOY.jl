@@ -267,26 +267,66 @@ function parse_thermr(mc::ModuleCall)::ThermrParams
 end
 
 struct AcerParams
-    nendf::Int; npendf::Int; nace::Int; ndir::Int
-    mat::Int; iopt::Int; temp::Float64; suffix::String
+    # Card 1 units. Fortran acer.f90 reads 5 slots: nendf, npend, ngend, nace, ndir.
+    # For iopt=1: nendf=ENDF input, npend=PENDF input, nace=ACE out, ndir=xsdir out.
+    # For iopt=7: npend=input ACE, ngend=output viewr plot, nace=output ACE, ndir=summary.
+    nendf::Int; npendf::Int; ngend::Int; nace::Int; ndir::Int
+    mat::Int; iopt::Int; iprint::Int; itype::Int; suffix::String
+    temp::Float64; title::String
+    nplot::Int  # iopt=7: plot option (-1 = no plot)
 end
 
 function parse_acer(mc::ModuleCall)::AcerParams
     cards = mc.raw_cards
-    isempty(cards) && return AcerParams(0,0,0,0,0,1,300.0,"80c")
-    nendf = abs(_fint(cards[1], 1)); npendf = abs(_fint(cards[1], 2))
-    nace = length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0
-    ndir = length(cards[1]) >= 4 ? abs(_fint(cards[1], 4)) : 0
-    iopt = length(cards) >= 2 ? _fint(cards[2], 1; default=1) : 1
-    # Card 3 is a title string (hz); Card 4 has mat, temp for iopt=1
-    mat = 0; temp = 300.0; suffix = "80c"
-    if iopt == 1 && length(cards) >= 4
-        # Card 4: matd, tempd, [local], [iprint]
-        card4 = cards[4]
-        mat = _fint(card4, 1)
-        temp = _fnum(card4, 2; default=300.0)
+    isempty(cards) && return AcerParams(0,0,0,0,0, 0,1,0,1,"80c", 300.0, "", 0)
+
+    # Card 1: nendf npend ngend nace ndir
+    c1 = cards[1]
+    nendf  = length(c1) >= 1 ? abs(_fint(c1, 1)) : 0
+    npendf = length(c1) >= 2 ? abs(_fint(c1, 2)) : 0
+    ngend  = length(c1) >= 3 ? abs(_fint(c1, 3)) : 0
+    nace   = length(c1) >= 4 ? abs(_fint(c1, 4)) : 0
+    ndir   = length(c1) >= 5 ? abs(_fint(c1, 5)) : 0
+
+    # Card 2: iopt iprint itype suff ...
+    iopt   = length(cards) >= 2 ? _fint(cards[2], 1; default=1) : 1
+    iprint = length(cards) >= 2 && length(cards[2]) >= 2 ? _fint(cards[2], 2; default=1) : 1
+    itype  = length(cards) >= 2 && length(cards[2]) >= 3 ? _fint(cards[2], 3; default=1) : 1
+    # Suffix appears in card 2 position 4 as a decimal like `.10` or `.80` — read as string
+    # to preserve leading dot and trailing zeros, then build a suffix tag like `10c`, `80c`.
+    # iopt=1 → suffix `<dd>c`; iopt=7 → output suffix preserved from the ACE header.
+    suffix = "80c"
+    if length(cards) >= 2 && length(cards[2]) >= 4
+        tok = String(strip(cards[2][4]))
+        if startswith(tok, ".") && length(tok) >= 3
+            suffix = tok[2:end]  # ".10" → "10", ".80" → "80"
+            # For iopt=1 (fast neutron/particle), suffix is .XXc/.XXh etc.; charged-particle
+            # incident uses .XXa (alpha), .XXh (proton), .XXd (deuteron), .XXt (triton),
+            # .XXs (He-3). Default to `c` if not specified by card 2 position 5.
+            suffix = length(suffix) == 2 ? suffix * "c" : suffix
+        end
     end
-    AcerParams(nendf, npendf, nace, ndir, mat, iopt, temp, suffix)
+
+    # Card 3: title string (hz, up to 70 chars). Tokenizer strips surrounding quotes.
+    title = length(cards) >= 3 && !isempty(cards[3]) ? String(strip(join(cards[3], " "))) : ""
+
+    # Card 4 (iopt=1): matd, tempd, [local], [iprint]
+    mat  = 0
+    temp = 0.0  # default per Fortran acer.f90 — no broadening when tempd=0
+    if iopt == 1 && length(cards) >= 4 && !isempty(cards[4])
+        mat  = _fint(cards[4], 1)
+        temp = _fnum(cards[4], 2; default=0.0)
+    end
+
+    # iopt=7 card 2 position 4 is nplot (e.g. `-1` → no plot). For iopt=7 suffix is not
+    # on the card — reused slot is nplot.
+    nplot = 0
+    if iopt == 7 && length(cards) >= 2 && length(cards[2]) >= 4
+        nplot = _fint(cards[2], 4; default=0)
+    end
+
+    AcerParams(nendf, npendf, ngend, nace, ndir, mat, iopt, iprint, itype, suffix,
+               temp, title, nplot)
 end
 
 struct GasprParams

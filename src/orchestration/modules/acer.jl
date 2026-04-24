@@ -28,15 +28,17 @@ producing real output. Other iopts get a stub empty tape so downstream
 crashes on missing files don't cascade.
 """
 function acer_module(tapes::TapeManager, params::AcerParams)
-    @info "acer: iopt=$(params.iopt) nendf=$(params.nendf) npendf=$(params.npendf) nace=$(params.nace) ndir=$(params.ndir)"
+    @info "acer: iopt=$(params.iopt) nendf=$(params.nendf) npendf=$(params.npendf) ngend=$(params.ngend) nace=$(params.nace) ndir=$(params.ndir) suffix=$(params.suffix)"
 
-    if params.iopt != 1
+    if params.iopt == 7
+        return _acer_iopt7(tapes, params)
+    elseif params.iopt != 1
         @warn "acer: iopt=$(params.iopt) not yet implemented — writing empty stub tapes"
         _acer_write_empty(tapes, params)
         return nothing
     end
 
-    # iopt=1: fast continuous-energy neutron ACE
+    # iopt=1: fast continuous-energy / charged-particle ACE
     pendf_path = params.npendf > 0 ? resolve(tapes, params.npendf) : ""
     if !isfile(pendf_path)
         @warn "acer: PENDF input (unit $(params.npendf)) not found — writing empty stub tapes"
@@ -132,11 +134,84 @@ end
 input. Prevents downstream SystemError when the next module in the chain
 tries to open these units."""
 function _acer_write_empty(tapes::TapeManager, params::AcerParams)
-    for unit in (params.nace, params.ndir)
+    for unit in (params.ngend, params.nace, params.ndir)
         unit <= 0 && continue
         path = resolve(tapes, unit)
         touch(path)
         register!(tapes, unit, path)
+    end
+end
+
+"""
+    _acer_iopt7(tapes, params)
+
+iopt=7 — read existing Type-1 ACE from `npendf`, produce a copy on `nace`,
+a viewr-format plot tape on `ngend`, and a 1-line summary record on `ndir`.
+
+This is Fortran acer.f90's "check/view" mode. For now the nace output is a
+verbatim passthrough of the input ACE (matches Fortran behaviour when no
+thinning is requested). The ngend viewr plot tape is produced separately by
+`_acer_write_viewr_plot_tape` — currently a minimal stub.
+
+Ref: njoy-reference/src/acer.f90:449-465 (iopt=7 dispatch)
+"""
+function _acer_iopt7(tapes::TapeManager, params::AcerParams)
+    src = params.npendf > 0 ? resolve(tapes, params.npendf) : ""
+    if !isfile(src)
+        @warn "acer iopt=7: input ACE tape $(params.npendf) not found — writing empty stubs"
+        _acer_write_empty(tapes, params)
+        return nothing
+    end
+
+    # nace slot: copy the input ACE verbatim. Fortran's iopt=7 re-formats
+    # through aceout — for ASCII Type-1 input the result is byte-identical
+    # modulo the date string in the header.
+    if params.nace > 0
+        dst = resolve(tapes, params.nace)
+        cp(src, dst; force=true)
+        register!(tapes, params.nace, dst)
+        @info "acer iopt=7: copied ACE $(basename(src)) → $(basename(dst)) ($(countlines(dst)) lines)"
+    end
+
+    # ngend slot: viewr-format plot tape. Stub empty — plot generation is a
+    # separate grind (Fortran acer.f90 `aplots`). Downstream viewr reading
+    # this file will no-op on empty input.
+    if params.ngend > 0
+        plot_path = resolve(tapes, params.ngend)
+        touch(plot_path)
+        register!(tapes, params.ngend, plot_path)
+    end
+
+    # ndir slot: 1-line summary line (xsdir-style) for the ACE table.
+    # Fortran acer iopt=7 writes one "  ZAID  AWR filename route 1   1   LENGTH 0 0 0.000E+00"
+    # record for each ACE entry — same shape as the xsdir produced by iopt=1.
+    if params.ndir > 0
+        dir_path = resolve(tapes, params.ndir)
+        _acer_write_ndir_from_ace(src, dir_path)
+        register!(tapes, params.ndir, dir_path)
+    end
+
+    nothing
+end
+
+"""Write a 1-line xsdir-style summary record by reading the header + NXS[1]
+from an ASCII Type-1 ACE file. Matches Fortran acer iopt=7 `trail` output."""
+function _acer_write_ndir_from_ace(ace_path::AbstractString, out_path::AbstractString)
+    lines = readlines(ace_path)
+    if length(lines) < 7
+        touch(out_path)
+        return
+    end
+    # Line 1: ZAID(a10) AWR(f12.6) TEMP_MEV(1pe12.4) date(a10)  — 45 chars ish
+    hdr1 = rpad(lines[1], 80)
+    zaid = strip(hdr1[1:10])
+    awr  = strip(hdr1[11:22])
+    temp = strip(hdr1[23:35])
+    # Line 7 begins the NXS row, whose first integer is XSS length (i9).
+    nxs1 = strip(rpad(lines[7], 80)[1:9])
+    open(out_path, "w") do io
+        @printf(io, "%-10s %s filename route 1   1 %8s     0     0 %s\n",
+                zaid, awr, nxs1, temp)
     end
 end
 
