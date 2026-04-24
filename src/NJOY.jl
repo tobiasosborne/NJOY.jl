@@ -131,6 +131,7 @@ include("viewr/viewr.jl")
 include("orchestration/types.jl")
 include("orchestration/input_parser.jl")
 include("processing/leapr_writer.jl")   # depends on LeaprParams from input_parser
+include("processing/purr_writer.jl")    # depends on PurrParams from input_parser
 include("orchestration/auto_params.jl")
 include("orchestration/pendf_io.jl")
 include("orchestration/modules/moder.jl")
