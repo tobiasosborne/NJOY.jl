@@ -56,6 +56,55 @@ function read_mf1_mt451_header(filename::AbstractString, mat::Integer)
 end
 
 """
+    read_mf6_incident_energies(filename, mat, mt) -> Vector{Float64}
+
+Extract the incident-neutron/particle energy grid at which MF6/MT angular
+(+ energy) distributions are tabulated. Returns eV values from the first
+subsection's TAB2 record — all subsections share the same incident grid
+for standard evaluations (NJOY's `topfil` verifies this).
+
+Used by `acer` to union MF6 energies into the ESZ grid (acefc.f90
+unionx adds these so each MF6 tabulation point lands on a grid point).
+Returns empty vector if MF6/MT is absent.
+
+Ref: ENDF-6 manual §6, plus njoy-reference/src/acefc.f90:1538-1702
+(unionx loop over MF6 grids).
+"""
+function read_mf6_incident_energies(filename::AbstractString, mat::Integer, mt::Integer)
+    energies = Float64[]
+    open(filename, "r") do io
+        found = find_section(io, 6, mt; target_mat=Int(mat))
+        found || return energies
+        # HEAD: ZA, AWR, JP, LCT, NK, 0
+        head = read_cont(io)
+        nk = Int(head.N1)
+        nk <= 0 && return energies
+        # First subsection: yield TAB1 whose HEAD carries LAW in L2 (ENDF-6 §6).
+        # read_tab1 consumes the whole TAB1 (CONT + interp + data). After the
+        # TAB1, what follows depends on LAW.
+        yield = read_tab1(io)
+        law = Int(yield.L2)
+        if law in (1, 5, 6, 7)
+            # TAB2: NR=yield.L1? no, TAB2 has its own interp range. NZ field is
+            # the number of incident energies (NE) in the energy distribution.
+            tab2 = read_tab2(io)
+            ne = Int(tab2.NZ)
+            # Each of NE records starts with a CONT header whose C2 = incident E.
+            for _ in 1:ne
+                rec = read_cont(io)
+                push!(energies, Float64(rec.C2))
+                nw = Int(rec.N1)
+                nlines = cld(nw, 6)
+                for _ in 1:nlines; readline(io); end
+            end
+        elseif law == 2
+            # LAW=2 embeds incident energies in a different structure — port later.
+        end
+    end
+    energies
+end
+
+"""
     acer_incident_letter(nsub) -> Char
 
 Map ENDF-6 NSUB (MF1/MT451 third CONT N1 field) to the single-letter ACE

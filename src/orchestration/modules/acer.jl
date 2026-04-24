@@ -62,6 +62,23 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     # the longest MT's grid.
     master_mt = haskey(mf3, 1) ? 1 : argmax(Dict(k => length(v[1]) for (k, v) in mf3))
     master_e  = mf3[master_mt][1]
+
+    # For charged-particle ACE (and any case where MF6 is present), union
+    # the MF6 incident energies into the ESZ grid. Fortran acer unionx
+    # does this so every MF6 tabulation point lands on an ESZ grid point —
+    # the ACE angular/energy block pointers would otherwise have nowhere to
+    # cross-reference. Ref: njoy-reference/src/acefc.f90:1538-1702.
+    endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+    for mt in keys(mf3)
+        mt in (1,) && continue  # MT=1 is redundant total, never has MF6
+        mf6_e = try
+            read_mf6_incident_energies(endf_for_mf6, mat, mt)
+        catch
+            Float64[]
+        end
+        isempty(mf6_e) && continue
+        master_e = sort(unique(vcat(master_e, mf6_e)))
+    end
     n_e = length(master_e)
 
     # Build mt_list in canonical order (1, 2, fission, capture, then others)
