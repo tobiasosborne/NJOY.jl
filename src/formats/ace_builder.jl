@@ -32,7 +32,16 @@ function build_xss(table::ACENeutronTable)
     # NU block (not yet populated)
     jxs[JXS_NU] = 0
 
-    # Reaction data blocks
+    # Reaction data blocks. Fortran NJOY aceout always sets JXS[3..7] to a
+    # valid position — when NTR=0 the tables are zero-length but the pointers
+    # still mark the position (end of ESZ + 1). Only the JXS[2] (NU/fission)
+    # pointer is 0 for truly-absent block types. Ref: acefc.f90:5367-5371.
+    mtr_pos = length(xss) + 1
+    jxs[JXS_MTR]  = mtr_pos
+    jxs[JXS_LQR]  = mtr_pos
+    jxs[JXS_TYR]  = mtr_pos
+    jxs[JXS_LSIG] = mtr_pos
+    jxs[JXS_SIG]  = mtr_pos
     if n_react > 0
         jxs[JXS_MTR] = length(xss) + 1
         for r in table.reactions; push_int!(r.mt); end
@@ -102,18 +111,27 @@ function build_xss(table::ACENeutronTable)
         end
     end
 
-    # Remaining blocks (0 = not present)
-    jxs[JXS_LDLW]  = 0
-    jxs[JXS_DLW]   = 0
+    # LDLW/DLW — energy-distribution blocks. These are always "structurally
+    # present" in ACE fast tables; when NR=0 (no reactions with secondary
+    # neutrons) they're zero-length and Fortran points them at the
+    # end-of-XSS+1 sentinel (= length+1). Ref: acefc.f90:5891-5893.
+    ldlw_sentinel = length(xss) + 1
+    jxs[JXS_LDLW] = ldlw_sentinel
+    jxs[JXS_DLW]  = ldlw_sentinel
+
+    # Conditional blocks — 0 means "block type not present in this file"
     jxs[JXS_GPD]   = 0
     for j in JXS_MTRP:JXS_YP; jxs[j] = 0; end
     jxs[JXS_FIS]   = 0
-    jxs[JXS_END]   = length(xss) + 1
     jxs[JXS_IURPT] = 0
     jxs[JXS_NUD]   = 0
     jxs[JXS_DNDAT] = 0
     jxs[JXS_LDND]  = 0
     jxs[JXS_DND]   = 0
+
+    # JXS[22] (END) = last word of basic data, i.e. length(xss). Fortran
+    # aceout assigns `end=next-1` after filling XSS (acefc.f90:5893).
+    jxs[JXS_END] = length(xss)
 
     # Fill NXS
     za, _ = parse_zaid(strip(table.header.hz))
@@ -161,8 +179,24 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
     col_total   = get(mt_to_col, 1, 0)
     col_elastic = get(mt_to_col, 2, 0)
 
-    total_xs = col_total > 0 ? pendf.cross_sections[:, col_total] : zeros(n)
     elastic_xs = col_elastic > 0 ? pendf.cross_sections[:, col_elastic] : zeros(n)
+    # Total XS: prefer MT=1 if present; otherwise reconstruct as sum of all
+    # non-redundant reaction MTs (matches Fortran acer when the PENDF has no
+    # explicit MT=1 — e.g. charged-particle evaluations with only MT=2).
+    # Ref: njoy-reference/src/acefc.f90 unionx() lines 1538-1702.
+    total_xs = if col_total > 0
+        pendf.cross_sections[:, col_total]
+    else
+        s = zeros(n)
+        for (col, mt) in enumerate(pendf.mt_list)
+            # skip redundant sums if present (3, 4, 103-107)
+            mt in (3, 4, 103, 104, 105, 106, 107) && continue
+            # skip MT=251-300 (derived quantities like mu_bar, xi)
+            251 <= mt <= 300 && continue
+            s .+= pendf.cross_sections[:, col]
+        end
+        s
+    end
     absorption_xs = max.(total_xs .- elastic_xs, 0.0)
     heating = zeros(n)
 
