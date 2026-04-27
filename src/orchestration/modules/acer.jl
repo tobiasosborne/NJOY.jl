@@ -125,6 +125,36 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     # Construct the PointwiseMaterial that ace_builder expects
     pm = PointwiseMaterial(Int32(mat), master_e, xs_matrix, mt_sorted)
 
+    # Charged-particle elastic LAW=5 → ACE LAW=14 (LAND/AND block + Coulomb-
+    # corrected total/elastic). For neutron incident, Fortran takes a
+    # different angular path (acensd at acefc.f90:5874-5877); for charged
+    # particles, acecpe at acefc.f90:6492-6671 produces the tabulated
+    # (μ, pdf, cdf) tables and replaces elastic_xs / total_xs with the
+    # Coulomb-included values via log-log interpolation.
+    charged_elastic = nothing
+    if !izai_neutron
+        ce_endf = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+        ce_hdr, ce_subs = try
+            read_mf6_law5(ce_endf, mat, 2)
+        catch
+            (nothing, MF6Law5Subsection[])
+        end
+        if !isempty(ce_subs)
+            elastic_col = findfirst(==(2), mt_sorted)
+            total_col   = findfirst(==(1), mt_sorted)
+            esz_elastic = elastic_col === nothing ? zeros(n_e) :
+                            xs_matrix[:, elastic_col]
+            esz_total   = total_col === nothing ? copy(esz_elastic) :
+                            xs_matrix[:, total_col]
+            izai = mf1.nsub ÷ 10  # nsub=20040 → izai=2004 (alpha)
+            ang, new_total, new_elastic, new_heat = acer_charged_elastic(
+                ce_subs, master_e, esz_total, esz_elastic,
+                Float64(mf1.awr), Float64(mf1.awi), Int(izai), Int(mf1.za))
+            charged_elastic = (angular = ang, total = new_total,
+                                elastic = new_elastic, heating = new_heat)
+        end
+    end
+
     # Derive suffix letter from NSUB. The parser gave a provisional letter
     # (default 'c'); replace it with the NSUB-driven one.
     letter = acer_incident_letter(mf1.nsub)
@@ -143,7 +173,8 @@ function acer_module(tapes::TapeManager, params::AcerParams)
                                   mat_id=mat,
                                   za=mf1.za,
                                   awr=mf1.awr,
-                                  date=_acer_today_date())
+                                  date=_acer_today_date(),
+                                  charged_elastic=charged_elastic)
 
     # Write outputs
     if params.nace > 0

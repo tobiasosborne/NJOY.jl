@@ -158,7 +158,8 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
                                mat_id::Integer = 0,
                                za::Integer = 0,
                                awr::Float64 = NaN,
-                               date::AbstractString = "")
+                               date::AbstractString = "",
+                               charged_elastic::Union{Nothing, NamedTuple} = nothing)
     # Prefer explicit ZA (from MF1/MT451) over pendf.mat (which is MAT, not ZA).
     # Same for AWR — pendf often has mass number A in place of real AWR.
     true_za = za > 0 ? Int(za) : Int(pendf.mat)
@@ -211,10 +212,23 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
             xs_col[ie_start:end]))
     end
 
+    # Charged-particle elastic override: replace total/elastic/heating with
+    # Coulomb-corrected values from acer_charged_elastic, attach the LAW=14
+    # angular block. Ref: njoy-reference/src/acefc.f90:6646-6667.
+    angular_elastic = nothing
+    if charged_elastic !== nothing
+        angular_elastic = charged_elastic.angular
+        total_xs    = charged_elastic.total
+        elastic_xs  = charged_elastic.elastic
+        heating     = charged_elastic.heating
+        absorption_xs = max.(total_xs .- elastic_xs, 0.0)
+    end
+
     ACENeutronTable(header=header,
                     energy_grid=energy_mev, total_xs=total_xs,
                     absorption_xs=absorption_xs, elastic_xs=elastic_xs,
-                    heating_numbers=heating, reactions=reactions)
+                    heating_numbers=heating, reactions=reactions,
+                    angular_elastic=angular_elastic)
 end
 
 """
