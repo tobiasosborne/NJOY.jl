@@ -98,7 +98,8 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
-| 52    | 2026-04-24 | T50 ACER promotion, phases 1-4 (α+He-4) | **PARTIAL.** AcerParams card-1 parser fixed to 5 slots (every acer test was missing `ngend`); header BIT-IDENTICAL modulo date via MF1/MT451 reader + NSUB→letter + AWR override + Fortran-faithful hz/hd/hm alignment + f11.0 trailing-dot; JXS layout corrected (MTR/LQR/TYR/LSIG/SIG always populated; LDLW/DLW sentinel; END=length); MF6 incident-energy union added to ESZ grid (NES 29→32). T50 tape34 16/163 exact. T01/T02 regression-clean. Remaining: 5 more ESZ energies from `unionx` adaptive linearization (acefc.f90:1538-1702), LAND/AND angular block (418 words, MF6 LAW=5→ACE LAW=14). | `worklog/T50_acer_phase1_scaffolding.md` |
+| 53    | 2026-04-27 | T50 ACER phases 5-6 (unionx step + LAW=5→LAW=14) | **NUMERIC_PASS @1e-5.** Phase 5 ports the rest of unionx (MF6 anchor c-overwrite quirk, step-1.2 ratio enforcement off-by-one drop, gety1 dedup at aceout) — T50 NES 32→37, all ESZ values bit-identical. Phase 6 ports `acecpe`: Coulomb σ_C analytic formula (LIDP=1 identical-particle interference), per-μ trapezoidal (μ, pdf, cdf) build with adaptive midpoint subdivision when σ_C grows >2×, log-log interpolation of integrated yys onto ESZ for Coulomb-corrected total/elastic. T50 tape34 status STRUCTURAL_FAIL → **NUMERIC_PASS @1e-5**, lines 59→**163** (matches ref exactly), passing 35→**103/163**. T01/T02 unchanged. Remaining: 60 sub-1e-5 lines from FP rounding in Coulomb / trapezoidal accumulation order. | `worklog/T50_acer_phase1_scaffolding.md` |
+| 52    | 2026-04-24 | T50 ACER promotion, phases 1-4 (α+He-4) | **PARTIAL.** AcerParams card-1 parser fixed to 5 slots (every acer test was missing `ngend`); header BIT-IDENTICAL modulo date via MF1/MT451 reader + NSUB→letter + AWR override + Fortran-faithful hz/hd/hm alignment + f11.0 trailing-dot; JXS layout corrected (MTR/LQR/TYR/LSIG/SIG always populated; LDLW/DLW sentinel; END=length); MF6 incident-energy union added to ESZ grid (NES 29→32). T50 tape34 16/163 exact. T01/T02 regression-clean. Superseded by Phase 53. | `worklog/T50_acer_phase1_scaffolding.md` |
 | 51    | 2026-04-22 | T15 covcal LB=5 σ·flx-weighted collapse (NJOY.jl-f8k Bug B) | **FIX LANDED.** MT=77 self-cov C[20,20] 0.04 → 0.02987998 (exact match to ref). `multigroup_covariance` extended with xs_row/xs_col/ugrid kwargs; orchestration refactored to collect blocks per (mt, mt2) pair and route LB=5/6 through union-grid σ·flx-weighted collapse. For iwt=2, flux = bin width (matches GENDF). T04 MF31 unchanged. | `worklog/T15_covcal_lb5_weighted.md` |
 | 50    | 2026-04-21 | T15 covcal MT=77 diagnosis (NJOY.jl-f8k) | ROOT CAUSE PINNED — Bug A (writer NK count) + Bug B (midpoint sampling vs XS·flux-weighted union-grid expansion). Fortran trace in `/tmp/t15_fortran_diag/stdout.log`. **No code changes** — implementation deferred. | `worklog/T15_covcal_mt77_diagnosis.md` |
 | 49    | 2026-04-21 | T15 errorr MF33 NC v2 sub-item 1 (double-NC cross-pairs) | Cov(2, 4) sub-section 3 → 65 lines (ref 69). T15 tape26 4178 → 4240. T04 baseline preserved. | `worklog/T15_T17_errorr_nc_expansion_v2.md` |
@@ -406,36 +407,38 @@ the work.
 ### P1 — ACER promotion (T50 α+He-4 and 8 sibling tests)
 
 - **Retired bead**: none.
-- **Status (Phase 52, 2026-04-24)**: parser + iopt=7 passthrough + header
-  bit-identical + JXS layout + total-XS-from-partials landed. T50
-  `tape34` 11/163 exact (up from 0). See
+- **Status (Phase 53, 2026-04-27)**: parser + iopt=7 passthrough + header
+  bit-identical + JXS layout + total-XS-from-partials (P1-3) + full
+  `unionx` port (MF6 anchor merge with c-overwrite quirk + step-1.2
+  ratio enforcement + gety1 dedup) (P5) + `acecpe` port (LAW=5 → LAW=14
+  Coulomb+nuclear, identical-particle interference, adaptive subdivision
+  at Mott singularity, log-log interpolated Coulomb-corrected
+  total/elastic) (P6). T50 `tape34` status STRUCTURAL_FAIL →
+  **NUMERIC_PASS @1e-5** with line count exactly matching ref (163);
+  103/163 lines pass at 1e-5. T01/T02 unchanged. See
   `worklog/T50_acer_phase1_scaffolding.md` for full detail.
 - **Scope**: promote `acer_module` from MF3-only stub to real ACE
-  generator passing T50 at 1e-9. Unlocks 9 sibling tests (T14, T48,
-  T50-T54, T62, T71 — all RAN_OK today without oracle comparison).
+  generator passing T50 at 1e-9. Unlocks 8 sibling tests (T14, T48,
+  T51-T54, T62, T71 — all RAN_OK today without oracle comparison).
 - **Next work items**:
-  1. **ESZ grid linearization** (29 → 37 energies): port Fortran
-     `unionx` (`acefc.f90:1538-1702`). Union of MF3 + MF6 incident
-     energies + adaptive linearization at `thin(3)=0.001` (1% tol).
-     T50 adds 11 points and drops 3 vs raw MF3.
-  2. **LAND/AND elastic angular block** (418 XSS words on T50): port
-     MF6 LAW=5 (identical-particle Coulomb+nuclear) → ACE LAW=14
-     (tabulated CDF) conversion. Source: `acefc.f90:4890-6320`
-     (`acelod`). This is the main angular converter and is reusable
-     across T51-T54, T62, T71.
-  3. **NSUB → letter table verification**: speculative mappings for
-     deuteron/triton/He-3. Check T51 (proton+H-2), T53 (deuteron+H-2),
-     T54 (proton+H-3), T62 (deuteron+He-3).
-  4. **iopt=7 aplots port**: real viewr plot-tape generator, not empty
-     stub.
-- **Where**: `src/orchestration/modules/acer.jl`, `src/formats/ace_builder.jl`,
-  `src/formats/ace_writer.jl`, `src/formats/ace_types.jl`,
+  1. **Tighten T50 from 1e-5 to 1e-9** (60 sub-1e-5 lines remain): FP
+     rounding in per-μ Coulomb evaluation, trapezoidal cumm
+     accumulation order, log-log interp on yys. Method: `write(*,...)`
+     diagnostics in Fortran `acecpe` to capture intermediate sigc /
+     signi / cumm / signow values; match Julia's order step-by-step.
+  2. **Sibling tests T51-T54, T62, T71**: verify NSUB→letter mappings
+     (proton+H-2, deuteron+H-2, etc.), exercise additional reaction
+     types (non-elastic MTs in MF6, MT=600+ for proton emission).
+     Each test surfaces feature gaps to port piecewise.
+  3. **iopt=7 aplots port**: real viewr plot-tape generator, not empty
+     stub. Lower priority — unblocks viewr testing only.
+- **Where**: `src/orchestration/modules/acer.jl`,
+  `src/formats/ace_builder.jl`, `src/formats/ace_charged.jl` (NEW),
   `src/endf/readers.jl`.
 - **Acceptance**: T50 `tape34` 163/163 exact at 1e-9 via execute.py;
   no regression on T01 ACE or any currently-passing test.
-- **Estimated cost**: ~1 session for `unionx` port, ~2-3 sessions for
-  MF6 LAW=5 → ACE LAW=14 converter. The acer port is a multi-session
-  grind comparable to leapr or heatr.
+- **Estimated cost**: ~½ session for the FP-grind to 1e-9 (Phase 7);
+  ~1-2 sessions per sibling test as new feature gaps surface.
 
 ### P3 — ~55 DIFFS cases — per-tape bisection (Grind Method)
 
