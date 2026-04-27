@@ -1,16 +1,22 @@
-# T50 — ACER module promotion, Phases 1-3
+# T50 — ACER module promotion, Phases 1-4
 
-**Date**: 2026-04-24
+**Date**: 2026-04-24 (Phases 1-3) + 2026-04-27 (Phase 4 worklog amend)
 **Test**: T50 (α-particle + He-4, MAT=228, ENDF/B-VIII.0, charged-particle ACE)
 **Goal**: Promote `acer_module` from iopt=1 MF3-only stub to real ACE generator targeting T50's 163-line `referenceTape34`.
 
 ## Score at session close
 
-| Artefact | Before | After | Ref | Status |
-|----------|--------|-------|-----|--------|
-| tape34 exact lines | — | 11 / 163 | 163 | HEADER correct modulo date; ESZ partial; JXS correct format |
-| tape34 total lines | — | 49 | 163 | 114 lines short (angular block) |
-| T50 run | crash | RAN_OK | runs to completion | ✓ |
+| Artefact | Before | Phase 3 | **Phase 4** | Ref | Status |
+|----------|--------|---------|-------------|-----|--------|
+| tape34 exact lines | — | 11 / 163 | **16 / 163** | 163 | HEADER bit-identical modulo date; NXS/JXS shape correct; ESZ within 5 energies |
+| tape34 total lines | — | 49 | **53** | 163 | 110 lines short (angular block) |
+| tape34 NES | — | 29 | **32** | 37 | 5 short — needs `unionx` adaptive lin |
+| T01 tape25 (regression) | 32750/32962 | 32750/32962 | **32750/32962** | 32962 | unchanged ✓ |
+| T02 tape28 (regression) | 12037/13873 | 12037/13873 | **12037/13873** | 13873 | unchanged ✓ |
+| T50 run | crash | RAN_OK | RAN_OK | runs | ✓ |
+
+Five commits pushed: `bd43751` (P1), `fe5aeec` (P2), `c061919` (P3),
+`820d64e` (HANDOFF + worklog P1-3), `b952b33` (P4).
 
 ## Phases
 
@@ -103,23 +109,59 @@ particle evaluations commonly have only MT=2 (α+He-4 has literally
 MT=2 and nothing else). Now reconstructs total as sum of non-redundant
 partials, matching Fortran `unionx`.
 
+### Phase 4 — MF6 incident-energy union
+
+Commit `b952b33`.
+
+**Bug**: ESZ grid was the raw 29-point MF3 grid. Fortran's `unionx`
+guarantees every MF6 tabulation point lands on an ESZ grid point —
+otherwise the ACE angular/energy block pointers (LAND/AND, LDLW/DLW)
+have nowhere to cross-reference at lookup time.
+
+**New reader** `read_mf6_incident_energies(filename, mat, mt)` in
+`src/endf/readers.jl`. Walks first MF6/MT subsection: HEAD →
+yield TAB1 (whose L2 carries LAW) → if LAW ∈ {1,5,6,7} read TAB2 +
+NE record CONT headers, extracting C2 (incident E) from each. NJOY
+standard assumes all NK subsections share the same incident grid
+(verified by `topfil` at acefc.f90:3500+).
+
+Subtle bug fixed during port: ENDF MF6 subsections start with the
+**yield TAB1's HEAD record** — there is NOT a separate sub-section
+CONT before the yield TAB1. Initial implementation read the sub-head
+as a CONT then called `_discard_tab1` which tried to read another
+HEAD that wasn't there. Fix: `read_tab1` consumes the whole yield
+including its HEAD; LAW comes from `yield.L2`.
+
+For T50 MF6/MT=2 LAW=5: returns `[0.295, 3.0, 4.0, 12.9, 16.6, 20.0]`
+MeV. Three of these (0.295, 3.0, 20.0) are already in MF3; three are
+new (4.0, 12.9, 16.6).
+
+**Wiring**: `acer_module` iterates over every MT in the PENDF MF3
+dict, attempts `read_mf6_incident_energies`, and unions the result
+into `master_e`. Existing per-MT linear interpolation code re-samples
+each MT's XS onto the unioned grid.
+
+**Impact**: T50 NES 29 → 32; XSS length 146 → 161; tape34 exact
+11 → 16. T01 / T02 unchanged (verified — neither uses iopt=1 + MF6).
+
 ## Outstanding work
 
-### Grid linearization (29 → 37 energies)
+### Grid linearization (32 → 37 energies — adaptive thin)
 
-Julia's ESZ uses the raw 29-point MF3 grid. Ref has 37. Diff analysis:
-ref adds 11 points (0.72, 0.88, 1.3, 1.8, 2.4, 2.9, 3.6, 4.0, 8.4, 12.9,
-16.6 MeV) and drops 3 (4.4416, 13.578, 17.906 MeV). Net +8.
+Julia's ESZ now has 32 (MF3 ∪ MF6 incident E). Ref has 37. Net +5.
 
-4.0, 12.9, 16.6 MeV are MF6/MT=2 incident energies (union contribution).
-The other 8 extras are from Fortran `unionx`'s adaptive linearization
-pass with default `thin(3)=0.001` (1% relative tolerance on linear
-interpolant). The 3 dropped points are cases where the midpoint passes
-within tolerance of its neighbors and gets thinned.
+Detailed diff after Phase 4: ref adds **8** linearisation points
+(0.72, 0.88, 1.3, 1.8, 2.4, 2.9, 3.6, 8.4 MeV) and drops **3** of MF3
+(4.4416, 13.578, 17.906 MeV) which are within thin(3)=0.001 of the
+straight-line interpolant of their neighbors. Net +5 on the current
+32-point baseline.
 
 **Next step**: port `unionx` from `acefc.f90:1538-1702`. Key functions:
-- union of MF3 + MF6/MF4 incident energy grids
-- adaptive linearization with thin(3) tolerance
+- adaptive linearization with thin(3) tolerance (default 0.001)
+- midpoint-on-line thinning (drops 4.4416, 13.578, 17.906 on T50)
+- linear-interp midpoint subdivision when error > thin(3) (adds
+  the 8 extras between sparse MF3 panels where elastic XS rises
+  steeply, e.g. 0.595 → 0.72 → 0.88 → 0.896 MeV)
 - threshold detection + insertion
 
 ### LAND/AND elastic angular block (418 XSS words)
@@ -149,6 +191,14 @@ T62, T71.
   digits (`.001a`). Not exercised by current tests.
 - iopt=7 nplot=-1 vs nplot=other not differentiated. Fortran uses
   nplot to drive aplots; Julia always writes an empty viewr tape.
+- `read_mf6_incident_energies` only walks the FIRST subsection of NK.
+  All subsequent subsections are skipped with no validation that they
+  share the same incident grid. Fortran `topfil` does verify this for
+  ENDF-6 evaluations; if a test ever surfaces with mismatched grids
+  the reader will need extension.
+- LAW=2 path in the MF6 reader is a no-op. Standard MF6 elastic
+  evaluations don't use LAW=2; angular-only distributions do. Port
+  when a test surfaces it.
 
 ## References consulted
 
