@@ -105,6 +105,79 @@ function read_mf6_incident_energies(filename::AbstractString, mat::Integer, mt::
 end
 
 """
+    MF6Law5Subsection
+
+One incident-energy block of an MF6/MT LAW=5 (charged-particle elastic)
+distribution. ENDF-6 §6.2.5: LIST record with header
+(SPI, E, LTP, LIDP, NW, NL), followed by NW=2*NL real numbers in
+(μ_k, p_k) pairs.
+
+For LTP=12 (the form T50 uses), `data` holds tabulated cosines and
+probabilities directly. For LTP<12, `data` holds Legendre amplitude
+coefficients that must be expanded via `ptlegc` to (μ, p) pairs.
+"""
+struct MF6Law5Subsection
+    spi::Float64
+    e::Float64       # incident energy [eV]
+    ltp::Int
+    lidp::Int
+    nl::Int          # number of (μ,p) pairs (or Legendre order, depending on LTP)
+    mu::Vector{Float64}    # length nl
+    prob::Vector{Float64}  # length nl
+end
+
+"""
+    read_mf6_law5(filename, mat, mt) -> (header::NamedTuple, subs::Vector{MF6Law5Subsection})
+
+Read every NE-incident-energy LIST record from MF6/MT LAW=5 (identical-
+particle Coulomb+nuclear elastic). Header carries top-of-section CONT
+fields (ZA, AWR, JP, LCT, NK) and the yield TAB1's LAW; subs is one
+entry per incident energy.
+
+Returns `(nothing, [])` if MF6/MT or LAW=5 is absent.
+
+Ref: ENDF-6 §6.2.5; njoy-reference/src/acefc.f90:6529-6539 (acecpe LIST
+read), 6566-6625 (μ,p extraction).
+"""
+function read_mf6_law5(filename::AbstractString, mat::Integer, mt::Integer)
+    subs = MF6Law5Subsection[]
+    header = (za=0.0, awr=0.0, jp=0, lct=0, nk=0, law=0, ne=0,
+              spi=0.0, lidp=0)
+    open(filename, "r") do io
+        find_section(io, 6, mt; target_mat=Int(mat)) || return
+        h = read_cont(io)
+        za, awr, jp, lct, nk = Float64(h.C1), Float64(h.C2), Int(h.L1), Int(h.L2), Int(h.N1)
+        nk <= 0 && return
+        yield = read_tab1(io)
+        law = Int(yield.L2)
+        law == 5 || return  # only LAW=5 here
+        # TAB2 for LAW=5 carries the section-level SPI (C1) and LIDP (L1).
+        # Ref: njoy-reference/src/acefc.f90:5830-5831 and ENDF-6 §6.2.5.
+        tab2 = read_tab2(io)
+        ne   = Int(tab2.NZ)
+        spi  = Float64(tab2.C1)
+        lidp = Int(tab2.L1)
+        header = (; za, awr, jp, lct, nk, law, ne, spi, lidp)
+        for _ in 1:ne
+            rec = read_list(io)
+            e   = Float64(rec.C2)
+            ltp = Int(rec.L1)
+            # rec.N1 = NW, rec.N2 = NL. NL pairs of (μ,p) starting at data[1].
+            nl  = Int(rec.N2)
+            mu   = Vector{Float64}(undef, nl)
+            prob = Vector{Float64}(undef, nl)
+            for k in 1:nl
+                mu[k]   = rec.data[2k-1]
+                prob[k] = rec.data[2k]
+            end
+            # spi and lidp inherited from the TAB2 (per Fortran acefc.f90:5830).
+            push!(subs, MF6Law5Subsection(spi, e, ltp, lidp, nl, mu, prob))
+        end
+    end
+    header, subs
+end
+
+"""
     acer_incident_letter(nsub) -> Char
 
 Map ENDF-6 NSUB (MF1/MT451 third CONT N1 field) to the single-letter ACE
