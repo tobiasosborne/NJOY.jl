@@ -1,22 +1,25 @@
-# T50 — ACER module promotion, Phases 1-4
+# T50 — ACER module promotion, Phases 1-5
 
-**Date**: 2026-04-24 (Phases 1-3) + 2026-04-27 (Phase 4 worklog amend)
+**Date**: 2026-04-24 (Phases 1-3) + 2026-04-27 (Phase 4 + Phase 5)
 **Test**: T50 (α-particle + He-4, MAT=228, ENDF/B-VIII.0, charged-particle ACE)
 **Goal**: Promote `acer_module` from iopt=1 MF3-only stub to real ACE generator targeting T50's 163-line `referenceTape34`.
 
 ## Score at session close
 
-| Artefact | Before | Phase 3 | **Phase 4** | Ref | Status |
-|----------|--------|---------|-------------|-----|--------|
-| tape34 exact lines | — | 11 / 163 | **16 / 163** | 163 | HEADER bit-identical modulo date; NXS/JXS shape correct; ESZ within 5 energies |
-| tape34 total lines | — | 49 | **53** | 163 | 110 lines short (angular block) |
-| tape34 NES | — | 29 | **32** | 37 | 5 short — needs `unionx` adaptive lin |
-| T01 tape25 (regression) | 32750/32962 | 32750/32962 | **32750/32962** | 32962 | unchanged ✓ |
-| T02 tape28 (regression) | 12037/13873 | 12037/13873 | **12037/13873** | 13873 | unchanged ✓ |
-| T50 run | crash | RAN_OK | RAN_OK | runs | ✓ |
+| Artefact | Before | Phase 3 | Phase 4 | **Phase 5** | Ref | Status |
+|----------|--------|---------|---------|-------------|-----|--------|
+| tape34 exact lines | — | 11 / 163 | 16 / 163 | **35 / 59 produced** | 163 | ESZ values bit-identical (37/37) |
+| tape34 total lines | — | 49 | 53 | **59** | 163 | 104 lines short (angular block) |
+| tape34 NES | — | 29 | 32 | **37** | 37 | EXACT match ✓ |
+| T01 tape25 (regression) | 32750/32962 | 32750/32962 | 32750/32962 | **32812/32962** | 32962 | NUMERIC_PASS @1e-5; unchanged from Phase 4 baseline ✓ |
+| T02 tape28 (regression) | 12037/13873 | 12037/13873 | 12037/13873 | **12519/13873** | 13873 | NUMERIC_PASS @1e-5; unchanged from Phase 4 baseline ✓ |
+| T50 run | crash | RAN_OK | RAN_OK | RAN_OK | runs | ✓ |
 
-Five commits pushed: `bd43751` (P1), `fe5aeec` (P2), `c061919` (P3),
-`820d64e` (HANDOFF + worklog P1-3), `b952b33` (P4).
+(T01/T02 numbers in earlier rows were stale at the time of writing; the
+Phase-4 baseline is what Phase 5 measures and confirms unchanged.)
+
+Six commits pushed: `bd43751` (P1), `fe5aeec` (P2), `c061919` (P3),
+`820d64e` (HANDOFF + worklog P1-3), `b952b33` (P4), `e543e56` (P5).
 
 ## Phases
 
@@ -144,25 +147,69 @@ each MT's XS onto the unioned grid.
 **Impact**: T50 NES 29 → 32; XSS length 146 → 161; tape34 exact
 11 → 16. T01 / T02 unchanged (verified — neither uses iopt=1 + MF6).
 
+### Phase 5 — `unionx` step-1.2 + dedup → ESZ exact
+
+Commit `e543e56`.
+
+**Pre-flight diagnostics**: patched `unionx` in
+`njoy-reference/src/acefc.f90` with `write(*,...)` between MF6-union
+and step-pass, and inside `aceout`'s ESZ loop. Re-compiled and re-ran
+Fortran on T50 to capture the exact intermediate grids:
+
+  | Stage | Points |
+  |-------|--------|
+  | MF3 (post-stage-1, pre-stage-2) | **32** (29 MF3 + 3 unique MF6 anchors, but with quirks below) |
+  | Post-step-pass | **39** |
+  | Final ESZ via `gety1` | **37** |
+
+The Phase-4 worklog's claim that the Fortran does "thin(3)=0.001
+midpoint-on-line drop" was wrong — `unionx`'s `thin` parameter array
+is all-zero by default (T50 deck has no card-7 thinning) and ithopt=0
+disables thinning entirely. The actual 3-point drop comes from a
+**c-buffer overwrite quirk** in the MF6-union loop, not adaptive
+linearization.
+
+**Three Fortran quirks reproduced verbatim**:
+
+1. **MF6-union c-overwrite drop** (acefc.f90:1608-1656). The inner
+   `do while (eg.lt.ee)` writes `c` from the *previous* `finda`, then
+   advances `k` and re-reads `c`. After the inner loop exits, the
+   explicit `c(1)=ee` overwrites `c` before the next `iee` iteration's
+   first `loada` runs — so the MF3 point that was just read into `c`
+   is lost, AND the next iter's first `loada` writes the anchor again,
+   producing a duplicate. Effect on T50: drops MF3 4.4416 (between
+   MF6 anchor 4.0 and next MF3 4.7004), drops 13.578 (between 12.9
+   and 14.416), drops 17.906 (between 16.6 and 20.0). Adds duplicates
+   at 4.0, 12.9, 16.6.
+
+2. **Step-1.2 off-by-one drop of second-to-last** (acefc.f90:1658-1686).
+   The outer `do while (k.lt.nold)` advances k inside the body; the
+   inner `if (k.lt.nold)` skips processing for the last k. Net effect:
+   processes panels [old[1],old[2]]…[old[nold-2],old[nold-1]] (writing
+   each left-endpoint + step pads), then the post-loop `loada(jt=-j)`
+   writes old[nold] — old[nold-1] is **never written**. For T50 this
+   silently drops the second 16.6 duplicate, so post-step has only
+   one 16.6 instead of two. Step pads (8 of them) inserted at 0.72,
+   0.88, 1.30, 1.80, 2.40, 2.90, 3.60, 8.40 MeV.
+
+3. **gety1 dedup at aceout ESZ readback** (acefc.f90:5341-5355).
+   When MT=1 is read back from the scratch tape via `gety1` to
+   populate the ACE ESZ block, adjacent equal energies (TAB1 step
+   discontinuities) collapse to single entries. Removes the remaining
+   duplicates at 4.0 and 12.9 → final 37 ESZ points.
+
+**Julia port**: new `_acer_unionx_charged(mf3_grid, mf6_anchors)` in
+`src/orchestration/modules/acer.jl` reproduces all three stages with
+matching FP semantics (`round_sigfig(1.2*eg, 2, 0)` mirrors
+`sigfig(step*eg, 2, 0)`). Gated on `MF1/MT451 NSUB ≠ 10` so the
+neutron path (T01/T02 etc.) is untouched.
+
+**Impact**: T50 NES 32 → **37** (matches reference exactly). All 37
+ESZ energies bit-identical to reference. tape34 exact lines 16 → **35
+of 59 produced** (35/163 of reference). T01 32812/32962 unchanged
+(NUMERIC_PASS @1e-5). T02 tape28 12519/13873 unchanged.
+
 ## Outstanding work
-
-### Grid linearization (32 → 37 energies — adaptive thin)
-
-Julia's ESZ now has 32 (MF3 ∪ MF6 incident E). Ref has 37. Net +5.
-
-Detailed diff after Phase 4: ref adds **8** linearisation points
-(0.72, 0.88, 1.3, 1.8, 2.4, 2.9, 3.6, 8.4 MeV) and drops **3** of MF3
-(4.4416, 13.578, 17.906 MeV) which are within thin(3)=0.001 of the
-straight-line interpolant of their neighbors. Net +5 on the current
-32-point baseline.
-
-**Next step**: port `unionx` from `acefc.f90:1538-1702`. Key functions:
-- adaptive linearization with thin(3) tolerance (default 0.001)
-- midpoint-on-line thinning (drops 4.4416, 13.578, 17.906 on T50)
-- linear-interp midpoint subdivision when error > thin(3) (adds
-  the 8 extras between sparse MF3 panels where elastic XS rises
-  steeply, e.g. 0.595 → 0.72 → 0.88 → 0.896 MeV)
-- threshold detection + insertion
 
 ### LAND/AND elastic angular block (418 XSS words)
 
