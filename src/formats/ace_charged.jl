@@ -202,10 +202,12 @@ function acecpe_one_incident(sub::MF6Law5Subsection, xelas::Float64,
                                 fill(0.0, length(mu_out)), 0.0, 0.0)
     end
 
-    # Normalize: pdf = sigtot/cumm (per acefc.f90:6634-6636), cdf = cumm/cumm.
-    pdf = [sigtot_out[i] / cumm for i in eachindex(sigtot_out)]
-    cdf = [cumm_out[i]   / cumm for i in eachindex(cumm_out)]
-    AceCpeIncident(e, mu_out, pdf, cdf, cumm * 2π, eht * 2π)
+    # Normalize and apply Fortran's sigfig rounding (acefc.f90:6634-6636):
+    # μ and pdf at 7 sigfigs, cdf at 9 sigfigs.
+    mu_rounded  = [round_sigfig(mu_out[i],     7, 0) for i in eachindex(mu_out)]
+    pdf = [round_sigfig(sigtot_out[i] / cumm, 7, 0) for i in eachindex(sigtot_out)]
+    cdf = [round_sigfig(cumm_out[i]   / cumm, 9, 0) for i in eachindex(cumm_out)]
+    AceCpeIncident(e, mu_rounded, pdf, cdf, cumm * 2π, eht * 2π)
 end
 
 """

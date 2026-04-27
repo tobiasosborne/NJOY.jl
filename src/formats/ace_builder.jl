@@ -214,14 +214,19 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
 
     # Charged-particle elastic override: replace total/elastic/heating with
     # Coulomb-corrected values from acer_charged_elastic, attach the LAW=14
-    # angular block. Ref: njoy-reference/src/acefc.f90:6646-6667.
+    # angular block. Note: Fortran acecpe modifies xss(esz+nes..2*nes-1)
+    # (total) and xss(esz+3*nes..4*nes-1) (elastic) but leaves the
+    # absorption column xss(esz+2*nes..3*nes-1) untouched — see
+    # acefc.f90:6646-6667. We therefore preserve `absorption_xs` from the
+    # pre-Coulomb computation rather than recomputing it as total-elastic
+    # (which would introduce ~1e-14 FP noise from the asymmetric 9/7-sigfig
+    # rounding of total vs elastic).
     angular_elastic = nothing
     if charged_elastic !== nothing
         angular_elastic = charged_elastic.angular
         total_xs    = charged_elastic.total
         elastic_xs  = charged_elastic.elastic
         heating     = charged_elastic.heating
-        absorption_xs = max.(total_xs .- elastic_xs, 0.0)
     end
 
     ACENeutronTable(header=header,
