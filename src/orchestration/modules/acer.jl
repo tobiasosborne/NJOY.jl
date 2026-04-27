@@ -76,17 +76,16 @@ function acer_module(tapes::TapeManager, params::AcerParams)
          lis = 0, liso = 0, nfor = 6, awi = 0.0, emax = 2e7, lrel = 0, nver = 0)
     end
 
-    # For incident-charged-particle ACE, run the Fortran unionx pipeline:
-    # MF3 union → MF6/MT2 anchor merge (with the c-buffer overwrite quirk
-    # that drops one MF3 point per anchor and creates duplicates) → step-1.2
-    # ratio enforcement (off-by-one drops second-to-last) → gety1-style
-    # dedup at aceout. Ref: njoy-reference/src/acefc.f90:1538-1693 (unionx
-    # ICP path) and acefc.f90:5341-5355 (aceout ESZ readback via gety1).
-    # NSUB=10 → neutron incident, takes the simpler izai==1 path (no MF6
-    # anchor merge); any other NSUB is a charged particle.
+    # NSUB=10 → neutron incident; any other NSUB is a charged particle.
     izai_neutron = (mf1.nsub == 10)
+    endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
     if !izai_neutron
-        endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+        # Charged-particle ACE: run the Fortran unionx pipeline —
+        # MF3 union → MF6/MT2 anchor merge (with the c-buffer overwrite
+        # quirk that drops one MF3 point per anchor and creates duplicates)
+        # → step-1.2 ratio enforcement (off-by-one drops second-to-last) →
+        # gety1-style dedup at aceout. Ref: njoy-reference/src/acefc.f90
+        # :1538-1693 (unionx ICP path) and :5341-5355 (aceout ESZ readback).
         mf6_e = try
             read_mf6_incident_energies(endf_for_mf6, mat, 2)
         catch
@@ -94,6 +93,25 @@ function acer_module(tapes::TapeManager, params::AcerParams)
         end
         if !isempty(mf6_e)
             master_e = _acer_unionx_charged(master_e, sort(mf6_e))
+        end
+    else
+        # Neutron incident: union MF6 incident energies for ALL non-total
+        # MTs into the master grid. This is the simpler (izai==1) path that
+        # Fortran takes at acefc.f90:1190+ — every MF6 tabulation point
+        # must land on an ESZ grid point so the LAND/AND pointers can
+        # cross-reference. Pre-existing behaviour from before the Phase-5
+        # charged-particle restructure; required by T08 (Ni-61 has MF6 for
+        # several inelastic MTs whose incident energies aren't all in MT=1's
+        # lunion grid).
+        for mt in keys(mf3)
+            mt == 1 && continue
+            mf6_e = try
+                read_mf6_incident_energies(endf_for_mf6, mat, mt)
+            catch
+                Float64[]
+            end
+            isempty(mf6_e) && continue
+            master_e = sort(unique(vcat(master_e, mf6_e)))
         end
     end
     n_e = length(master_e)
