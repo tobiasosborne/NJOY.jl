@@ -132,7 +132,7 @@ function acecpe_one_incident(sub::MF6Law5Subsection, xelas::Float64,
             pending_endpoint_pmu = pmu
         end
 
-        # Compute sigc and signi.
+        # Compute sigc and signi (matches Fortran acefc.f90:6573-6604).
         local sigc, signi, ratr
         retry = true
         while retry
@@ -142,27 +142,25 @@ function acecpe_one_incident(sub::MF6Law5Subsection, xelas::Float64,
                 pmu_local = pmu - sigc
             end
             if iterp == 1
-                # Use interpolated ratr to back-compute signi.
-                ratr_interp = (ratrl + ((sigc + pmu_local * xelas) / sigc)) / 2
-                # The Fortran sets ratr = (ratrl + ratr)/2 BEFORE the inner loop
-                # actually computes the new ratr; we mirror by computing the
-                # endpoint's tentative ratr first.
-                signi = (ratr_interp - 1) * sigc
-                ratr  = ratr_interp
+                # iterp=1 branch: signi = (ratr - 1) * sigc, where `ratr` is
+                # the interpolated value carried over from the iteration that
+                # triggered subdivision (set below as `ratr = (ratrl+ratr)/2`).
+                # Then ratr is updated based on midpoint sigc/signi.
+                signi = (ratr - 1) * sigc
             else
                 signi = pmu_local * xelas
                 if signi < -sigc
                     signi = -sigc
                 end
-                ratr = (sigc + signi) / sigc
             end
+            ratr = (sigc + signi) / sigc
             retry = false
             # Subdivision trigger: if not first point, not already in iterp,
             # and Coulomb dominates AND grew >2× since last point.
             if jl > 1 && iterp == 0 &&
                sigc > abs(signi) && sigc > 2 * sigcl
                 iterp = 1
-                # Insert midpoint: (amul + amuu)/2 with ratr=(ratrl+ratr)/2.
+                # Save endpoint state, switch to midpoint with interpolated ratr.
                 pending_endpoint_mu  = amuu
                 pending_endpoint_pmu = pmu
                 amuu = (amul + amuu) / 2
