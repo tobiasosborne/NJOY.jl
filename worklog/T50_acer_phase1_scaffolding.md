@@ -1,25 +1,25 @@
-# T50 — ACER module promotion, Phases 1-5
+# T50 — ACER module promotion, Phases 1-6
 
-**Date**: 2026-04-24 (Phases 1-3) + 2026-04-27 (Phase 4 + Phase 5)
+**Date**: 2026-04-24 (Phases 1-3) + 2026-04-27 (Phases 4, 5, 6, 6a)
 **Test**: T50 (α-particle + He-4, MAT=228, ENDF/B-VIII.0, charged-particle ACE)
 **Goal**: Promote `acer_module` from iopt=1 MF3-only stub to real ACE generator targeting T50's 163-line `referenceTape34`.
 
 ## Score at session close
 
-| Artefact | Before | Phase 3 | Phase 4 | **Phase 5** | Ref | Status |
-|----------|--------|---------|---------|-------------|-----|--------|
-| tape34 exact lines | — | 11 / 163 | 16 / 163 | **35 / 59 produced** | 163 | ESZ values bit-identical (37/37) |
-| tape34 total lines | — | 49 | 53 | **59** | 163 | 104 lines short (angular block) |
-| tape34 NES | — | 29 | 32 | **37** | 37 | EXACT match ✓ |
-| T01 tape25 (regression) | 32750/32962 | 32750/32962 | 32750/32962 | **32812/32962** | 32962 | NUMERIC_PASS @1e-5; unchanged from Phase 4 baseline ✓ |
-| T02 tape28 (regression) | 12037/13873 | 12037/13873 | 12037/13873 | **12519/13873** | 13873 | NUMERIC_PASS @1e-5; unchanged from Phase 4 baseline ✓ |
-| T50 run | crash | RAN_OK | RAN_OK | RAN_OK | runs | ✓ |
+| Artefact | Before | P3 | P4 | P5 | **P6** | Ref | Status |
+|----------|--------|----|----|----|--------|-----|--------|
+| tape34 status | crash | DIFFS | DIFFS | DIFFS | **NUMERIC_PASS @1e-5** | BIT_IDENTICAL | major milestone |
+| tape34 lines passing | — | 11/163 | 16/163 | 35/59 | **103/163** | 163 | line count exact ✓ |
+| tape34 total lines | — | 49 | 53 | 59 | **163** | 163 | EXACT ✓ |
+| tape34 NES | — | 29 | 32 | 37 | 37 | 37 | EXACT ✓ |
+| tape34 XSS length | — | ~146 | ~161 | 186 | **604** | 604 | EXACT ✓ |
+| LAND/AND block | absent | absent | absent | absent | **present (418 words)** | 418 words | ✓ |
+| T01 tape25 (regression) | 32750 | … | … | 32812/32962 | **32812/32962** | 32962 | unchanged ✓ |
+| T02 tape28 (regression) | 12037 | … | … | 12519/13873 | **12519/13873** | 13873 | unchanged ✓ |
 
-(T01/T02 numbers in earlier rows were stale at the time of writing; the
-Phase-4 baseline is what Phase 5 measures and confirms unchanged.)
-
-Six commits pushed: `bd43751` (P1), `fe5aeec` (P2), `c061919` (P3),
-`820d64e` (HANDOFF + worklog P1-3), `b952b33` (P4), `e543e56` (P5).
+Eight commits pushed: `bd43751` (P1), `fe5aeec` (P2), `c061919` (P3),
+`820d64e` (HANDOFF + worklog P1-3), `b952b33` (P4), `e543e56` (P5),
+`64547da` (P6a — MF6 LAW=5 reader), `459016c` (P6 — acecpe port).
 
 ## Phases
 
@@ -209,25 +209,73 @@ ESZ energies bit-identical to reference. tape34 exact lines 16 → **35
 of 59 produced** (35/163 of reference). T01 32812/32962 unchanged
 (NUMERIC_PASS @1e-5). T02 tape28 12519/13873 unchanged.
 
+### Phase 6a — MF6/MT2 LAW=5 LIST reader
+
+Commit `64547da`.
+
+Added `read_mf6_law5(filename, mat, mt)` returning per-incident-E LIST
+records (μ, prob pairs) plus section-level SPI and LIDP. The
+section-level SPI/LIDP come from the TAB2 record (per Fortran
+acefc.f90:5830-5831 and ENDF-6 §6.2.5), NOT the per-LIST L2 field —
+the Fortran overwrites the LIST L2 at line 6539 making it unreliable.
+
+For T50: NE=6, NL = 13, 13, 14, 15, 32, 27 across the incident energies;
+all LTP=12, LIDP=1, SPI=0.
+
+### Phase 6 — acecpe port (LAW=5 → LAW=14 + Coulomb correction)
+
+Commit `459016c`.
+
+Port of `acecpe` from `njoy-reference/src/acefc.f90:6492-6671`. New file
+`src/formats/ace_charged.jl` provides:
+- `coulomb_sigc(μ, e, awr, awi, izai_z, target_z, spi, lidp)` — analytic
+  Coulomb (Mott / Rutherford) differential cross section, identical-
+  particle interference for LIDP=1 (acefc.f90:6585-6588).
+- `acecpe_one_incident(sub, xelas, awr, awi, izai_z, target_z)` —
+  per-E processing: at each μ in the LIST, evaluate sigc + signi;
+  trapezoidally integrate to build cdf; adaptively insert midpoints
+  where sigc grows >2× (Coulomb singularity near μ=1 needs finer
+  sampling). Returns (mu, pdf, cdf, sigtot_int, heating).
+- `acer_charged_elastic(subs, esz_e, esz_total, esz_elastic, awr, awi,
+  izai, za)` — log-log interpolates yys = sigtot_int onto every ESZ
+  point for the new Coulomb-corrected elastic_xs. Updates total_xs as
+  total[j] - signi_orig + signow_new with `sigfig(.,9,0)`. Returns
+  (AngularBlock, new_total, new_elastic, new_heating).
+
+`build_ace_from_pendf` gains a `charged_elastic` kwarg that overrides
+total/elastic/heating and attaches the AngularBlock; `acer_module`
+calls `acer_charged_elastic` when `mf1.nsub ≠ 10`. Existing
+`build_xss` LAND/AND code emits the TabulatedAngular distributions
+verbatim — no new ACE writer code needed.
+
+**Impact**: T50 tape34 status STRUCTURAL_FAIL → **NUMERIC_PASS at 1e-5**.
+Line count 59 → **163 (matches reference exactly)**, lines passing
+35 → **103/163 (1e-5)**. XSS length 186 → 604 (matches). LAND/AND
+block emitted (418 words: 1 LAND + 13 AND header + 405 tabulation
+across 6 incident E with NPs = 17, 17, 18, 20, 32, 27). T01 / T02
+unchanged (gated on NSUB ≠ 10).
+
 ## Outstanding work
 
-### LAND/AND elastic angular block (418 XSS words)
+### Tighten T50 to bit-identical (60 sub-1e-5 diffs)
 
-Completely missing. Ref structure:
-- LAND[0] = 1 at XSS[186] (offset into AND block)
-- AND[1] = 6 (NE = number of incident energies with angular dist)
-- AND[2..7] = 6 incident energies (0.295, 3, 4, 12.9, 16.6, 20 MeV)
-- AND[8..13] = 6 LC locators (all negative → tabulated CDF form)
-- AND[14..604] = 6 tabulated (μ, pdf, cdf) tables
+The remaining 60 lines that don't match at 1e-9 are FP rounding
+differences in:
+- per-μ Coulomb evaluation (`(2*η²/wn²)/(1-μ²)` etc. accumulated in
+  a slightly different order than Fortran)
+- trapezoidal cumm accumulation (IEEE 754 non-associativity over up
+  to 32 μ points per incident E)
+- log-log signow interpolation across 6 incident energies onto 37 ESZ
+  points
 
-Source: MF6/MT=2 with LAW=5 (identical particles, Coulomb+nuclear).
-Conversion from ENDF MF6 LAW=5 → ACE LAW=12/14 (tabulated CDF)
-is the core work.
+Probably some are real bugs in the iterp midpoint subdivision logic
+where my pmu/ratr handling diverges from Fortran. First-diff at
+line 47 shows `7.33729400000E-01` (J) vs `7.33729500000E-01` (R) —
+±1 in 7th sigfig, classic FP precision.
 
-**Next step**: port Fortran `acelod` LAW handling (acefc.f90:4890-6320),
-specifically the MF6 LAW=5 → ACE conversion path. This is the main
-angular-distribution converter and will be reusable across T51-T54,
-T62, T71.
+**Next step**: run the whole T50 chain through `lean4:lean4-proof-repair`
+style FP grind — extract intermediate values from Fortran via
+`write(*,...)` patches and match each step.
 
 ### Known-untested bugs
 
