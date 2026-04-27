@@ -63,21 +63,38 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     master_mt = haskey(mf3, 1) ? 1 : argmax(Dict(k => length(v[1]) for (k, v) in mf3))
     master_e  = mf3[master_mt][1]
 
-    # For charged-particle ACE (and any case where MF6 is present), union
-    # the MF6 incident energies into the ESZ grid. Fortran acer unionx
-    # does this so every MF6 tabulation point lands on an ESZ grid point —
-    # the ACE angular/energy block pointers would otherwise have nowhere to
-    # cross-reference. Ref: njoy-reference/src/acefc.f90:1538-1702.
-    endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
-    for mt in keys(mf3)
-        mt in (1,) && continue  # MT=1 is redundant total, never has MF6
+    # Read MF1/MT451 header (needed early to gate the charged-particle ESZ
+    # path on NSUB — Fortran's `if (izai.eq.1)` at acefc.f90:1190 vs the
+    # `else` branch at line 1538 that runs the unionx ICP pipeline).
+    endf_path = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+    mf1 = try
+        read_mf1_mt451_header(endf_path, mat)
+    catch err
+        @warn "acer: read_mf1_mt451_header failed: $err — falling back to PENDF MF1"
+        (za = _acer_extract_za(pendf, mat), awr = NaN, nsub = 10,
+         lrp = 0, lfi = 0, nlib = 0, nmod = 0, elis = 0.0, sta = 0.0,
+         lis = 0, liso = 0, nfor = 6, awi = 0.0, emax = 2e7, lrel = 0, nver = 0)
+    end
+
+    # For incident-charged-particle ACE, run the Fortran unionx pipeline:
+    # MF3 union → MF6/MT2 anchor merge (with the c-buffer overwrite quirk
+    # that drops one MF3 point per anchor and creates duplicates) → step-1.2
+    # ratio enforcement (off-by-one drops second-to-last) → gety1-style
+    # dedup at aceout. Ref: njoy-reference/src/acefc.f90:1538-1693 (unionx
+    # ICP path) and acefc.f90:5341-5355 (aceout ESZ readback via gety1).
+    # NSUB=10 → neutron incident, takes the simpler izai==1 path (no MF6
+    # anchor merge); any other NSUB is a charged particle.
+    izai_neutron = (mf1.nsub == 10)
+    if !izai_neutron
+        endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
         mf6_e = try
-            read_mf6_incident_energies(endf_for_mf6, mat, mt)
+            read_mf6_incident_energies(endf_for_mf6, mat, 2)
         catch
             Float64[]
         end
-        isempty(mf6_e) && continue
-        master_e = sort(unique(vcat(master_e, mf6_e)))
+        if !isempty(mf6_e)
+            master_e = _acer_unionx_charged(master_e, sort(mf6_e))
+        end
     end
     n_e = length(master_e)
 
@@ -91,34 +108,22 @@ function acer_module(tapes::TapeManager, params::AcerParams)
         push!(mt_sorted, mt)
     end
 
-    # Assemble XS matrix. All MTs on reconr-output PENDFs share the lunion
-    # grid; log length mismatches and pad with interpolation (defensive).
+    # Assemble XS matrix. For neutron PENDFs from reconr/broadr, all partials
+    # share the lunion grid — direct copy. For the charged-particle path
+    # master_e was extended by unionx (MF6 + step pads), so MT=2 must be
+    # linearly interpolated onto the new grid.
     xs_matrix = zeros(Float64, n_e, length(mt_sorted))
     for (col, mt) in enumerate(mt_sorted)
         e_mt, xs_mt = mf3[mt]
         if length(e_mt) == n_e && e_mt == master_e
             xs_matrix[:, col] = xs_mt
         else
-            @warn "acer: MT=$mt grid ($(length(e_mt)) pts) differs from master ($(n_e) pts) — linear interp"
             xs_matrix[:, col] = _acer_linear_interp(master_e, e_mt, xs_mt)
         end
     end
 
     # Construct the PointwiseMaterial that ace_builder expects
     pm = PointwiseMaterial(Int32(mat), master_e, xs_matrix, mt_sorted)
-
-    # Read MF1/MT451 from the ENDF (not PENDF): ZA, AWR, NSUB (incident particle).
-    # Fall back to PENDF if nendf<=0. Ref: njoy-reference/src/acefc.f90 first()
-    # — incident particle IZA derived from NSUB/10 at lines 305-313.
-    endf_path = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
-    mf1 = try
-        read_mf1_mt451_header(endf_path, mat)
-    catch err
-        @warn "acer: read_mf1_mt451_header failed: $err — falling back to PENDF MF1"
-        (za = _acer_extract_za(pendf, mat), awr = NaN, nsub = 10,
-         lrp = 0, lfi = 0, nlib = 0, nmod = 0, elis = 0.0, sta = 0.0,
-         lis = 0, liso = 0, nfor = 6, awi = 0.0, emax = 2e7, lrel = 0, nver = 0)
-    end
 
     # Derive suffix letter from NSUB. The parser gave a provisional letter
     # (default 'c'); replace it with the NSUB-driven one.
@@ -305,6 +310,108 @@ function _acer_linear_interp(query_e::Vector{Float64},
             j = searchsortedlast(src_e, e)
             f = (e - src_e[j]) / (src_e[j+1] - src_e[j])
             out[i] = src_xs[j] + f * (src_xs[j+1] - src_xs[j])
+        end
+    end
+    out
+end
+
+"""
+    _acer_unionx_charged(mf3_grid, mf6_anchors) -> Vector{Float64}
+
+Build the ESZ energy grid for charged-particle ACE faithfully reproducing
+Fortran `unionx` (acefc.f90:1538-1693) plus `aceout` ESZ readback
+(acefc.f90:5341-5355).
+
+The Fortran pipeline has three stages, each with subtle bugs/quirks that
+affect the final point count and must be replicated for bit-identity:
+
+1. **MF6/MT2 anchor merge** with c-buffer overwrite quirk (lines 1608-1656).
+   The `c` array is overwritten by the explicit `c(1)=ee` write before the
+   next inner-while iteration runs. Effect: the MF3 point that was just
+   read into `c` (the one strictly greater than the anchor) is silently
+   dropped, AND the next inner-while iteration writes `c` (now holding
+   the anchor) again, creating a duplicate.
+
+2. **Step-1.2 pass** (lines 1658-1686). The outer `do while (k.lt.nold)`
+   has an off-by-one that drops the second-to-last point: panels are
+   processed for k=2..nold-1, then a final `loada` writes old[nold] —
+   old[nold-1] is never written.
+
+3. **gety1 dedup at aceout** (line 5346-5354). When aceout reads MT=1
+   back from the scratch tape via `gety1`, duplicate energies (which
+   represent step discontinuities in TAB1 form) collapse to single
+   entries.
+
+For T50 (α+He-4): MF3=29 → after stage 1 = 32 (drops 4.4416, 13.578,
+17.906; dups at 4.0, 12.9, 16.6) → after stage 2 = 39 (8 step pads
+inserted; one 16.6 dup dropped) → after stage 3 = 37.
+"""
+function _acer_unionx_charged(mf3_grid::Vector{Float64},
+                                mf6_anchors::Vector{Float64})
+    isempty(mf6_anchors) && return copy(mf3_grid)
+    isempty(mf3_grid)   && return copy(mf6_anchors)
+
+    # ---- Stage 1: MF6 anchor merge with c-buffer overwrite quirk ------
+    grid = Float64[]
+    n_old = length(mf3_grid)
+    k = 1               # 1-indexed cursor into mf3_grid (Fortran finda(k))
+    eg = mf3_grid[k]    # current "next" old-grid value
+    c_stale = mf3_grid[k]  # mirrors Fortran's `c` array — clobbered by ee writes
+    n_anc = length(mf6_anchors)
+    for (i, ee) in enumerate(mf6_anchors)
+        # Inner while: advance through old grid until eg >= ee.
+        while eg < ee && k <= n_old
+            push!(grid, c_stale)        # write previous finda's value
+            k += 1
+            if k > n_old; break; end
+            c_stale = mf3_grid[k]
+            eg = c_stale
+        end
+        # Write the MF6 anchor (this overwrites c_stale!).
+        push!(grid, ee)
+        c_stale = ee
+        # If eg == ee, advance k once (Fortran lines 1647-1651).
+        if eg == ee && k <= n_old
+            k += 1
+            if k <= n_old
+                c_stale = mf3_grid[k]
+                eg = c_stale
+            end
+        end
+        # On the LAST anchor, Fortran's loada(jt=-j,...) flushes; nothing
+        # else gets written. Trailing MF3 points beyond the last anchor
+        # are silently dropped — same behaviour we replicate here.
+    end
+
+    # ---- Stage 2: step-1.2 pass with off-by-one second-to-last drop ----
+    n_pre = length(grid)
+    if n_pre < 2
+        post_step = copy(grid)
+    else
+        post_step = Float64[]
+        # Process panels [grid[i], grid[i+1]] for i=1..n_pre-2.
+        # (Fortran outer loop k=2..nold-1; the k=nold case is skipped.)
+        for i in 1:(n_pre-2)
+            eg_i = grid[i]
+            er_i = grid[i+1]
+            push!(post_step, eg_i)
+            egrid_i = round_sigfig(1.2 * eg_i, 2, 0)
+            while egrid_i < er_i
+                push!(post_step, egrid_i)
+                eg_i = egrid_i
+                egrid_i = round_sigfig(1.2 * eg_i, 2, 0)
+            end
+        end
+        # Final point (grid[n_pre-1] is dropped — Fortran off-by-one).
+        push!(post_step, grid[n_pre])
+    end
+
+    # ---- Stage 3: gety1-style adjacent-duplicate dedup -----------------
+    # gety1 in aceout collapses adjacent equal energies to a single entry.
+    out = Float64[post_step[1]]
+    for i in 2:length(post_step)
+        if post_step[i] != post_step[i-1]
+            push!(out, post_step[i])
         end
     end
     out
