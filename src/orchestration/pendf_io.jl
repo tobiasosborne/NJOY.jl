@@ -79,9 +79,10 @@ function read_pendf(path::AbstractString)::PENDFTape
                 continue
             end
 
-            # SEND record: end of section (MT)
+            # SEND record: end of section (MT). Treated as a structural
+            # marker — we do NOT keep it in section data. The writer
+            # re-emits SEND/FEND/MEND/TEND from the structural shape.
             if mt == 0 && mf > 0 && mat > 0
-                push!(cur_lines, line)
                 flush_section!()
                 cur_mt = 0
                 continue
@@ -125,49 +126,40 @@ Sequence numbers (columns 76-80) are regenerated.
 """
 function write_pendf_tape(path::AbstractString, tape::PENDFTape)
     open(path, "w") do io
-        # TPID line
+        # TPID line: ENDF spec says MAT=1, MF=0, MT=0, seq=0.
         tpid_padded = rpad(tape.tpid, 66)[1:66]
-        @printf(io, "%s%4d%2d%3d%5d\n", tpid_padded, 0, 0, 0, 0)
+        @printf(io, "%s%4d%2d%3d%5d\n", tpid_padded, 1, 0, 0, 0)
 
         for material in tape.materials
-            seq = 0
-
-            # Write MF1/MT451 header
-            for line in material.mf1_lines
-                seq += 1
-                _write_line(io, line, material.mat, seq)
-            end
-            # SEND for MF1/MT451
+            # MF1/MT451 — seq restarts at 1; close with SEND only. The MF
+            # transition (or the trailing FEND below) emits the FEND.
+            prev_mf = 0
             if !isempty(material.mf1_lines)
-                seq += 1
-                _write_send(io, material.mat, 1, seq)
-                # FEND for MF1
-                seq += 1
-                _write_fend(io, material.mat, seq)
+                seq = 0
+                for line in material.mf1_lines
+                    seq += 1
+                    _write_line(io, line, material.mat, seq)
+                end
+                _write_send(io, material.mat, 1)
+                prev_mf = 1
             end
 
-            # Write all other sections
-            prev_mf = 1  # we just wrote MF1
             for sec in material.sections
-                # FEND between MFs
                 if sec.mf != prev_mf && prev_mf > 0
-                    seq += 1
-                    _write_fend(io, material.mat, seq)
+                    _write_fend(io, material.mat)
                 end
                 prev_mf = sec.mf
 
-                # Section data lines (SEND is included as last line of sec.lines)
+                seq = 0
                 for line in sec.lines
                     seq += 1
                     _write_line(io, line, material.mat, seq)
                 end
+                _write_send(io, material.mat, sec.mf)
             end
 
-            # Final FEND for last MF
-            if !isempty(material.sections)
-                seq += 1
-                _write_fend(io, material.mat, seq)
-            end
+            # Trailing FEND for the last MF written.
+            prev_mf > 0 && _write_fend(io, material.mat)
 
             # MEND
             @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
@@ -179,18 +171,15 @@ function write_pendf_tape(path::AbstractString, tape::PENDFTape)
 end
 
 function _write_line(io::IO, line::AbstractString, mat::Int, seq::Int)
-    # Use the data from columns 1-66, but preserve original MAT/MF/MT from 67-75
+    # Preserve cols 1-75 (data + MAT/MF/MT); regenerate seq in cols 76-80.
     data = rpad(line, 80)
     @printf(io, "%s%5d\n", data[1:75], seq)
 end
 
-function _write_send(io::IO, mat::Int, mf::Int, seq::Int)
-    @printf(io, "%66s%4d%2d%3d%5d\n", "", mat, mf, 0, seq)
-end
-
-function _write_fend(io::IO, mat::Int, seq::Int)
-    @printf(io, "%66s%4d%2d%3d%5d\n", "", mat, 0, 0, seq)
-end
+# SEND/FEND helpers reused from src/processing/pendf_writer.jl:
+#   _write_send(io, mat, mf)  — SEND record (MAT/MF/0, seq=99999)
+#   _write_fend_zero(io, mat) — FEND record (MAT/0/0, seq=0)
+const _write_fend = _write_fend_zero
 
 # =========================================================================
 # Data Extraction
@@ -384,7 +373,7 @@ function _build_mf3_lines(orig_lines::Vector{String}, energies::Vector{Float64},
                   @sprintf("%4d%2d%3d", mat, 3, _parse_int(p2[73:75])) * "    0"
     push!(lines, interp_line)
 
-    # Data lines: 3 (E, XS) pairs per line
+    # Data lines: 3 (E, XS) pairs per line. SEND is added by writer.
     mt = _parse_int(p2[73:75])
     trailer = @sprintf("%4d%2d%3d", mat, 3, mt)
     idx = 1
@@ -398,14 +387,11 @@ function _build_mf3_lines(orig_lines::Vector{String}, energies::Vector{Float64},
         push!(lines, rpad(buf, 66) * trailer * "    0")
     end
 
-    # SEND record
-    push!(lines, " "^66 * @sprintf("%4d%2d%3d", mat, 3, 0) * "    0")
-
     lines
 end
 
 """
-Build a complete new MF3 section with HEAD + TAB1.
+Build a complete new MF3 section with HEAD + TAB1. SEND is emitted by writer.
 """
 function _build_new_mf3_section(energies::Vector{Float64}, xs::Vector{Float64},
                                 mat::Int, mt::Int)
@@ -427,7 +413,7 @@ function _build_new_mf3_section(energies::Vector{Float64}, xs::Vector{Float64},
     interp = lpad(string(np), 11) * lpad("2", 11) * " "^44
     push!(lines, interp * trailer * "    0")
 
-    # Data lines
+    # Data lines (SEND is emitted by writer)
     idx = 1
     while idx <= np
         buf = ""
@@ -438,9 +424,6 @@ function _build_new_mf3_section(energies::Vector{Float64}, xs::Vector{Float64},
         end
         push!(lines, rpad(buf, 66) * trailer * "    0")
     end
-
-    # SEND
-    push!(lines, " "^66 * @sprintf("%4d%2d%3d", mat, 3, 0) * "    0")
 
     lines
 end
