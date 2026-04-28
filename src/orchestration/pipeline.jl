@@ -243,6 +243,7 @@ function run_njoy(input_path::AbstractString;
         elseif mc.name == :gaspr
             params = parse_gaspr(mc)
             gaspr_module(tapes, params)
+            _collect_gaspr!(ctx, tapes, params)
 
         else
             @warn "Module $(mc.name) not yet implemented"
@@ -440,6 +441,17 @@ function _collect_heatr!(ctx::RunContext, tapes::TapeManager, params::HeatrParam
     mf3 = extract_mf3_all(tape, params.mat)
     # Heatr adds MT=301 and MT=444
     for mt in [301, 444]
+        haskey(mf3, mt) && (ctx.extra_mf3[mt] = mf3[mt])
+    end
+end
+
+function _collect_gaspr!(ctx::RunContext, tapes::TapeManager, params::GasprParams)
+    pendf_path = resolve(tapes, params.npendf_out)
+    isfile(pendf_path) || return
+    tape = read_pendf(pendf_path)
+    mf3 = extract_mf3_all(tape, ctx.mat)
+    # Gaspr adds MT=203..207 (proton/deuteron/triton/He-3/alpha production)
+    for mt in 203:207
         haskey(mf3, mt) && (ctx.extra_mf3[mt] = mf3[mt])
     end
 end
