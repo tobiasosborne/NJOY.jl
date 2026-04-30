@@ -10,7 +10,15 @@
 struct ModuleCall
     name::Symbol
     raw_cards::Vector{Vector{String}}
+    # Verbatim deck lines belonging to this module call (in order, including
+    # comment-only lines and blank-card markers). Fortran-faithful parsers
+    # like `parse_covr` need this because the tokeniser collapses empty
+    # default-cards (`/` with no tokens) — covr treats every `/` as a
+    # distinct card terminator (including `//` for two consecutive defaults).
+    raw_lines::Vector{String}
 end
+ModuleCall(name::Symbol, raw_cards::Vector{Vector{String}}) =
+    ModuleCall(name, raw_cards, String[])
 
 struct NJOYInputDeck
     calls::Vector{ModuleCall}
@@ -51,6 +59,7 @@ function tokenise_njoy_input(text::AbstractString)::Vector{ModuleCall}
         if mod_sym in NJOY_MODULES
             i += 1
             cards = Vector{String}[]
+            raw_kept = String[]
             while i <= length(lines)
                 cline = strip(lines[i])
                 # Treat `*…*` as a string card (NJOY title/comment-string convention)
@@ -70,6 +79,7 @@ function tokenise_njoy_input(text::AbstractString)::Vector{ModuleCall}
                     end
                 end
                 raw = cline
+                push!(raw_kept, String(cline))
                 # Strip '/' terminator, but only outside quotes
                 si = _find_slash_outside_quotes(raw)
                 si > 0 && (raw = raw[1:si-1])
@@ -77,7 +87,7 @@ function tokenise_njoy_input(text::AbstractString)::Vector{ModuleCall}
                 !isempty(tokens) && push!(cards, tokens)
                 i += 1
             end
-            push!(calls, ModuleCall(mod_sym, cards))
+            push!(calls, ModuleCall(mod_sym, cards, raw_kept))
         else
             i += 1
         end
@@ -1115,19 +1125,215 @@ function parse_purr(mc::ModuleCall)::PurrParams
                max(nsigz, length(sigz)), nbin, nladr, temps, sigz)
 end
 
+"""
+One mat/mt/mat1/mt1 case from a covr card 4. Matches the
+`(imat,imt,imat1,imt1)` quadruple in covr.f90 line 259. Defaults match
+Fortran lines 256-258: imt=imat1=imt1=0 if omitted on the card.
+"""
+struct CovrCase
+    mat::Int
+    mt::Int       # 0 = all MTs for this MAT; negative = strip-list semantics
+    mat1::Int     # 0 = use mat
+    mt1::Int      # 0 = use mt
+end
+
+"""
+Full input parameters for a single Fortran covr invocation. Mirrors the
+free-format card sequence in covr.f90 lines 168-260:
+
+  card 1:  nin, nout, nplot
+  cards 2/2'/2a/3a   (plot mode, nout ≤ 0)
+    card 2:   icolor (0=mono, 1=color, 2=color+custom-tlev)
+    card 2':  nlev, tlev[1..nlev]    (only when icolor=2)
+    card 2a:  epmin                  (multiplied by rdn=0.999998 like Fortran)
+    card 3a:  irelco, ncase, noleg, nstart, ndiv
+  cards 2b/3b/3c     (library mode, nout > 0)
+    card 2b:  matype, ncase
+    card 3b:  hlibid (≤ 6 chars, single quoted token)
+    card 3c:  hdescr (≤ 21 chars, single quoted token)
+  card 4:    mat, mt, mat1, mt1   (repeated ncase times)
+
+Fortran defaults retained verbatim:
+  icolor=0, nlev=6, tlev=(.001,.1,.2,.3,.6,1.0), epmin=0,
+  irelco=1, ncase=1, noleg=0, nstart=1, ndiv=1, matype=3.
+"""
 struct CovrParams
-    nin::Int      # input covariance tape from errorr (or zero)
-    npend::Int    # input pendf tape (or zero; unused by stub)
-    nout::Int     # output plot-tape unit consumed by viewr
+    nin::Int
+    nout::Int
+    nplot::Int
+    # Plot-mode (used when nout ≤ 0)
+    icolor::Int
+    tlev::Vector{Float64}    # length nlev, last entry must equal 1.0
+    epmin::Float64
+    irelco::Int
+    ncase::Int
+    noleg::Int
+    nstart::Int
+    ndiv::Int
+    # Library-mode (used when nout > 0)
+    matype::Int              # 3=cov, 4=corr
+    hlibid::String           # ≤ 6 chars
+    hdescr::String           # ≤ 21 chars
+    # Cases (length = ncase; valid in either mode)
+    cases::Vector{CovrCase}
+end
+
+# Default tlev matches covr.f90 line 161 (drop trailing zero placeholders).
+const _COVR_DEFAULT_TLEV =
+    Float64[0.001, 0.1, 0.2, 0.3, 0.6, 1.0]
+const _COVR_RDN = 0.999998     # covr.f90 line 164
+
+# Split a raw covr deck line into N cards, one per `/` terminator.
+# Tokens on the line precede their `/`; consecutive `/` (e.g. `//`) yield
+# trailing empty cards. Tokens following the last `/` are discarded
+# (Fortran free-format ignores trailing comments after the terminator).
+function _covr_split_card_line(line::AbstractString)::Vector{Vector{String}}
+    out = Vector{String}[]
+    s = line
+    while true
+        si = _find_slash_outside_quotes(s)
+        si == 0 && break
+        push!(out, _tokenise_card(s[1:si-1]))
+        s = s[si+1:end]
+    end
+    # No `/` at all: treat the whole line as one card (continuation form).
+    isempty(out) && !isempty(strip(line)) && push!(out, _tokenise_card(line))
+    out
+end
+
+# Flatten covr raw_lines into a flat sequence of cards. Each `/` produces
+# one card (possibly empty). Comment-only lines (already filtered upstream)
+# do not appear here. Quoted strings span one card.
+function _covr_collect_cards(raw_lines::Vector{String})::Vector{Vector{String}}
+    cards = Vector{String}[]
+    for line in raw_lines
+        for c in _covr_split_card_line(line)
+            push!(cards, c)
+        end
+    end
+    cards
+end
+
+# Strip surrounding ' or " or * delimiters from a single token.
+function _covr_unquote(tok::AbstractString)::String
+    t = String(tok)
+    isempty(t) && return ""
+    if (t[1] == '\'' && t[end] == '\'' && length(t) >= 2) ||
+       (t[1] == '"'  && t[end] == '"'  && length(t) >= 2) ||
+       (t[1] == '*'  && t[end] == '*'  && length(t) >= 2)
+        return t[2:end-1]
+    end
+    t
 end
 
 function parse_covr(mc::ModuleCall)::CovrParams
-    cards = mc.raw_cards
-    isempty(cards) && return CovrParams(0, 0, 0)
-    nin   = abs(_fint(cards[1], 1))
-    npend = abs(_fint(cards[1], 2; default=0))
-    nout  = abs(_fint(cards[1], 3; default=0))
-    CovrParams(nin, npend, nout)
+    cards = isempty(mc.raw_lines) ? mc.raw_cards : _covr_collect_cards(mc.raw_lines)
+    if isempty(cards)
+        return CovrParams(0, 0, 0,
+                          0, copy(_COVR_DEFAULT_TLEV), 0.0,
+                          1, 1, 0, 1, 1,
+                          3, "", "", CovrCase[])
+    end
+
+    # Card 1: nin, nout, nplot.  Fortran reads `nout=0, nplot=0` defaults,
+    # then `read(nsysi,*) nin,nout,nplot`.
+    c1 = cards[1]
+    nin   = abs(_fint(c1, 1))
+    nout  = _fint(c1, 2; default=0)   # signed in Fortran; sign chooses ASCII/binary
+    nplot = _fint(c1, 3; default=0)
+    idx = 2
+
+    icolor = 0
+    tlev   = copy(_COVR_DEFAULT_TLEV)
+    epmin  = 0.0
+    irelco = 1
+    ncase  = 1
+    noleg  = 0
+    nstart = 1
+    ndiv   = 1
+    matype = 3
+    hlibid = ""
+    hdescr = ""
+
+    if nout <= 0
+        # ----- plot mode -----
+        # card 2: icolor
+        if idx <= length(cards)
+            icolor = _fint(cards[idx], 1; default=0)
+            idx += 1
+        end
+        # card 2' (only when icolor=2): nlev, tlev[1..nlev]
+        if icolor == 2 && idx <= length(cards)
+            c = cards[idx]
+            nlev = _fint(c, 1; default=6)
+            nlev > 9 && error("covr: nlev=$nlev exceeds nlevmx=9 (covr.f90:154)")
+            tlev = Float64[_fnum(c, 1+i; default=0.0) for i in 1:nlev]
+            for i in 2:nlev
+                tlev[i] > tlev[i-1] ||
+                    error("covr: tlev must be strictly increasing (covr.f90:206-211)")
+            end
+            tlev[end] != 1.0 && (tlev[end] = 1.0)   # covr.f90:213-218
+            idx += 1
+        end
+        # card 2a: epmin
+        if idx <= length(cards)
+            epmin = _fnum(cards[idx], 1; default=0.0) * _COVR_RDN
+            idx += 1
+        end
+        # card 3a: irelco, ncase, noleg, nstart, ndiv
+        if idx <= length(cards)
+            c = cards[idx]
+            irelco = _fint(c, 1; default=1)
+            ncase  = _fint(c, 2; default=1)
+            noleg  = _fint(c, 3; default=0)
+            nstart = _fint(c, 4; default=1)
+            ndiv   = _fint(c, 5; default=1)
+            ndiv == 0 && (ndiv = 1)
+            idx += 1
+        end
+    else
+        # ----- library mode -----
+        # card 2b: matype, ncase
+        if idx <= length(cards)
+            c = cards[idx]
+            matype = _fint(c, 1; default=3)
+            matype != 4 && (matype = 3)
+            ncase  = _fint(c, 2; default=1)
+            ncase <= 0 && (ncase = 1)
+            idx += 1
+        end
+        # card 3b: hlibid (one quoted token)
+        if idx <= length(cards) && !isempty(cards[idx])
+            hlibid = _covr_unquote(cards[idx][1])
+            length(hlibid) > 6 && (hlibid = hlibid[1:6])
+            idx += 1
+        end
+        # card 3c: hdescr (one quoted token)
+        if idx <= length(cards) && !isempty(cards[idx])
+            hdescr = _covr_unquote(cards[idx][1])
+            length(hdescr) > 21 && (hdescr = hdescr[1:21])
+            idx += 1
+        end
+    end
+
+    # ncase × card 4
+    cases = CovrCase[]
+    for k in 1:ncase
+        if idx + k - 1 > length(cards)
+            error("covr: only $(idx-1+k-1)/$ncase case cards present (covr.f90:255-260)")
+        end
+        c = cards[idx + k - 1]
+        m   = _fint(c, 1; default=0)
+        mt  = _fint(c, 2; default=0)
+        m1  = _fint(c, 3; default=0)
+        mt1 = _fint(c, 4; default=0)
+        push!(cases, CovrCase(m, mt, m1, mt1))
+    end
+
+    CovrParams(abs(nin), nout, nplot,
+               icolor, tlev, epmin,
+               irelco, ncase, noleg, nstart, ndiv,
+               matype, hlibid, hdescr, cases)
 end
 
 struct PlotrParams

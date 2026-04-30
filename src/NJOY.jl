@@ -82,6 +82,10 @@ include("processing/moder.jl")
 include("processing/errorr.jl")
 
 # Processing modules (COVR -- covariance visualization and library output)
+# Low-level (cov→corr math, format helpers) lives here; the per-subroutine
+# Fortran ports (covr_io / covr_corr / covr_plot / covr_press / covr_labels)
+# need read_pendf + CovrParams + ErrorrTape and are loaded *after*
+# orchestration/input_parser.jl + orchestration/pendf_io.jl below.
 include("processing/covr.jl")
 
 # Processing modules (GAMINR -- photon interaction cross sections)
@@ -135,6 +139,12 @@ include("processing/leapr_writer.jl")   # depends on LeaprParams from input_pars
 include("processing/purr_writer.jl")    # depends on PurrParams from input_parser
 include("orchestration/auto_params.jl")
 include("orchestration/pendf_io.jl")
+# COVR Fortran-port subroutines (need CovrParams and read_pendf above).
+include("processing/covr_labels.jl")
+include("processing/covr_io.jl")
+include("processing/covr_corr.jl")
+include("processing/covr_plot.jl")
+include("processing/covr_press.jl")
 include("orchestration/modules/moder.jl")
 include("orchestration/modules/reconr.jl")
 include("orchestration/modules/broadr.jl")
