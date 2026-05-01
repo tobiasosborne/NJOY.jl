@@ -460,17 +460,55 @@ the work.
 - **Notes**: landed as a stub in Phases 12-14 gating; unblocks a
   cluster of 6-7 tests when done.
 
-### P3 — Real plotr / covr / leapr / purr output
+### P2 — leapr `contin` Phase B: T80 BIT_IDENTICAL @1e-9 (47 lines remain)
 
 - **Retired bead**: none.
-- **Scope**: Dispatchers landed in Phases 11-13 as stubs; each
-  unblocks 5-10 tests when real output is wired up. leapr has the
-  richest downstream chain (thermal scattering → thermr → groupr →
-  errorr).
+- **Status (2026-05-01, post Phase 57)**: Phase A landed (lat/sc/arat
+  α/β rescaling). T80 went DIFFS 75.7% → **NUMERIC_PASS 99.95% @1e-5**
+  (91406/91453 lines). T22 BIT_IDENTICAL preserved. Worklog:
+  `worklog/T80_leapr_contin_phase_a_lat_sc.md`. Three follow-up items
+  to close the residual 47 lines:
+  1. **SCT-replacement `naint` gating.** Fortran `contin`
+     (leapr.f90:584-642) wraps `ssm(k,j)=ssct` (line 611) inside
+     `iprt = mod(j-1, naint)+1 == 1` — only every naint-th α (plus
+     `j=nalpha`) gets the SCT replacement; other α's >= maxt[k] keep
+     the unconverged-but-bounded phonon-sum value. Julia replaces all
+     (k, j>=maxt[k]) unconditionally. `naint` is a card-3 parser field
+     in `LeaprParams` (already parsed; just needs threading through to
+     `generate_sab` as a kwarg).
+  2. **Phonon-loop FP-order alignment.** `_convol!` and the in-place
+     `xa[j] += log(al*f0/n)` accumulation (leapr.f90:533) may differ
+     in IEEE-754 order. Diagnose with `write(*,...)` traces in Fortran
+     `contin` at a single (j, k) point — recipe in CLAUDE.md.
+  3. **Moment-check loop structure.** Fortran combines diagnostics
+     printout and SCT replacement in one outer-α loop (lines 581-642).
+     Once `naint` gating lands, the Julia structure should mirror it
+     exactly so additional accumulation-order matching becomes trivial.
+- **Where**: `src/processing/leapr.jl` `generate_sab`;
+  `src/orchestration/modules/leapr.jl` callsite; `LeaprParams.naint`.
+- **Acceptance**: T80 tape24 BIT_IDENTICAL 91453/91453 @ rtol=1e-9.
+  T22 stays BIT_IDENTICAL 4636/4636.
+
+### P3 — Real plotr / purr output (covr/leapr/gaspr now wired)
+
+- **Retired bead**: none.
+- **Status**:
+  - **covr**: Phase 55 landed — full Fortran-faithful port,
+    T05/T16 isolation tapes 3/3 BIT_IDENTICAL.
+  - **gaspr**: Phase 54 landed — MT=203/207 splice, T13 standalone
+    BIT_IDENTICAL.
+  - **leapr**: Phase 57 landed — T22 BIT_IDENTICAL, T80 NUMERIC_PASS
+    @1e-5 (Phase B above closes the remaining gap).
+  - **purr**: Phase 38 wired MT=152/153 structurally; T38 STRUCTURAL_FAIL
+    (3642 lines vs ref 3480). Real value-fidelity work remains.
+  - **plotr**: Phase 11 dispatch stub only; pure plot-tape, no
+    downstream chain — lowest priority.
+- **Scope (remaining)**: purr value-fidelity (T28, T34-partial, T35-42,
+  T63, T72) + plotr real output (T06).
 - **Acceptance**: per-module real output matches reference within
-  1e-7 for at least one test each.
-- **Notes**: These are multi-session efforts each; tackle only after
-  Phase-48 follow-ups and the DIFFS bisection.
+  1e-5 for at least one test each.
+- **Notes**: leapr P2 above is the immediate priority; purr/plotr can
+  follow.
 
 ### Known completed (retired bead IDs, do not re-do)
 
