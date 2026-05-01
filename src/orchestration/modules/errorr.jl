@@ -1189,21 +1189,20 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     end
     _write_fend_line(io, mat)
 
-    # MFcov — covariance matrices. Sub-sections correspond to (mt, mt2)
-    # pairs declared in the ENDF NL count (listed_pairs), union with any
-    # pairs in cov_matrices. Pairs listed but with no expanded data get an
-    # all-zero last-row stub, matching Fortran covout (errorr.f90:7574).
-    # We no longer synthesize pairs for every mt2 > mt in reaction_mts —
-    # that over-counted for MTs where the evaluation declared only
-    # self-covariance.
+    # MFcov — covariance matrices. One sub-section per (mt, mt2) with
+    # mt2 >= mt in the active reactions list, matching Fortran covout
+    # (errorr.f90:7244 `scr(6)=nmts-ix+1` + inner loop 7254 `do 180
+    # ixp=ix,nmts`). Cross-pairs without computed data are emitted as a
+    # 2-line zero stub via _write_mfcov_rows' matrix===nothing branch
+    # (mirrors Fortran's iabort=1 path at lines 7350-7356, label 390).
+    # listed_pairs and nc_derived_mts kwargs are retained for callers
+    # but the geometry no longer depends on them.
     for mt in reaction_mts
         pair_set = Set{Tuple{Int,Int}}()
         for (m1, m2) in keys(cov_matrices); m1 == mt && push!(pair_set, (m1, m2)); end
         for (m1, m2) in listed_pairs; m1 == mt && push!(pair_set, (m1, m2)); end
-        if mt in nc_derived_mts
-            for mt2 in reaction_mts
-                mt2 > mt && push!(pair_set, (mt, mt2))
-            end
+        for mt2 in reaction_mts
+            mt2 >= mt && push!(pair_set, (mt, mt2))
         end
         sub_keys = sort!(collect(pair_set), by = x -> x[2])
         isempty(sub_keys) && continue
