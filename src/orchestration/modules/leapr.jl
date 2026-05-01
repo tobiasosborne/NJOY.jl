@@ -65,15 +65,17 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
         _, deltab, f0, tbar = _start(params.p1_dos[itemp], ni, delta1, T, tbeta_val)
         tempf[itemp] = tbar * T
 
-        # Base phonon-expansion S(α,β). Fortran-faithful numerics are Phase 10+
-        # work (porting `contin` verbatim); for now use the existing Julia
-        # kernel and fall back to a smooth analytic shape if it errors.
+        # Base phonon-expansion S(α,β). Mirrors Fortran `contin`
+        # (leapr.f90:455-645). lat=1 triggers the `sc=therm/tev` rescaling
+        # of α/β; arat=1 for the principal scatterer (Phase 8 secondary
+        # scatterer not yet wired — uses arat=aws/awr from Fortran 328).
         try
             sab = generate_sab(dos, T;
                               alpha_grid=params.alpha,
                               beta_grid=params.beta,
                               n_phonon_terms=params.nphon,
-                              tbeta=tbeta_val)
+                              tbeta=tbeta_val,
+                              lat=params.lat, arat=1.0)
             # Transpose (α-outer, β-inner) → (β-outer, α-inner) for Fortran layout
             for j in 1:nalpha, i in 1:nbeta
                 ssm[i, j, itemp] = sab.sab[j, i]

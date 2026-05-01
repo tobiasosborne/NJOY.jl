@@ -98,6 +98,7 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
+| 57    | 2026-05-01 | leapr `contin` Phase A — lat/sc/arat α/β rescaling | **T80 DIFFS → NUMERIC_PASS @1e-5.** `generate_sab` was missing Fortran `contin`'s `sc = therm/tev` rescaling for `lat=1` (leapr.f90:492-493 + 500/506). For T80 (lat=1, T=343 K, sc≈0.856) every α/β fed into `_terpt` and the SCT formula was off by ~14% in scale. Added `lat::Int=0, arat::Float64=1.0` kwargs to `generate_sab`; threaded through from `leapr_module`. Result: T80 tape24 75.7% (69231/91453, rtol=0) → **NUMERIC_PASS 99.95% (91406/91453 @1e-5)** — only 47 lines remain off, all ±1 in 7th sigfig. T22 (lat=0, sc=1 → unaffected) preserved BIT_IDENTICAL 4636/4636. All 4 leapr unit-test files pass. Phase B follow-up: SCT-replacement `naint` gating (leapr.f90:584-642 wraps `ssm(k,j)=ssct` in `iprt = mod(j-1, naint)+1 == 1`; Julia replaces all unconditionally). | `worklog/T80_leapr_contin_phase_a_lat_sc.md` |
 | 56    | 2026-05-01 | T15 errorr writer NK = nmts−ix+1 (covcal Bug A) | **CLOSED.** `_write_errorr_tape` now synthesises one sub-section per (mt, mt2) with mt2 ≥ mt for **every** mt, not just `mt ∈ nc_derived_mts`. Empty cross-pairs route through `_write_mfcov_rows`'s `matrix===nothing` branch (2-line zero stub), mirroring Fortran covout iabort=1 path (errorr.f90:7350-7356, label 390). T15 MT=77 NK 1 → **3** (matches ref [77, 91, 102]); MT=18 NK 1 → 31; all 36 reaction MTs match ref NK exactly. T15 tape26 4275 → **5964 lines** (ref 5958, +6 from sub-section content drift). Residual per-MT line gaps (MT=1 −100, MT=2 +106, MT=18 +38, MT=102 −38) are sub-section *content* drift, not geometry — folded into HANDOFF P1 sub-item 2 (LTY=1/2/3 standards/ratio). Re-tuned `test_errorr_mf33_sparse.jl`: per-MT NK strict-match (all 36 MTs), per-MT slack 15 → 60, total cap `< 5000` → `5500 < total < 6500`. Regression-clean: T05/T16 covr-isolation 3/3 BIT-IDENTICAL, T04 tape23 NUMERIC_PASS 81/82 unchanged, T15 MT=77 C[20,20] = 0.02987998 exact (Phase 51 Bug B preserved). | `worklog/T15_covcal_bug_a_nk_writer.md` |
 | 55    | 2026-04-30 | covr stub → full Fortran-faithful port (covr.f90 2249 lines, 18 subroutines) | **3/3 ISOLATION TAPES BIT-IDENTICAL.** Replaced empty-tape `covr_module` stub with the complete port: `covard` reader (errorr → group structure, MF3 cross sections, MF33/34/35/40 subsections with sparse-row LIST format), `corr` (cov→corr + ismall/izero flags), `truncg` (zero-xs lower-end truncation), `plotit` + `matshd` + `level` + `patlev` (3-frame plot-tape emission with connected-region shading), `smilab` + `matmes` + `elem` + `mtno` (Z + isotope + reaction labels with viewr `#EH`/`<x>` markup), `press` + `setfor` (boxer-format library output, plot-mode + library-mode dispatch). Card-1/2/2'/2a/3a/2b/3b/3c/4 parser handles `//` multi-card-per-line shorthand for consecutive defaults via new `ModuleCall.raw_lines` field. Bugs landed (each oracle-driven, each cited): title 80-char rpad, MT-name table row 13 (`]g<)` for n,γ), `(mt NNN)` fallback width, `plotit(x(ixmin:),...)` slice (rsdx/rsdy/xs_x/ys_y all ixmin-truncated), spurious NC sub-subsection skip in `_read_mf33_subsection` (Fortran covard never reads CONT.N1 — consumes only NI LIST records). T05 referenceTape34 (1 839 463 B), T16 referenceTape36 (270 922 B), T16 referenceTape37 (23 768 B): all byte-for-byte. T01 NUMERIC_PASS + T22 BIT-IDENTICAL regression-clean. Full-pipeline T05/T16 still diff because Julia's errorr (HANDOFF P1) produces sparse covariance — covr is correct end-to-end once errorr's NK-stub + LB=5 union-grid path lands. | `worklog/T05_T16_covr_full_port.md` |
 | 54    | 2026-04-28 | gaspr stub → real MT=203/207 splice (T13/T45) | **STANDALONE BIT-IDENTICAL.** Wired the gaspr orchestration: read PENDF, accumulate gas production via existing `accumulate_gas` (multiplicity table for MT=11, 22-45, 103-117, 154-200), build new MT=203..207 sections on MT=1's grid (back-up-by-1 per channel, sigfig(7,0) values), splice into tape, update MF1/MT451 directory (NXC bump + MT-sorted MOD=1 entries). Standalone test (Fortran-oracle `after_heatr.pendf` → Julia gaspr): bit-identical to `after_gaspr.pendf` (25430/25430 lines). Pipeline integration via new `_collect_gaspr!` feeds MT=203..207 into `ctx.extra_mf3` so `final_assembly` places them at correct MT positions (T13 tape28 16878→18584; T45 tape40 now contains MT=203/204/205/207 with reasonable NC counts). Surfaced + fixed pre-existing pendf_io round-trip bugs: TPID had MAT=0 (spec is MAT=1), `write_pendf_tape` doubled SEND for MF1 + duplicate FEND between MFs, per-section sequence numbers didn't restart at 1, `read_pendf` retained SEND boundary records inside section data (now stripped on read). Deferred (open work): MOD=1 flag preservation in `write_full_pendf` for new sections, MF6/MT5 emission spectra, MT=51-91 LR=22..36 yields, multi-temperature loop. T22 BIT_IDENTICAL preserved; T01 NUMERIC_PASS @1e-5 unchanged. | (commits c77276f, 2a92c19) |
@@ -717,15 +718,17 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 | Test 45 | B-10 | LRU=0 | 53/53 | 338 pts exact | **BIT-IDENTICAL** — NEW Phase 11 |
 | Test 22 | H-1 (para-H₂ 20K) | leapr (phonon + cold-H + trans) | MF7/MT4 | 4636 pts exact | **BIT-IDENTICAL** — NEW 2026-04-23 (leapr wired) |
 
-### Test 80 (H_HF, 343K) — DIFFS, structural match
+### Test 80 (H_HF, 343K) — NUMERIC_PASS @1e-5 (post-Phase-57)
 
 91453/91453 line count matches; all MF1/MF7 record layouts correct.
-Numerical: 76.8% of meaningful S(α,β) values bit-identical with Fortran,
-77.9% pass 1e-5, 81.3% pass 1e-1; ~19% differ by >10%. Gap is that
-`src/processing/leapr.jl`'s `generate_sab` is an alternative
-phonon-expansion (Proposal B, AD-compatible), not a byte-faithful
-port of Fortran `contin`. Tracked as Phase 11 (NJOY_jl-63f) — port
-contin directly to close the gap.
+Phase 57 (lat/sc/arat plumbing in `generate_sab`) lifted the dominant
+gap: T80 tape24 went **DIFFS 75.7% → NUMERIC_PASS 91406/91453 @1e-5
+(99.95%)**. The remaining 47 lines differ by ±1 in 7th sigfig — Phase B
+class (SCT-replacement `naint` gating + phonon-loop FP order). See
+`worklog/T80_leapr_contin_phase_a_lat_sc.md` for the full Phase A
+analysis and Phase B plan. Pre-Phase-57: 76.8% of meaningful S(α,β)
+values bit-identical, 77.9% pass 1e-5; the gap was Fortran `contin`'s
+missing `sc = therm/tev` rescaling for lat=1.
 
 ### In Progress — Test 07 (U-235, SLBW + URR mode=12)
 

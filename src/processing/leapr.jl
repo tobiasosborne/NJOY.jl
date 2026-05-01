@@ -180,40 +180,60 @@ end
 default_alpha_grid(; n::Int=20) = 10.0 .^ range(log10(0.01), log10(10.0), length=n)
 default_beta_grid(; n::Int=40) = collect(range(0.0, 20.0, length=n))
 
-"""
-    generate_sab(dos, T; ...) -> SABTable
+# Reference thermal energy used by Fortran leapr `contin` and friends to
+# convert lat=1 (input α/β at T₀=0.0253 eV) to actual α/β at the run
+# temperature: sc = therm/tev. Ref: leapr.f90:475 (`therm=0.0253e0_kr`),
+# 492-493 (`sc=1; if (lat.eq.1) sc=therm/tev`).
+const _LEAPR_THERM = 0.0253
 
-Phonon expansion S(alpha,beta) with SCT fallback. Matches NJOY contin()+start().
+"""
+    generate_sab(dos, T; lat=0, arat=1.0, ...) -> SABTable
+
+Phonon expansion S(α,β) with SCT fallback. Mirrors NJOY `contin`
+(leapr.f90:455-645).
+
+`lat=1` selects "input α/β at T₀=0.0253 eV" semantics (TSL-evaluation
+convention); the runtime grids are `alpha[j]·sc/arat` and `beta[k]·sc`
+where `sc = therm/(k_B·T)`. `lat=0` (default) leaves the grids untouched
+(`sc=1`). `arat = aws/awr` for a secondary scatterer; 1.0 for the
+principal. Refs: leapr.f90:323-330 (arat), 492-493 + 500/506/532/538/588
+(sc and α·sc/arat, β·sc).
 """
 function generate_sab(dos::PhononDOS, T::Float64;
                       alpha_grid::Vector{Float64}=default_alpha_grid(),
                       beta_grid::Vector{Float64}=default_beta_grid(),
                       n_phonon_terms::Int=100, tbeta::Float64=1.0,
+                      lat::Int=0, arat::Float64=1.0,
                       oscillators::Vector{DiscreteOscillator}=DiscreteOscillator[])
     np = length(dos.density); de = dos.energies[2]-dos.energies[1]
     p, deltab, f0, tbar = _start(dos.density, np, de, T, tbeta)
     kT = PhysicsConstants.bk * T; na, nb = length(alpha_grid), length(beta_grid)
+    # Fortran sc/arat scaling (leapr.f90:492-493). arat=1 for principal scatterer.
+    sc = lat == 1 ? _LEAPR_THERM / kT : 1.0
+    sc_a = sc / arat
     ssm = zeros(na, nb); explim = -250.0; tiny = 1.0e-30
     maxl = n_phonon_terms*np+np; tlast = zeros(maxl); tnow = zeros(maxl); xa = zeros(na)
-    # l=1 term
+    # l=1 term — Ref: leapr.f90:495-512.
     tlast[1:np] .= p
     for j in 1:na
-        al = alpha_grid[j]; xa[j] = log(al*f0)
+        al = alpha_grid[j] * sc_a; xa[j] = log(al*f0)
         ex = -f0*al+xa[j]; exx = ex > explim ? exp(ex) : 0.0
         for k in 1:nb
-            st = _terpt(p, np, deltab, beta_grid[k])
+            be = beta_grid[k] * sc
+            st = _terpt(p, np, deltab, be)
             ssm[j,k] = st*exx < tiny ? 0.0 : st*exx
         end
     end
     npl = np; maxt = fill(na+1, nb)
-    # Phonon expansion l=2..n
+    # Phonon expansion l=2..n — Ref: leapr.f90:515-558.
     for n in 2:n_phonon_terms
         npn = np+npl-1; _convol!(p, tlast, tnow, np, npl, npn, deltab)
         for j in 1:na
-            al = alpha_grid[j]; xa[j] += log(al*f0/n)
+            al = alpha_grid[j] * sc_a; xa[j] += log(al*f0/n)
             ex = -f0*al+xa[j]; exx = ex > explim ? exp(ex) : 0.0
             for k in 1:nb
-                st = _terpt(tnow, npn, deltab, beta_grid[k]); add = st*exx
+                be = beta_grid[k] * sc
+                st = _terpt(tnow, npn, deltab, be); add = st*exx
                 add >= tiny && (ssm[j,k] += add)
                 n >= n_phonon_terms && ssm[j,k] > 0 && add > ssm[j,k]/1000 &&
                     j < maxt[k] && (maxt[k] = j)
@@ -221,12 +241,16 @@ function generate_sab(dos::PhononDOS, T::Float64;
         end
         tlast[1:npn] .= tnow[1:npn]; npl = npn
     end
-    # SCT fallback for unconverged alpha
+    # SCT fallback for unconverged α — Ref: leapr.f90:565-579 (maxt monotone)
+    # + 605-612 (SCT formula). Note: Fortran's SCT replacement is gated by
+    # `iprt = mod(j-1,naint)+1 == 1` inside the moment-check loop; this Julia
+    # version replaces all (k, j>=maxt[k]) unconditionally. Aligning with
+    # Fortran's naint gating is Phase B follow-up.
     for i in 2:nb; maxt[i] > maxt[i-1] && (maxt[i] = maxt[i-1]); end
     pi_v = PhysicsConstants.pi
     for k in 1:nb, j in 1:na
         if j >= maxt[k]
-            al = alpha_grid[j]; be = beta_grid[k]
+            al = alpha_grid[j] * sc_a; be = beta_grid[k] * sc
             alw = al*tbeta; alp = alw*tbar; ex = -(alw-be)^2/(4*alp)
             ssm[j,k] = ex > explim ? exp(ex)/sqrt(4*pi_v*alp) : 0.0
         end
