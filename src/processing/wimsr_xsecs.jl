@@ -275,16 +275,14 @@ function _wimsr_dispatch_multitemp!(in_path, p::WimsrParams, isg,
 
     lines = readlines(in_path)
 
-    α = ((spot[1] != p.sigp ? 1.0 : 1.0) - 1)  # noop, kept for clarity
-    # Fortran resets all per-group accumulators each temp (line 948).
-    # So we allocate fresh arrays per pass; only outputs at temp==1
-    # populate the temp-indep buffers.
     for ti in 1:n_temps
         abs1 = zeros(ngnd); abs2 = zeros(ngnd)
         sfi  = zeros(ngnd); sf0  = zeros(ngnd)
         sn2n = zeros(ngnd); snu  = zeros(ngnd); snus = zeros(ngnd)
         scat = zeros(ngnd); csp1 = zeros(ngnd)
-        # xi is temp-indep but per-loop default; MT=252 (if present) overwrites
+        # p1flx: initialized from MF=3/MT=1 records (Fortran wimsr.f90:1075-1085).
+        # Used to weight csp1 accumulation in MF=6 dispatch (line 1241).
+        p1flx = zeros(ngnd)
         xi = copy(xi_out)
         xs   = zeros(ngnd, ngnd)
         l1   = fill(ngnd, ngnd)
@@ -292,18 +290,31 @@ function _wimsr_dispatch_multitemp!(in_path, p::WimsrParams, isg,
 
         _wimsr_dispatch_one_temp!(lines, p, ti, isg,
             abs1, abs2, sfi, sf0, sn2n, snu, snus, xi,
-            scat, xs, l1, l2, csp1,
+            scat, xs, l1, l2, csp1, p1flx,
             nth1_state, has_fission)
 
         # Per-temp finalisation (Fortran wimsr.f90:1339-1343):
         #   if (ip1opt > 0): xs[i, i] -= csp1[i]   ← diagonal P1 correction
         #   xtr[i] = scat[i] + ab0[i] - csp1[i]
-        # The diagonal correction is what makes the WIMS scatter matrix
-        # transport-corrected (P0 + P1-self-removal).
         if p.ip1opt > 0
             for i in 1:ngnd
                 xs[i, i] -= csp1[i]
             end
+        end
+        # Fortran wimsr.f90:1295-1308: when MT=452 is absent (jfist<=0),
+        # extract nu from the fission matrix integral: snu[i] = snus[i]/sfi[i].
+        # Then the per-temp output snus is recomputed: snus[i] = snu[i]*sf0[i]
+        # at line 1324. T11 has no MT=452, so this path is required.
+        if all(==(0.0), snu)   # MT=452 not seen → derive nu from matrix
+            for i in 1:ngnd
+                if sfi[i] != 0.0
+                    snu[i] = snus[i] / sfi[i]
+                end
+            end
+        end
+        # Recompute snus = nu * sf0 for output (Fortran line 1324)
+        for i in 1:ngnd
+            snus[i] = snu[i] * sf0[i]
         end
         ab0_full = [sf0[i] + abs1[i] + abs2[i] - sn2n[i] for i in 1:ngnd]
         xtr_full = [scat[i] + ab0_full[i] - csp1[i] for i in 1:ngnd]
@@ -338,7 +349,7 @@ end
 
 function _wimsr_dispatch_one_temp!(lines, p::WimsrParams, target_temp_idx::Int, isg::Int,
                                      abs1, abs2, sfi, sf0, sn2n, snu, snus, xi,
-                                     scat, xs, l1, l2, csp1,
+                                     scat, xs, l1, l2, csp1, p1flx,
                                      nth1_state, has_fission)
     ngnd = p.ngnd
     nfg  = p.nfg
@@ -419,11 +430,11 @@ function _wimsr_dispatch_one_temp!(lines, p::WimsrParams, target_temp_idx::Int, 
             if mf == 3
                 _dispatch_mf3!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
                                 body, isg, iz_target, abs1, abs2, sfi, sf0,
-                                sn2n, snu, xi, jn2n, i318, nth1_state)
+                                sn2n, snu, xi, p1flx, jn2n, i318, nth1_state)
             elseif mf == 6
                 _dispatch_mf6!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
                                 body, isg, iz_target, scat, xs, l1, l2,
-                                csp1, ngnd, nfg, nrg, nth1_state)
+                                csp1, p1flx, ngnd, nfg, nrg, nth1_state, snus)
             end
             idx = idx_after
             continue
@@ -456,7 +467,7 @@ end
 # MF=3 dispatch (Fortran wimsr.f90:1029-1114)
 function _dispatch_mf3!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
                           body, isg, iz_target, abs1, abs2, sfi, sf0,
-                          sn2n, snu, xi, jn2n, i318, nth1_state)
+                          sn2n, snu, xi, p1flx, jn2n, i318, nth1_state)
     # For MF=3 with ig2_in=2, position = body[1 + nl*nz*(2-1)] = body[1 + nl*nz]
     # Specific sig0: body[1 + nl*(iz-1) + nl*nz*1]
     pos_infdil = _bidx(1, 1, 2, nl, nz)            # (i=1, iz=1, ig2=2)
@@ -464,7 +475,22 @@ function _dispatch_mf3!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
     xs_infdil  = body[pos_infdil]
     xs_iz      = (isg > 0 && nz >= iz_target) ? body[pos_sigsel] : xs_infdil
 
-    if 102 <= mt <= 150
+    if mt == 1
+        # P1-current flux for transport correction (Fortran wimsr.f90:1075-1086).
+        # `loca = l + lz + nl*(nz-1)` for inf-dil (P0 flux at last sig0).
+        # `if (nl.gt.1) loca = loca + 1` shifts to P1 flux.
+        # In our 1-based body: pos = nl*(nz-1) + 1, then +1 if nl>1.
+        if jg <= length(p1flx) && p1flx[jg] == 0.0
+            pos_base = nl * (nz - 1) + 1
+            if isg > 0 && nz >= iz_target
+                pos_base = nl * (iz_target - 1) + 1
+            end
+            pos_p1 = nl > 1 ? pos_base + 1 : pos_base
+            if pos_p1 <= length(body)
+                p1flx[jg] = body[pos_p1]
+            end
+        end
+    elseif 102 <= mt <= 150
         if mt == 102
             abs1[jg] = xs_iz
         else
@@ -498,7 +524,7 @@ end
 # (Fortran `300 continue` branch at line 1205, gated by jtemp==1 at line 1206).
 function _dispatch_mf6!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
                           body, isg, iz_target, scat, xs, l1, l2,
-                          csp1, ngnd, nfg, nrg, nth_state)
+                          csp1, p1flx, ngnd, nfg, nrg, nth_state, snus)
     # Fortran routing (wimsr.f90:1043-1046, 1164-1166, 1214-1217):
     #   MT in {2, mti, mtc} → 270 block (temp-dep): we're called from per-temp
     #     dispatch already, so accumulate into the passed scat/xs.
@@ -507,7 +533,24 @@ function _dispatch_mf6!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
     #   MT in {18-21, 38} → 315 (fission spectrum, NOT scat). Skip here.
     #   MT in {221-250} \ {mti} → skip entirely (line 1217).
     if (18 <= mt <= 21) || mt == 38
-        return nothing  # TODO: fission-spectrum accumulation (Phase 58c)
+        # MF=6/MT=18-21,38 fission-spectrum/yield matrix (wimsr.f90:1253-1280).
+        # Two record types per MT:
+        #   ig=0 spectrum record: stores cspc[ig2lo+i-1] (chi spectrum)
+        #   ig!=0 production records: accumulate snus[jg]
+        #     - ig2lo!=0 (matrix part): snus[jg] += body[(1, 1, i)]
+        #     - ig2lo==0 (production part): inner loop over cspc, but if cspc
+        #       sums to 1 (normalized fission spectrum), effect is the same:
+        #       snus[jg] += body[(1, 1, i)]
+        # T11 has both: ig=0 spectrum (lines 2406-2486) + ig=1..69 production
+        # records with ig2lo=0 ng2=2 (one yield per source group).
+        if ig != 0
+            for i in 2:ng2_in
+                pos = _bidx(1, 1, i, nl, nz)
+                pos > length(body) && continue
+                snus[jg] += body[pos]
+            end
+        end
+        return nothing
     end
     if 221 <= mt <= 250 && mt != mti
         return nothing
@@ -551,12 +594,11 @@ function _dispatch_mf6!(mt, mti, mtc, jg, ig, nl, nz, ng2_in, ig2lo,
             if nl != 1
                 # csp1 = P1-current transport correction (Fortran line 1241):
                 #   csp1[jg2] += body[pos+1] * p1flx[jg]/p1flx[jg2]
-                # Without populated p1flx (Phase 58c — MT=1 dispatch), use
-                # ratio=1. This produces xtr correct to ~0.1% rather than bit;
-                # the residual is the missing p1flx weighting.
                 if jg2 < ngnd - nfg - nrg + 1   # jg2 < nth
                     if pos + 1 <= length(body)
-                        csp1[jg2] += body[pos + 1]
+                        ratio = (p1flx[jg] != 0.0 && p1flx[jg2] != 0.0) ?
+                                p1flx[jg] / p1flx[jg2] : 1.0
+                        csp1[jg2] += body[pos + 1] * ratio
                     end
                 end
             end
