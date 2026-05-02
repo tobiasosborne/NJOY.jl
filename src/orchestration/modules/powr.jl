@@ -93,27 +93,27 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
     iwr = (g.nsigz > 1 && m.iff > 0) ? 1 : 0
     nfs = g.nfs
 
-    # MF=6 supported: MT=2 elastic; MT∈[51,91] inelastic; MT∈{6-9,16,46-49} n2n.
+    # MF=6 supported: MT=2 elastic; MT∈[51,91] inelastic; MT∈{6-9,16,46-49} n2n;
+    # MT=18 fission (only when iwf=1).
     function _powr_mf6_kind(mt::Int)
         mt == 2                                      && return :elastic
+        mt == 18                                     && return :fission
         51 <= mt <= 91                               && return :inelastic
         mt == 16 || (6 <= mt <= 9) || (46 <= mt <= 49) && return :n2n
         return :unknown
     end
     mf6_unsupported = filter(mt -> _powr_mf6_kind(mt) == :unknown, collect(keys(g.mf6)))
-    if iwf != 0 || iwr != 0 || nfs > 0 || !isempty(mf6_unsupported)
+    if iwr != 0 || nfs > 0 || !isempty(mf6_unsupported)
         error("powr lib=1: full Phase B path not yet ported (matd=$(m.matd) " *
-              "has iwf=$iwf iwr=$iwr nfs=$nfs unsupported_mf6=$mf6_unsupported). " *
-              "Currently supported: absorption-only + MF=6 elastic / inelastic / n2n.")
+              "has iwr=$iwr nfs=$nfs unsupported_mf6=$mf6_unsupported). " *
+              "Currently supported: absorption + MF=6 elastic / inelastic / n2n / fission.")
     end
 
     nid  = g.iza * 10
     ngnd = _POWR_FAST_NGND
 
     # cflux: coarse-group P0 + P1 flux from MF=3/MT=1 (gamxs.f90:1147-1152).
-    # Stored as cflux[1..ngnd] (P0) and cflux[ngnd+1..2*ngnd] (P1). Inverted
-    # in-place after the MF=3 walk so subsequent accumulation can multiply.
-    cflux  = zeros(Float64, ngnd)
+    cflux   = zeros(Float64, ngnd)
     cfluxp1 = zeros(Float64, ngnd)
     if haskey(g.mf3, 1)
         for (ig, (flux, _xs)) in g.mf3[1]
@@ -132,15 +132,133 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
         cfluxp1[jg] = cfluxp1[jg] != 0 ? 1 / cfluxp1[jg] : 0.0
     end
 
+    # Unified storage `a` mirrors Fortran's contiguous layout. Pointers:
+    #   locab0 = 1                     absorption (length ngnd)
+    #   locsf0 = locab0 + ngnd         sigma_f    (length ngnd)
+    #   locchi = locsf0 + ngnd         chi        (length ngnd)
+    #   locnus = locchi + ngnd         nu*sigf → nu (length ngnd)
+    # The fission-spectrum branch in Fortran gamxs (lines 1206-1208) writes
+    # to `locchi + jg2c - 1` where jg2c can be 0 or -1, silently corrupting
+    # the last 2 sigf cells. We replicate that exact behavior by using a
+    # single unified array and Fortran-style pointer arithmetic.
+    locab0 = 1
+    locsf0 = locab0 + ngnd
+    locchi = locsf0 + ngnd
+    locnus = locchi + ngnd
+    a_total_len = locnus + ngnd
+    a = zeros(Float64, a_total_len)
+
     # Absorption: MT ∈ [102, 150] (gamxs.f90:1157-1163).
-    absxs = zeros(Float64, ngnd)
     for mt in keys(g.mf3)
         102 <= mt <= 150 || continue
         for (ig, (flux, xs)) in g.mf3[mt]
             jg = ngnd - ig + 1
-            1 <= jg <= ngnd && (absxs[jg] += xs * flux * cflux[jg])
+            1 <= jg <= ngnd && (a[locab0 + jg - 1] += xs * flux * cflux[jg])
         end
     end
+
+    # MF=3 fission (gamxs.f90:1164-1175) — MT=18 first; MT∈{19,20,21,38}
+    # only if MT=18 was NOT seen (i318=0).
+    cspc = zeros(Float64, ngnd)   # constant fission spectrum (cspc) — set up
+                                  # by MF=6/MT=18 ig=0 record.
+    cnorm = 0.0
+    if iwf > 0
+        i318 = haskey(g.mf3, 18)
+        for mt in (18, 19, 20, 21, 38)
+            haskey(g.mf3, mt) || continue
+            (mt > 18 && i318) && continue
+            for (ig, (flux, xs)) in g.mf3[mt]
+                jg = ngnd - ig + 1
+                1 <= jg <= ngnd || continue
+                contrib = xs * flux * cflux[jg]
+                a[locsf0 + jg - 1] += contrib
+                a[locab0 + jg - 1] += contrib
+            end
+        end
+
+        # MF=6/MT=18 (gamxs.f90:1182-1220): nu*sigf accumulation + chi.
+        if haskey(g.mf6, 18)
+            i618 = false
+            for r in g.mf6[18]
+                ig    = r.ig
+                ng2   = r.ng2
+                ig2lo = r.ig2lo
+                nl    = r.nl
+                nz    = r.nz
+                data  = r.data
+
+                if ig == 0
+                    # Save constant fission spectrum (gamxs.f90:1216-1220):
+                    # cspc(ig2lo+k-1) = data[1 + nl*nz*(k-1)] for k=1..ng2.
+                    for k in 1:ng2
+                        idx = ig2lo + k - 1
+                        1 <= idx <= ngnd || continue
+                        offset = nl * nz * (k - 1)
+                        cspc[idx] = data[offset + 1]
+                    end
+                    continue
+                end
+
+                # MT=18: i618 detection (only one MT=18 record at ig=0; further
+                # ig>0 records belong to MT=18 itself, not MT∈{19,20,21,38}).
+                # We don't currently merge in MT=19+ on MF=6 anyway.
+                jg = ngnd - ig + 1
+                1 <= jg <= ngnd || continue
+
+                for k in 2:ng2
+                    offset = nl * nz * (k - 1)
+                    flux1  = data[1]                # scr(l+lz)
+                    nu_sf  = data[offset + 1]       # scr(loca)
+                    if ig2lo != 0
+                        # matrix part (gamxs.f90:1189-1200)
+                        a[locnus + jg - 1] += nu_sf * flux1 * cflux[jg]
+                        ig2 = ig2lo + k - 2
+                        ig2c = ig2
+                        if 1 <= ig2c <= ngnd
+                            jg2c = ngnd - ig2c + 1
+                            a[locchi + jg2c - 1] += flux1 * nu_sf
+                            cnorm += flux1 * nu_sf
+                        end
+                    else
+                        # spectrum part (gamxs.f90:1202-1213) with the
+                        # bit-faithful jg2c-1 quirk: out-of-range writes
+                        # spill into a[locsf0+ngnd-2..ngnd-1] (sigf last 2).
+                        flux_loca_minus_1 = data[offset]   # scr(loca-1)
+                        for i in 1:ngnd
+                            ig2c = i
+                            (ig2c == 0 || ig2c > ngnd) && continue
+                            a[locnus + jg - 1] += cspc[i] * nu_sf *
+                                                  flux_loca_minus_1 * cflux[jg]
+                            jg2c = ngnd - ig2c - 1   # Fortran sign: -1, NOT +1.
+                            idx = locchi + jg2c - 1
+                            if 1 <= idx <= a_total_len
+                                a[idx] += cspc[i] * nu_sf * flux_loca_minus_1
+                            end
+                            cnorm += nu_sf * flux_loca_minus_1
+                        end
+                    end
+                end
+            end
+        end
+
+        # Post-loop normalization: nu = nus / sigf (gamxs.f90:1357-1363).
+        for ig in 1:ngnd
+            sf = a[locsf0 + ig - 1]
+            if sf != 0.0
+                a[locnus + ig - 1] /= sf
+            end
+        end
+
+        # Normalize chi: cnorm = 1/cnorm; chi *= cnorm (gamxs.f90:1366-1370).
+        if cnorm != 0.0
+            cnorm = 1 / cnorm
+            for ig in 1:ngnd
+                a[locchi + ig - 1] *= cnorm
+            end
+        end
+    end
+
+    absxs = view(a, locab0:locab0 + ngnd - 1)
 
     # MF=6 matrix accumulation. Each kind (elastic / inelastic / n2n) follows
     # the same packed-band-diagonal storage scheme; differences:
@@ -157,6 +275,7 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
         elseif kind == :n2n
             append!(n2n_recs, recs)
         end
+        # Fission (kind == :fission) handled inline above; not packed here.
     end
 
     e0_block, e1_block, xla3, xld3, xlol3 =
@@ -170,7 +289,18 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
     xld = (xld1, xld2, xld3)
     xlol = (xlol1, xlol2, xlol3)
 
-    # Write fast()-driver records (lines 528-547).
+    # Fission-spectrum (kscr) block, written FIRST when iwf=1 or nfs>0
+    # (fast.f90:497-524). Header line is `(i6,i2,10a4)` followed by chi
+    # (`(1p,6e12.5)` × 12 lines for ngnd=68).
+    if iwf > 0 || nfs > 0
+        # `(i6,i2,10a4)` header: nid (i6) + 0 (i2) + fsn 40 chars (10×a4).
+        chi_header = @sprintf("%6d%2d", nid, 0) * _powr_a4_pack(m.fsn, 10)
+        println(io, _powr_pad80(chi_header))
+        chi_view = view(a, locchi:locchi + ngnd - 1)
+        _powr_write_e125_block(io, chi_view)
+    end
+
+    # Main (nscr) block.
     println(io, _powr_pad80(@sprintf("%10d%10d%10d%10d", nid, iwa, iwf, iwr)))
     println(io, _powr_pad80(_powr_word16(m.word)))
     println(io, _powr_pad80(repeat(" ", 36) *
@@ -181,8 +311,12 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
                             _powr_e125(xlol[2]) * _powr_e125(xla[2]) *
                             _powr_e125(Float64(xld[2] + 1))))
     _powr_write_e125_block(io, absxs)
-    # Matrix block emission order matches fast() lines 572-613: elastic
-    # (P0 then P1), then inelastic, then n2n.
+    if iwf > 0
+        # sigf, then nu (gamxs.f90:550-553).
+        _powr_write_e125_block(io, view(a, locsf0:locsf0 + ngnd - 1))
+        _powr_write_e125_block(io, view(a, locnus:locnus + ngnd - 1))
+    end
+    # Matrix blocks (fast.f90:572-613): elastic (P0 then P1), inelastic, n2n.
     if xlol3 != 0
         _powr_write_e125_block(io, e0_block)
         _powr_write_e125_block(io, e1_block)
@@ -195,6 +329,10 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
     end
     nothing
 end
+
+# Pack a string into `n` a4 (4-char) words = 4n chars. Right-pad short
+# strings with blanks; truncate long ones.
+_powr_a4_pack(s::AbstractString, n::Int) = rpad(s, 4n)[1:4n]
 
 # Pack one MF=6 matrix kind into the gamll/gamxs band-diagonal storage.
 # Returns (block, p1_block, xla, xld, xlol). p1_block is empty Float64[]
@@ -396,7 +534,9 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
                 ig2lo = _parse_int(p2[34:44])
                 nw    = _parse_int(p2[45:55])
                 ig    = _parse_int(p2[56:66])
-                if abs(temp - rtemp) <= eps && ig > 0 && nw > 0 && idx + 1 <= nlines
+                # MF=6 needs ig=0 records too (constant fission spectrum
+                # cspc setup) — only filter ig < 0.
+                if abs(temp - rtemp) <= eps && ig >= 0 && nw > 0 && idx + 1 <= nlines
                     data = _read_list_data(idx + 1, nw)
                     push!(recs, (ig=ig, ig2lo=ig2lo, ng2=ng2,
                                  nl=nl_section, nz=nz_section, data=data))
