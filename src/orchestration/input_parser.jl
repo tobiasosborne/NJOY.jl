@@ -1451,12 +1451,14 @@ function parse_wimsr(mc::ModuleCall)::WimsrParams
     nfid  = _fint(c3, 2; default=0)
     rdfid = _fnum(c3, 3; default=0.0)
     iburn = _fint(c3, 4; default=0)
-    # Fortran: nfid=nint(rdfid). Card-3 second field (nfid) is the deck-given
-    # WIMS ID; if rdfid omitted, fall back to nfid as float. T11 uses both.
-    if rdfid == 0.0 && nfid != 0
-        rdfid = Float64(nfid)
-    elseif nfid == 0 && rdfid != 0
+    # Fortran wimsr.f90:204 unconditionally does `nfid=nint(rdfid)` — the
+    # deck's second field is read into `nfid` first but then *overwritten*
+    # by the third field. T11 deck `1050 1 1050.` ends up with nfid=1050,
+    # not 1. Fall back to nfid (float'd) only if rdfid is absent (==0).
+    if rdfid != 0.0
         nfid = round(Int, rdfid)
+    elseif nfid != 0
+        rdfid = Float64(nfid)
     end
     next_ci += 1
 

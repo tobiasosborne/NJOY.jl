@@ -192,6 +192,12 @@ function validate(mat::WIMSMaterial)
     mat.nfg + mat.nrg <= mat.ngroups ||
         error("WIMSMaterial: nfg + nrg > ngroups")
     nnt = mat.nfg + mat.nrg  # nonthermal groups
+    # Fortran wimsr.f90:1459-1463 layout: spot/sdp are resonance-only (length nrg);
+    # xtr/ab0 are all-nonthermal (length nnt); glam is resonance-only (length nrg).
+    length(mat.potential_xs) == mat.nrg ||
+        error("WIMSMaterial: potential_xs (=spot) length must equal nrg=$(mat.nrg)")
+    length(mat.scatter_xs) == mat.nrg ||
+        error("WIMSMaterial: scatter_xs (=sdp) length must equal nrg=$(mat.nrg)")
     length(mat.lambdas) == mat.nrg ||
         error("WIMSMaterial: lambdas length must equal nrg=$(mat.nrg)")
     length(mat.transport_xs) == nnt ||
@@ -244,11 +250,13 @@ function write_wims(io::IO, mat::WIMSMaterial)
     end
 
     # -- burnup chain
+    # Fortran wimsr.f90:2030-2039: emitted whenever iburn>=0. For iburn==0
+    # the default content is jcc=2 + a single pair (0.0, ident).
+    # iverw==5 also gets a leading single-zero record (line 2032).
     if mat.burnup !== nothing
         bp = mat.burnup
         ntis = 2 + length(bp.fission_products)
         jcc = ntis * 2 + 4
-        # pack into (yield, ident) pairs per Fortran layout
         pairs = Vector{Tuple{Float64,Int}}()
         push!(pairs, (0.0, mat.ident))                        # slot 1
         push!(pairs, (bp.capture_product.value, bp.capture_product.ident))
@@ -256,6 +264,9 @@ function write_wims(io::IO, mat::WIMSMaterial)
         push!(pairs, (bp.energy_per_fission, ifis > 0 ? ifis : 0))
         for fp in bp.fission_products
             push!(pairs, (fp.value, fp.ident))
+        end
+        if mat.version == WIMS_VERSION_E
+            @printf(io, "%15d\n", 0)  # WIMS-E leading zero (Fortran line 2032)
         end
         @printf(io, "%15d%15d\n", WIMS_SENTINEL, 3)
         @printf(io, "%15d\n", jcc)
@@ -267,8 +278,15 @@ function write_wims(io::IO, mat::WIMSMaterial)
             end
         end
         @printf(io, "%15d%15d\n", WIMS_SENTINEL, 4)
-    elseif mat.version == WIMS_VERSION_E
-        @printf(io, "%15d\n", 0)
+    else
+        # iburn==0 default emission (Fortran-faithful): jcc=2, single pair (0.0, ident)
+        if mat.version == WIMS_VERSION_E
+            @printf(io, "%15d\n", 0)
+        end
+        @printf(io, "%15d%15d\n", WIMS_SENTINEL, 3)
+        @printf(io, "%15d\n", 2)
+        @printf(io, "%15.8E%6d\n", 0.0, mat.ident)
+        @printf(io, "%15d%15d\n", WIMS_SENTINEL, 4)
     end
 
     # -- material identification line
@@ -276,20 +294,30 @@ function write_wims(io::IO, mat::WIMSMaterial)
             mat.ident, mat.atomic_weight, mat.z_number,
             ifis, mat.ntemp, nrestb, mat.has_fission_spectrum ? 1 : 0)
 
-    # -- temperature-independent data: potential, scatter, transport, absorption, (unused), lambda
-    # Layout per Fortran: 4*(nrg) + 2*nnt values
-    _write_block(io, mat.potential_xs)
-    _write_block(io, mat.scatter_xs)
-    _write_block(io, mat.transport_xs)
-    _write_block(io, mat.absorption_xs)
+    # -- temperature-independent data
+    # Fortran layout (wimsr.f90:1459-1463, iverw==4 / WIMS-D):
+    #   spot(ngr0..ngr1)  — nrg potential xs (resonance groups only)
+    #   sdp(ngr0..ngr1)   — nrg scattering DPL = ξ·σ_e (resonance groups only)
+    #   xtr(1..nnt)       — transport-corrected total (all nonthermal groups)
+    #   ab0(1..nnt)       — absorption (all nonthermal groups)
+    #   zero(ngr0..ngr1)  — nrg zeros (the "(unused)" slot)
+    #   glam(1..nrg)      — Goldstein-Cohen lambdas
+    # Total length: 4*nrg + 2*nnt
+    #
+    # WIMSMaterial fields map: potential_xs→spot (nrg long), scatter_xs→sdp
+    # (nrg long), transport_xs→xtr (nnt long), absorption_xs→ab0 (nnt long).
+    # Concatenate into one stream so 5-per-line packing wraps across boundaries
+    # exactly as Fortran's single `write(nout,'(1p,5e15.8)')(scr(i),i=1,nw)` does.
+    nrg_zeros = zeros(mat.nrg)
+    block = vcat(mat.potential_xs, mat.scatter_xs,
+                 mat.transport_xs, mat.absorption_xs,
+                 nrg_zeros, mat.lambdas)
+    _write_block(io, block)
 
-    # lambda for resonance groups
-    _write_block(io, mat.lambdas)
-
-    # nu*fission and fission if applicable
+    # nu*fission and fission for fissile materials (Fortran lines 1508-1509)
     if ifis > 1
-        _write_block(io, mat.nu_fission)
-        _write_block(io, mat.fission_xs)
+        block_f = vcat(mat.nu_fission, mat.fission_xs)
+        _write_block(io, block_f)
     end
 
     # nonthermal scattering matrix
