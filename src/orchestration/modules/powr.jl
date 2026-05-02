@@ -85,42 +85,56 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
               "yet ported. See src/orchestration/modules/powr.jl header.")
     end
 
-    # Walk the GENDF and accumulate per-MT per-group flux + xs at the
-    # reference temperature. Returns a NamedTuple with the parsed data.
     g = _powr_read_gendf_for_fast(gendf_path, m.matd, m.rtemp)
 
-    # gamll: detect iwa / iwf / iwr / xlol presence.
-    has_fission   = any(haskey(g.mf3, mt) for mt in (18, 19, 20, 21, 38))
-    has_mf6_match = !isempty(g.mf6_present)
+    has_fission = any(haskey(g.mf3, mt) for mt in (18, 19, 20, 21, 38))
     iwa = 1
     iwf = has_fission ? 1 : 0
     iwr = (g.nsigz > 1 && m.iff > 0) ? 1 : 0
-    nfs = g.nfs    # delayed-neutron spectrum count from MF=5/MT=455
+    nfs = g.nfs
 
-    if iwf != 0 || iwr != 0 || has_mf6_match || nfs > 0
+    # MF=6 supported: MT=2 elastic; MT∈[51,91] inelastic; MT∈{6-9,16,46-49} n2n.
+    function _powr_mf6_kind(mt::Int)
+        mt == 2                                      && return :elastic
+        51 <= mt <= 91                               && return :inelastic
+        mt == 16 || (6 <= mt <= 9) || (46 <= mt <= 49) && return :n2n
+        return :unknown
+    end
+    mf6_unsupported = filter(mt -> _powr_mf6_kind(mt) == :unknown, collect(keys(g.mf6)))
+    if iwf != 0 || iwr != 0 || nfs > 0 || !isempty(mf6_unsupported)
         error("powr lib=1: full Phase B path not yet ported (matd=$(m.matd) " *
-              "has iwf=$iwf iwr=$iwr mf6=$has_mf6_match nfs=$nfs). " *
-              "Carbon-style absorption-only path is the only current support.")
+              "has iwf=$iwf iwr=$iwr nfs=$nfs unsupported_mf6=$mf6_unsupported). " *
+              "Currently supported: absorption-only + MF=6 elastic / inelastic / n2n.")
     end
 
-    nid = g.iza * 10
+    nid  = g.iza * 10
     ngnd = _POWR_FAST_NGND
 
-    # gamxs: accumulate cflux and absorption.
-    cflux = zeros(Float64, ngnd)
+    # cflux: coarse-group P0 + P1 flux from MF=3/MT=1 (gamxs.f90:1147-1152).
+    # Stored as cflux[1..ngnd] (P0) and cflux[ngnd+1..2*ngnd] (P1). Inverted
+    # in-place after the MF=3 walk so subsequent accumulation can multiply.
+    cflux  = zeros(Float64, ngnd)
+    cfluxp1 = zeros(Float64, ngnd)
     if haskey(g.mf3, 1)
         for (ig, (flux, _xs)) in g.mf3[1]
             jg = ngnd - ig + 1
             1 <= jg <= ngnd && (cflux[jg] += flux)
         end
     end
-    @inbounds for jg in 1:ngnd
-        cflux[jg] = cflux[jg] != 0 ? 1 / cflux[jg] : 0.0
+    if haskey(g.mf3p1, 1)
+        for (ig, (flux1, _xs)) in g.mf3p1[1]
+            jg = ngnd - ig + 1
+            1 <= jg <= ngnd && (cfluxp1[jg] += flux1)
+        end
     end
+    @inbounds for jg in 1:ngnd
+        cflux[jg]   = cflux[jg]   != 0 ? 1 / cflux[jg]   : 0.0
+        cfluxp1[jg] = cfluxp1[jg] != 0 ? 1 / cfluxp1[jg] : 0.0
+    end
+
+    # Absorption: MT ∈ [102, 150] (gamxs.f90:1157-1163).
     absxs = zeros(Float64, ngnd)
     for mt in keys(g.mf3)
-        # Fortran gamxs.f90:1157 — `if (mth.lt.102.or.mth.gt.150) go to 280`,
-        # i.e., MT ∈ [102, 150] → capture / absorption channel.
         102 <= mt <= 150 || continue
         for (ig, (flux, xs)) in g.mf3[mt]
             jg = ngnd - ig + 1
@@ -128,16 +142,36 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
         end
     end
 
-    # gamll xlol: with no MF=6, xld(1..3) = 0 → xlol(1..3) = 0.
-    xlol = (0.0, 0.0, 0.0)
-    xla  = (0.0, 0.0, 0.0)
-    xld  = (0, 0, 0)        # int form
-    iwa_field = iwa
-    iwf_field = iwf
-    iwr_field = iwr
+    # MF=6 matrix accumulation. Each kind (elastic / inelastic / n2n) follows
+    # the same packed-band-diagonal storage scheme; differences:
+    #   elastic   uses Legendre P0 + P1 (and applies izref / 3× / cfluxp1).
+    #   inelastic uses P0 only at first sigma-zero (loca = l+lz+nl*nz*(k-1)).
+    #   n2n       same as inelastic but the accumulated value is divided by 2.
+    elastic_recs   = collect(filter(r -> r.ig > 0, get(g.mf6, 2, NamedTuple[])))
+    inelastic_recs = NamedTuple[]
+    n2n_recs       = NamedTuple[]
+    for (mt, recs) in g.mf6
+        kind = _powr_mf6_kind(mt)
+        if kind == :inelastic
+            append!(inelastic_recs, recs)
+        elseif kind == :n2n
+            append!(n2n_recs, recs)
+        end
+    end
 
-    # Write output records in fast()-driver order (lines 528-547).
-    println(io, _powr_pad80(@sprintf("%10d%10d%10d%10d", nid, iwa_field, iwf_field, iwr_field)))
+    e0_block, e1_block, xla3, xld3, xlol3 =
+        _powr_pack_matrix(elastic_recs, ngnd, m.izref, cflux, cfluxp1; kind=:elastic)
+    in_block, _,        xla1, xld1, xlol1 =
+        _powr_pack_matrix(inelastic_recs, ngnd, m.izref, cflux, cfluxp1; kind=:inelastic)
+    n2n_block, _,       xla2, xld2, xlol2 =
+        _powr_pack_matrix(n2n_recs, ngnd, m.izref, cflux, cfluxp1; kind=:n2n)
+
+    xla = (xla1, xla2, xla3)
+    xld = (xld1, xld2, xld3)
+    xlol = (xlol1, xlol2, xlol3)
+
+    # Write fast()-driver records (lines 528-547).
+    println(io, _powr_pad80(@sprintf("%10d%10d%10d%10d", nid, iwa, iwf, iwr)))
     println(io, _powr_pad80(_powr_word16(m.word)))
     println(io, _powr_pad80(repeat(" ", 36) *
                             _powr_e125(xlol[3]) * _powr_e125(xla[3]) *
@@ -147,21 +181,109 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
                             _powr_e125(xlol[2]) * _powr_e125(xla[2]) *
                             _powr_e125(Float64(xld[2] + 1))))
     _powr_write_e125_block(io, absxs)
+    # Matrix block emission order matches fast() lines 572-613: elastic
+    # (P0 then P1), then inelastic, then n2n.
+    if xlol3 != 0
+        _powr_write_e125_block(io, e0_block)
+        _powr_write_e125_block(io, e1_block)
+    end
+    if xlol1 != 0
+        _powr_write_e125_block(io, in_block)
+    end
+    if xlol2 != 0
+        _powr_write_e125_block(io, n2n_block)
+    end
     nothing
+end
+
+# Pack one MF=6 matrix kind into the gamll/gamxs band-diagonal storage.
+# Returns (block, p1_block, xla, xld, xlol). p1_block is empty Float64[]
+# for non-elastic kinds.
+function _powr_pack_matrix(recs::Vector{NamedTuple}, ngnd::Int, izref::Int,
+                            cflux::Vector{Float64}, cfluxp1::Vector{Float64};
+                            kind::Symbol)
+    isempty(recs) && return (Float64[], Float64[], 0.0, 0, 0.0)
+
+    # gamll: la = min(igc); ld = max(igc - ig2lo) (both with the
+    # ngn==ngnd ⇒ icgrp=identity simplification).
+    la = ngnd
+    ld = 0
+    for r in recs
+        igc = r.ig
+        ig2loc = r.ig2lo
+        (igc == 0 || igc > ngnd) && continue
+        la = min(la, igc)
+        ld = max(ld, igc - ig2loc)
+    end
+    (ld == 0 && la == ngnd) && return (Float64[], Float64[], 0.0, 0, 0.0)
+
+    xla  = Float64(ngnd - la + 1)
+    xld  = ld
+    lx   = round(Int, xla) + xld - ngnd - 1
+    lx   = max(lx, 0)
+    xlol = xla * (xld + 1) - lx * (lx - 1) / 2
+    n_cells = round(Int, xlol)
+    block   = zeros(Float64, n_cells)
+    p1_block = kind == :elastic ? zeros(Float64, n_cells) : Float64[]
+    kdp = ngnd + 1 - ld
+
+    # Accumulation factor: n2n divides the contribution by 2 (gamxs.f90:1348).
+    n2n_factor = kind == :n2n ? 0.5 : 1.0
+
+    for r in recs
+        ig = r.ig
+        jg = ngnd - ig + 1
+        jg < 1 && continue
+        jgp = jg > kdp ? kdp : jg
+        lc  = (ld + 1) * (jgp - 1)
+        if jg > kdp
+            for jgt in 1:(jg - kdp)
+                lc += ld + 2 - jgt
+            end
+        end
+        nl    = r.nl
+        nz    = r.nz
+        ng2   = r.ng2
+        ig2lo = r.ig2lo
+        data  = r.data
+        for k in 2:ng2
+            ig2  = ig2lo + k - 2
+            (ig2 == 0 || ig2 > ngnd) && continue
+            jg2c = max(ngnd - ig2 + 1, jg)
+            loc  = lc + (jg2c - jg) + 1
+            1 <= loc <= n_cells || continue
+            if kind == :elastic
+                # P0 uses sigma-zero index izref (gamxs.f90:1311).
+                offset = nl * ((izref - 1) + nz * (k - 1))
+                block[loc] += data[offset + 1] * data[1] * cflux[jg]
+                if nl > 1
+                    flx = cfluxp1[jg] != 0 ? cfluxp1[jg] : cflux[jg]
+                    p1_block[loc] += 3 * data[offset + 2] * data[2] * flx
+                end
+            else
+                # Inelastic + n2n use the first sigma-zero (gamxs.f90:1284, :1346).
+                offset = nl * nz * (k - 1)
+                block[loc] += data[offset + 1] * data[1] * cflux[jg] * n2n_factor
+            end
+        end
+    end
+
+    (block, p1_block, xla, xld, xlol)
 end
 
 # ============================================================================
 # Minimal GENDF reader for powr's needs
 # ============================================================================
 
-# For each MT in MF=3, returns a Dict{ig => (flux, xs)} at the reference
-# temperature. Also captures iza, nsigz, nfs, and any MF=6 group counts.
+# Walks a GENDF file and captures everything powr's gamll/gamxs need at the
+# reference temperature: MF=3 P0 flux + xs per (mt, ig); MF=3 P1 flux + xs
+# (Legendre order 2 from MT=1 only); MF=6 transfer matrix records per mt;
+# plus iza, nsigz, nfs.
 function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64)
-    mf3 = Dict{Int, Dict{Int, Tuple{Float64, Float64}}}()
-    mf6_present = Set{Int}()
-    iza = 0
-    nsigz = 1
-    nfs = 0
+    mf3   = Dict{Int, Dict{Int, Tuple{Float64, Float64}}}()  # P0
+    mf3p1 = Dict{Int, Dict{Int, Tuple{Float64, Float64}}}()  # P1 (when nl≥2)
+    mf6   = Dict{Int, Vector{NamedTuple}}()
+    iza = 0; nsigz = 1; nfs = 0
 
     lines = readlines(gendf_path)
     nlines = length(lines)
@@ -176,23 +298,13 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
          line = p)
     end
 
-    # Walk to first record of matd
+    # Pull iza + nsigz from the matd's MF=1/MT=451.
     idx = 1
     while idx <= nlines
         length(lines[idx]) < 75 && (idx += 1; continue)
         m = _line_meta(idx)
-        m.mat == matd && break
-        idx += 1
-    end
-    idx <= nlines || error("powr: MAT=$matd not found on GENDF $gendf_path")
-
-    # Cache iza from the very first MF=1/MT=451 HEAD of this material.
-    while idx <= nlines
-        m = _line_meta(idx)
-        m.mat != matd && break
-        if m.mf == 1 && m.mt == 451 && m.seq == 1
+        if m.mat == matd && m.mf == 1 && m.mt == 451 && m.seq == 1
             iza = round(Int, parse_endf_float(m.line[1:11]))
-            # The 2nd CONT carries (NL, NZ, NW, NGN) in MF1/451 of GENDF.
             if idx + 1 <= nlines
                 p2 = rpad(lines[idx + 1], 80)
                 nsigz = _parse_int(p2[34:44])
@@ -202,19 +314,37 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
         idx += 1
     end
 
-    # Walk all sections; for MF=3 LIST records at temp ≈ rtemp, capture
-    # (flux, xs) per group. For MF=6 record any MTs present (we error out
-    # later if any are seen — Phase B doesn't yet handle them). For
-    # MF=5/MT=455 capture nfs.
+    # Helper: read one LIST record's data section into a Vector{Float64} of
+    # length nw (6 values per line, 11-char fields).
+    function _read_list_data(start_idx::Integer, nw::Integer)
+        nw = Int(nw)
+        data = Vector{Float64}(undef, nw)
+        nlines_data = cld(nw, 6)
+        k = 0
+        for li in 0:(nlines_data - 1)
+            p = rpad(lines[start_idx + li], 80)
+            for col in 0:5
+                k >= nw && break
+                k += 1
+                data[k] = parse_endf_float(p[1 + 11*col : 11 + 11*col])
+            end
+        end
+        data
+    end
+
     idx = 1
     while idx <= nlines
         length(lines[idx]) < 75 && (idx += 1; continue)
         m = _line_meta(idx)
         m.mat != matd && (idx += 1; continue)
+
         if m.mf == 3 && m.mt > 0 && m.seq == 1
-            # Section HEAD; subsequent records are LISTs per group.
             mt = m.mt
-            mt_data = get!(mf3, mt, Dict{Int, Tuple{Float64, Float64}}())
+            # HEAD record: NL on column 23-33, NZ on 34-44.
+            nl_section = _parse_int(m.line[23:33])
+            mt_data   = get!(mf3,   mt, Dict{Int, Tuple{Float64, Float64}}())
+            mt_data_p1 = nl_section >= 2 ?
+                get!(mf3p1, mt, Dict{Int, Tuple{Float64, Float64}}()) : nothing
             idx += 1
             while idx <= nlines
                 length(lines[idx]) < 75 && (idx += 1; continue)
@@ -226,20 +356,55 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
                 temp = parse_endf_float(p2[1:11])
                 nw   = _parse_int(p2[45:55])
                 ig   = _parse_int(p2[56:66])
+                ng2  = _parse_int(p2[23:33])
+                nz   = _parse_int(p2[34:44])
                 if abs(temp - rtemp) <= eps && ig > 0 && nw >= 2 && idx + 1 <= nlines
-                    p3 = rpad(lines[idx + 1], 80)
-                    flux = parse_endf_float(p3[1:11])
-                    xs   = parse_endf_float(p3[12:22])
-                    mt_data[ig] = (flux, xs)
+                    data = _read_list_data(idx + 1, nw)
+                    # MF=3 layout (NJOY GENDF): for k=1 (only k since ng2=2),
+                    # values 1..nl=flux per Legendre order, then xs at
+                    # positions nl+1..nl+nl*nz (P0 first sigma-zero etc).
+                    nl = nl_section
+                    flux_p0 = data[1]
+                    xs_p0   = nl + 1 <= length(data) ? data[nl + 1] : 0.0
+                    mt_data[ig] = (flux_p0, xs_p0)
+                    if nl >= 2
+                        flux_p1 = data[2]
+                        # P1 xs is the 2nd Legendre coefficient for k=2 (group→g):
+                        # position nl + 2 (l=2 of first sigma-zero of k=2 entry).
+                        xs_p1 = nl + 2 <= length(data) ? data[nl + 2] : 0.0
+                        mt_data_p1[ig] = (flux_p1, xs_p1)
+                    end
                 end
-                # Skip data lines: ceil(nw / 6).
                 idx += 1 + cld(nw, 6)
             end
+
         elseif m.mf == 6 && m.mt > 0 && m.seq == 1
-            push!(mf6_present, m.mt)
+            mt = m.mt
+            # HEAD record: NL on cols 23-33, NZ on cols 34-44.
+            nl_section = _parse_int(m.line[23:33])
+            nz_section = _parse_int(m.line[34:44])
+            recs = get!(mf6, mt, NamedTuple[])
             idx += 1
+            while idx <= nlines
+                length(lines[idx]) < 75 && (idx += 1; continue)
+                p2 = rpad(lines[idx], 80)
+                m2 = (mat=_parse_int(p2[67:70]), mf=_parse_int(p2[71:72]),
+                      mt=_parse_int(p2[73:75]))
+                (m2.mat != matd || m2.mf != 6 || m2.mt != mt) && break
+                temp  = parse_endf_float(p2[1:11])
+                ng2   = _parse_int(p2[23:33])
+                ig2lo = _parse_int(p2[34:44])
+                nw    = _parse_int(p2[45:55])
+                ig    = _parse_int(p2[56:66])
+                if abs(temp - rtemp) <= eps && ig > 0 && nw > 0 && idx + 1 <= nlines
+                    data = _read_list_data(idx + 1, nw)
+                    push!(recs, (ig=ig, ig2lo=ig2lo, ng2=ng2,
+                                 nl=nl_section, nz=nz_section, data=data))
+                end
+                idx += 1 + cld(nw, 6)
+            end
+
         elseif m.mf == 5 && m.mt == 455 && m.seq == 1
-            # NL on the 2nd CONT (or LIST) gives the # delayed groups.
             if idx + 1 <= nlines
                 p2 = rpad(lines[idx + 1], 80)
                 nfs += _parse_int(p2[23:33])
@@ -250,7 +415,7 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
         end
     end
 
-    (mf3=mf3, mf6_present=mf6_present, iza=iza, nsigz=nsigz, nfs=nfs)
+    (mf3=mf3, mf3p1=mf3p1, mf6=mf6, iza=iza, nsigz=nsigz, nfs=nfs)
 end
 
 # ============================================================================
