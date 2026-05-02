@@ -33,7 +33,7 @@ const NJOY_MODULES = Set([
 const AVAILABLE_MODULES = Set([
     :moder, :reconr, :broadr, :heatr, :thermr, :unresr, :purr,
     :groupr, :errorr, :acer, :gaspr, :leapr, :gaminr, :covr,
-    :dtfr, :matxsr, :viewr,
+    :dtfr, :matxsr, :viewr, :wimsr,
 ])
 
 const SKIP_MODULES = Set([:plotr])
@@ -1365,6 +1365,164 @@ end
 
 function parse_cmake_references(cmake_text::AbstractString)::Vector{String}
     unique([m.match for m in eachmatch(r"referenceTape\d+", cmake_text)])
+end
+
+# =========================================================================
+# wimsr — WIMS-D/E reactor library generator
+# Ref: njoy-reference/src/wimsr.f90:48-307 (subroutine wimsr, card layout).
+# Card layout (with conditionals):
+#   1: ngendf nout                        (input GENDF unit, output WIMS unit)
+#   2: iprint iverw igroup                (verbosity; WIMS version 4|5; group struct)
+#   2a: ngnd nfg nrg igref                (ONLY if igroup==9; user group structure)
+#   3: mat nfid rdfid iburn               (ENDF MAT, WIMS ID, resonance ID, burnup flag)
+#   4: ntemp nsigz sgref ires sigp mti mtc ip1opt inorf isof ifprod jp1
+#                                         (12 fields with defaults, free-form)
+#   5: ntis efiss                         (ONLY if iburn>0)
+#   6a-c: burnup chain pairs              (ONLY if iburn>0)
+#   7: glam(1:nrg)                        (Goldstein lambdas)
+#   8: p1flx(1:jp1)                       (ONLY if jp1>0)
+# =========================================================================
+
+struct WimsrBurnupCard
+    ntis::Int
+    efiss::Float64
+    pairs::Vector{Tuple{Int,Float64}}  # (ident, yield/decay)
+end
+
+struct WimsrParams
+    ngendf::Int                 # card 1: GENDF input unit (always abs() — sign is binary flag)
+    nout::Int                   # card 1: WIMS output unit (positive = ASCII)
+    iprint::Int                 # card 2 default 0
+    iverw::Int                  # card 2 default 4 (WIMS-D)
+    igroup::Int                 # card 2 default 0 (69-group default)
+    ngnd::Int                   # card 2a (only if igroup==9; else 69)
+    nfg::Int                    # card 2a (only if igroup==9; else 14)
+    nrg::Int                    # card 2a (only if igroup==9; else 13)
+    igref::Int                  # card 2a (only if igroup==9; else 0)
+    mat::Int                    # card 3
+    nfid::Int                   # card 3 (set from nint(rdfid))
+    rdfid::Float64              # card 3
+    iburn::Int                  # card 3 default 0
+    ntemp::Int                  # card 4 default 0 (means "use all on tape")
+    nsigz::Int                  # card 4 default 0
+    sgref::Float64              # card 4 default 1e10 (infinite dilution)
+    ires::Int                   # card 4 default 0 (no resonance tables)
+    sigp::Float64               # card 4 default 0
+    mti::Int                    # card 4 thermal inelastic MT (e.g. 221)
+    mtc::Int                    # card 4 thermal coherent MT (0 if absent)
+    ip1opt::Int                 # card 4 default 1 (1=skip P1, 0=include)
+    inorf::Int                  # card 4 default 0
+    isof::Int                   # card 4 default 0 (skip fission spectrum)
+    ifprod::Int                 # card 4 default 0
+    jp1::Int                    # card 4 default 0 (no current spectrum)
+    burnup::Union{Nothing,WimsrBurnupCard}    # cards 5/6 if iburn>0
+    glam::Vector{Float64}       # card 7 (length nrg)
+    p1flx::Vector{Float64}      # card 8 (length jp1; empty if jp1==0)
+end
+
+function parse_wimsr(mc::ModuleCall)::WimsrParams
+    cards = mc.raw_cards
+    isempty(cards) && error("wimsr: empty card list")
+
+    # Card 1
+    ngendf = abs(_fint(cards[1], 1))
+    nout   = abs(_fint(cards[1], 2))
+
+    # Card 2 (defaults from wimsr.f90:170-172)
+    iprint = length(cards) >= 2 ? _fint(cards[2], 1; default=0) : 0
+    iverw  = length(cards) >= 2 ? _fint(cards[2], 2; default=4) : 4
+    igroup = length(cards) >= 2 ? _fint(cards[2], 3; default=0) : 0
+
+    # Card 2a — only if igroup==9 (wimsr.f90:186-189). Default 69-group structure.
+    next_ci = 3
+    ngnd, nfg, nrg, igref = 69, 14, 13, 0
+    if igroup == 9
+        c2a = cards[next_ci]
+        ngnd  = _fint(c2a, 1; default=69)
+        nfg   = _fint(c2a, 2; default=14)
+        nrg   = _fint(c2a, 3; default=13)
+        igref = _fint(c2a, 4; default=0)
+        next_ci += 1
+    end
+
+    # Card 3 (wimsr.f90:202-205)
+    c3 = cards[next_ci]
+    mat   = _fint(c3, 1; default=0)
+    nfid  = _fint(c3, 2; default=0)
+    rdfid = _fnum(c3, 3; default=0.0)
+    iburn = _fint(c3, 4; default=0)
+    # Fortran: nfid=nint(rdfid). Card-3 second field (nfid) is the deck-given
+    # WIMS ID; if rdfid omitted, fall back to nfid as float. T11 uses both.
+    if rdfid == 0.0 && nfid != 0
+        rdfid = Float64(nfid)
+    elseif nfid == 0 && rdfid != 0
+        nfid = round(Int, rdfid)
+    end
+    next_ci += 1
+
+    # Card 4 (wimsr.f90:217-218) — 12 fields with defaults
+    c4 = cards[next_ci]
+    ntemp  = _fint(c4, 1;  default=0)
+    nsigz  = _fint(c4, 2;  default=0)
+    sgref  = _fnum(c4, 3;  default=1e10)
+    ires   = _fint(c4, 4;  default=0)
+    sigp   = _fnum(c4, 5;  default=0.0)
+    mti    = _fint(c4, 6;  default=0)
+    mtc    = _fint(c4, 7;  default=0)
+    ip1opt = _fint(c4, 8;  default=1)
+    inorf  = _fint(c4, 9;  default=0)
+    isof   = _fint(c4, 10; default=0)
+    ifprod = _fint(c4, 11; default=0)
+    jp1    = _fint(c4, 12; default=0)
+    next_ci += 1
+
+    # Cards 5/6: burnup data — only if iburn>0 (wimsr.f90:242-255)
+    burnup = nothing
+    if iburn > 0
+        c5 = cards[next_ci]
+        ntis = _fint(c5, 1; default=0)
+        efiss = _fnum(c5, 2; default=0.0)
+        next_ci += 1
+        pairs = Tuple{Int,Float64}[]
+        # Fortran reads ntis (ident, yield) pairs across one or more lines
+        for _ in 1:ntis
+            next_ci > length(cards) && break
+            row = cards[next_ci]
+            for j in 1:2:length(row)
+                j+1 > length(row) && break
+                push!(pairs, (_fint(row, j), _fnum(row, j+1)))
+            end
+            next_ci += 1
+        end
+        burnup = WimsrBurnupCard(ntis, efiss, pairs)
+    end
+
+    # Card 7: glam (nrg lambdas)
+    glam = Float64[]
+    if next_ci <= length(cards)
+        for tok in cards[next_ci]
+            startswith(tok, "'") && continue
+            push!(glam, _parse_num(tok))
+            length(glam) >= nrg && break
+        end
+        next_ci += 1
+    end
+
+    # Card 8: p1flx (only if jp1>0)
+    p1flx = Float64[]
+    if jp1 > 0 && next_ci <= length(cards)
+        for tok in cards[next_ci]
+            startswith(tok, "'") && continue
+            push!(p1flx, _parse_num(tok))
+            length(p1flx) >= jp1 && break
+        end
+    end
+
+    WimsrParams(ngendf, nout, iprint, iverw, igroup,
+                ngnd, nfg, nrg, igref, mat, nfid, rdfid, iburn,
+                ntemp, nsigz, sgref, ires, sigp, mti, mtc,
+                ip1opt, inorf, isof, ifprod, jp1,
+                burnup, glam, p1flx)
 end
 
 # =========================================================================

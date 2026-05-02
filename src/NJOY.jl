@@ -164,6 +164,7 @@ include("orchestration/modules/leapr.jl")
 include("orchestration/modules/covr.jl")
 include("orchestration/modules/plotr.jl")
 include("orchestration/modules/gaspr.jl")
+include("orchestration/modules/wimsr.jl")
 include("orchestration/pipeline.jl")
 
 # Public API -- constants

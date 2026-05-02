@@ -243,6 +243,10 @@ function run_njoy(input_path::AbstractString;
         elseif mc.name == :gaspr
             params = parse_gaspr(mc)
             gaspr_module(tapes, params)
+
+        elseif mc.name == :wimsr
+            params = parse_wimsr(mc)
+            wimsr_module(tapes, params)
             _collect_gaspr!(ctx, tapes, params)
 
         else
