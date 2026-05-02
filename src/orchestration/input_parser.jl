@@ -510,17 +510,32 @@ end
 # powr: produce input for EPRI-CELL (GAMTAP, LIBRAR) and EPRI-CPM (CLIB).
 # Card 1: ngendf nout
 # Card 2: lib iprint iclaps        (lib: 1=fast/GAMTAP, 2=thermal/LIBRAR, 3=cpm/CLIB)
-# Cards 3+: lib-specific (see powr.f90:82-232 — fast/therm/cpm have very
-# different per-material card layouts). Phase A keeps the per-mode card
-# parsing in the module body (raw_cards retained for future phases).
+# Cards 3+ (lib=1): per material: (matd, rtemp, iff, nsgz, izref) + word(16) +
+#                   fsn(40)   [or, if matd<0, abs(ngnd) values via card 6].
+#                   Terminate with `matd=0/`.
+# Cards 3+ (lib=2/3): structured differently (see powr.f90:111-232). Phase A
+# keeps those raw_cards for later phases.
 # Ref: njoy-reference/src/powr.f90:63-296.
+struct PowrFastMaterial
+    matd::Int             # ENDF MAT (positive)
+    iread::Int            # 0=normal, 1=read absorption directly (matd<0 in input)
+    rtemp::Float64        # reference temperature (K)
+    iff::Int              # f-factor option (0/1)
+    nsgz::Int             # max sigma-zeros (0=all)
+    izref::Int            # reference sigma-zero index for elastic
+    word::String          # 16-char description
+    fsn::String           # 40-char fission spectrum title (unused for non-fissile)
+    abs_in::Vector{Float64}  # length-ngnd absorption values when iread=1
+end
+
 struct PowrParams
     ngendf::Int
     nout::Int
-    lib::Int       # 1=fast, 2=thermal, 3=cpm
+    lib::Int               # 1=fast, 2=thermal, 3=cpm
     iprint::Int
     iclaps::Int
-    raw_cards::Vector{Vector{String}}
+    fast_mats::Vector{PowrFastMaterial}    # populated only when lib=1
+    raw_cards::Vector{Vector{String}}      # full deck for phases C/D
 end
 
 function parse_powr(mc::ModuleCall)::PowrParams
@@ -539,7 +554,51 @@ function parse_powr(mc::ModuleCall)::PowrParams
     lib in (1, 2, 3) ||
         error("powr: lib must be 1 (fast), 2 (thermal), or 3 (cpm); got $lib")
 
-    PowrParams(ngendf, nout, lib, iprint, iclaps, cards)
+    fast_mats = PowrFastMaterial[]
+    if lib == 1
+        ngnd = 68    # Fortran fast() line 410.
+        idx  = 3
+        while idx <= length(cards)
+            ck = cards[idx]
+            matd_signed = _fint(ck, 1)
+            matd_signed == 0 && break
+            iread = matd_signed < 0 ? 1 : 0
+            matd  = abs(matd_signed)
+            rtemp = length(ck) >= 2 ? _fnum(ck, 2)        : 300.0
+            iff   = length(ck) >= 3 ? _fint(ck, 3)        : 1
+            nsgz  = length(ck) >= 4 ? _fint(ck, 4)        : 0
+            izref = length(ck) >= 5 ? _fint(ck, 5)        : 1
+            idx  += 1
+
+            word = ""
+            fsn  = ""
+            abs_in = Float64[]
+            if iread == 0
+                idx <= length(cards) || error(
+                    "powr lib=1: missing description card after matd=$matd")
+                word = isempty(cards[idx]) ? "" :
+                       String(strip(cards[idx][1], ['\'', '"', '*', ' ']))
+                idx += 1
+                idx <= length(cards) || error(
+                    "powr lib=1: missing fission spectrum title card after matd=$matd")
+                fsn = isempty(cards[idx]) ? "" :
+                      String(strip(cards[idx][1], ['\'', '"', '*', ' ']))
+                idx += 1
+            else
+                # iread=1: read ngnd absorption values directly (one card)
+                idx <= length(cards) || error(
+                    "powr lib=1: missing absorption card after matd=$matd (iread=1)")
+                abs_in = [_fnum(cards[idx], k) for k in 1:min(length(cards[idx]), ngnd)]
+                length(abs_in) < ngnd && append!(abs_in, zeros(ngnd - length(abs_in)))
+                idx += 1
+            end
+
+            push!(fast_mats, PowrFastMaterial(matd, iread, rtemp, iff, nsgz,
+                                                izref, word, fsn, abs_in))
+        end
+    end
+
+    PowrParams(ngendf, nout, lib, iprint, iclaps, fast_mats, cards)
 end
 
 struct UnresrParams
