@@ -121,18 +121,6 @@ function _wimsr_build_material_stub(in_path::AbstractString, p::WimsrParams)
     nrestb = p.ires > 0  # has_resonance_tables
     nsigz_eff = p.nsigz == 0 ? 7 : p.nsigz  # default 7 for T11; xsecs scans tape later
 
-    # Stub resonance tables — one per resonance group, all zeros. Replaced by
-    # the resint port (Phase 58b/c). Keeps validate() happy so the upstream
-    # WIMS sections (lines 1-921 of T11) are testable.
-    res_stubs = nrestb ? [WIMSResonanceTable(p.rdfid, p.ires, nsigz_eff,
-                                              zeros(p.ires), zeros(nsigz_eff),
-                                              zeros(p.ires * nsigz_eff))
-                          for _ in 1:p.nrg] : WIMSResonanceTable[]
-    fres_stubs = (nrestb && ifis == 3) ? [WIMSResonanceTable(p.rdfid, p.ires, nsigz_eff,
-                                                              zeros(p.ires), zeros(nsigz_eff),
-                                                              zeros(p.ires * nsigz_eff))
-                                          for _ in 1:p.nrg] : WIMSResonanceTable[]
-
     # Use the actual ntemp from the GENDF if the deck card-4 ntemp was 0
     # ("use all temperatures on tape" — wimsr.f90:407-408).
     final_ntemp = (p.ntemp == 0) ? ntemp_tape : p.ntemp
@@ -147,6 +135,17 @@ function _wimsr_build_material_stub(in_path::AbstractString, p::WimsrParams)
     sdp_w  = xs_data.sdp[p.nfg+1:p.nfg+p.nrg]
     xtr_w  = xs_data.xtr[1:nnt]
     ab0_w  = xs_data.ab0[1:nnt]
+
+    # Resonance tables from resint port (Fortran wimsr.f90:425-676).
+    # Goldstein-Cohen normalization on raw GENDF MT=2/18/102 data.
+    if nrestb
+        abs_tables, fis_tables = wimsr_extract_resint(in_path, p, xs_data)
+        res_stubs = abs_tables
+        fres_stubs = ifis == 3 ? fis_tables : WIMSResonanceTable[]
+    else
+        res_stubs = WIMSResonanceTable[]
+        fres_stubs = WIMSResonanceTable[]
+    end
 
     # Build per-temperature thermal arrays from xsecs output. Each thermal
     # array slices the [nt0..ngnd] portion of the per-temp xtr_t / ab0_t / etc.

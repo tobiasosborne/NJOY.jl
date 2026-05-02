@@ -328,13 +328,19 @@ function write_wims(io::IO, mat::WIMSMaterial)
     end
 
     # -- temperature-dependent data
+    # Fortran writes per-temp blocks as concatenated streams (lines 2072,
+    # 2076): (transport[..nnt] + absorption[..nnt]) as one 5-per-line block,
+    # then optionally (nu*fission + fission) as another. The 5-per-line
+    # packing crosses array boundaries, so we must concat first.
     _write_block(io, mat.temperatures)
     for it in 1:mat.ntemp
-        _write_block(io, mat.thermal_transport[it])
-        _write_block(io, mat.thermal_absorption[it])
+        # Transport + absorption combined block (Fortran line 2072: nw=2*nthermal)
+        ta_block = vcat(mat.thermal_transport[it], mat.thermal_absorption[it])
+        _write_block(io, ta_block)
         if ifis > 1
-            _write_block(io, mat.thermal_nu_fission[it])
-            _write_block(io, mat.thermal_fission[it])
+            # nu*fission + fission combined block (Fortran line 2076)
+            nf_block = vcat(mat.thermal_nu_fission[it], mat.thermal_fission[it])
+            _write_block(io, nf_block)
         end
         tmat = mat.thermal_matrices[it]
         @printf(io, "%15d\n", length(tmat))
