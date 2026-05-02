@@ -33,7 +33,7 @@ const NJOY_MODULES = Set([
 const AVAILABLE_MODULES = Set([
     :moder, :reconr, :broadr, :heatr, :thermr, :unresr, :purr,
     :groupr, :errorr, :acer, :gaspr, :leapr, :gaminr, :covr,
-    :dtfr, :matxsr, :viewr, :wimsr,
+    :dtfr, :matxsr, :viewr, :wimsr, :mixr, :resxsr, :powr,
 ])
 
 const SKIP_MODULES = Set([:plotr])
@@ -351,6 +351,195 @@ function parse_gaspr(mc::ModuleCall)::GasprParams
     isempty(cards) && return GasprParams(0,0,0)
     GasprParams(abs(_fint(cards[1], 1)), abs(_fint(cards[1], 2)),
                 length(cards[1]) >= 3 ? abs(_fint(cards[1], 3)) : 0)
+end
+
+# mixr: linear-combination of cross sections from N input PENDF/ENDF tapes.
+# Card 1: nout, nin1..nin10 (trailing zeros end list)
+# Card 2: mtn(1..20)        (output MT list, trailing zeros end list)
+# Card 3: (matn, wtn) pairs (one per input tape; matn=0 ends list)
+# Card 4: temp              (target temperature)
+# Card 5: matd, za, awr     (output material id / ZA / AWR)
+# Card 6: 'description'     (66-char text written to MF=1/MT=451)
+# Ref: njoy-reference/src/mixr.f90:31-58 (input description),
+#      :96-122 (parser),    :150-195 (mat/temp lookup).
+struct MixrParams
+    nout::Int
+    nin::Vector{Int}
+    mtn::Vector{Int}
+    matn::Vector{Int}
+    wtn::Vector{Float64}
+    temp::Float64
+    matd::Int
+    za::Float64
+    awr::Float64
+    des::String
+end
+
+function parse_mixr(mc::ModuleCall)::MixrParams
+    cards = mc.raw_cards
+    length(cards) >= 6 || error(
+        "mixr: need 6 cards (units, MTs, mats+weights, temp, output id, " *
+        "description); got $(length(cards))")
+
+    # Card 1: nout, nin1..
+    c1 = cards[1]
+    nout = abs(_fint(c1, 1))
+    nin = Int[]
+    for i in 2:length(c1)
+        v = abs(_fint(c1, i))
+        v == 0 && break
+        push!(nin, v)
+    end
+
+    # Card 2: MT list
+    c2 = cards[2]
+    mtn = Int[]
+    for i in 1:length(c2)
+        v = _fint(c2, i)
+        v == 0 && break
+        push!(mtn, v)
+    end
+
+    # Card 3: (matn, wtn) pairs
+    c3 = cards[3]
+    matn = Int[]; wtn = Float64[]
+    i = 1
+    while i + 1 <= length(c3)
+        m = _fint(c3, i)
+        m == 0 && break
+        push!(matn, m); push!(wtn, _fnum(c3, i + 1))
+        i += 2
+    end
+    length(matn) == length(nin) || error(
+        "mixr: number of (mat, weight) pairs ($(length(matn))) must equal " *
+        "number of input tapes ($(length(nin)))")
+
+    # Card 4: temperature
+    temp = _fnum(cards[4], 1)
+
+    # Card 5: matd, za, awr
+    c5 = cards[5]
+    matd = _fint(c5, 1)
+    za   = _fnum(c5, 2)
+    awr  = _fnum(c5, 3)
+
+    # Card 6: description (66 chars max). Strip surrounding quotes/asterisks.
+    c6 = cards[6]
+    des = ""
+    if !isempty(c6)
+        des = String(strip(c6[1], ['\'', '"', '*', ' ']))
+    end
+    length(des) > 66 && (des = des[1:66])
+
+    MixrParams(nout, nin, mtn, matn, wtn, temp, matd, za, awr, des)
+end
+
+# resxsr: build a CCCC RESXS resonance cross-section binary file from PENDF.
+# Card 1: nout
+# Card 2: nmat, maxt, nholl, efirst, elast, eps
+# Card 3: 'huse' (12-char) ivers
+# Card 4: 'holl' (repeat nholl times) — descriptive text
+# Card 5: 'hmat' mat unit (repeat nmat times)
+# Ref: njoy-reference/src/resxsr.f90:16-40 (input description),
+#      :237-248 (parser).
+struct ResxsrMaterial
+    hmat::String   # 8-char hollerith name
+    mat::Int       # ENDF MAT number
+    unit::Int      # PENDF input tape unit
+end
+
+struct ResxsrParams
+    nout::Int
+    nmat::Int
+    maxt::Int
+    nholl::Int
+    efirst::Float64
+    elast::Float64
+    eps::Float64
+    huse::String   # 12-char user identifier
+    ivers::Int
+    holl::Vector{String}
+    materials::Vector{ResxsrMaterial}
+end
+
+function parse_resxsr(mc::ModuleCall)::ResxsrParams
+    cards = mc.raw_cards
+    length(cards) >= 3 || error("resxsr: need at least 3 control cards")
+
+    nout = abs(_fint(cards[1], 1))
+
+    c2 = cards[2]
+    nmat   = _fint(c2, 1)
+    maxt   = _fint(c2, 2)
+    nholl  = _fint(c2, 3)
+    efirst = _fnum(c2, 4)
+    elast  = _fnum(c2, 5)
+    eps    = _fnum(c2, 6)
+
+    c3 = cards[3]
+    huse  = isempty(c3) ? "" : String(strip(c3[1], ['\'', '"', '*', ' ']))
+    ivers = length(c3) >= 2 ? _fint(c3, 2) : 0
+
+    length(cards) >= 3 + nholl + nmat || error(
+        "resxsr: insufficient cards — need 3 + nholl ($nholl) + nmat ($nmat) " *
+        "= $(3 + nholl + nmat); got $(length(cards))")
+
+    holl = String[]
+    idx = 4
+    for _ in 1:nholl
+        ck = cards[idx]
+        text = isempty(ck) ? "" : String(strip(ck[1], ['\'', '"', '*', ' ']))
+        push!(holl, text)
+        idx += 1
+    end
+
+    materials = ResxsrMaterial[]
+    for _ in 1:nmat
+        ck = cards[idx]
+        hmat = String(strip(ck[1], ['\'', '"', '*', ' ']))
+        mat  = _fint(ck, 2)
+        unit = abs(_fint(ck, 3))
+        push!(materials, ResxsrMaterial(hmat, mat, unit))
+        idx += 1
+    end
+
+    ResxsrParams(nout, nmat, maxt, nholl, efirst, elast, eps,
+                  huse, ivers, holl, materials)
+end
+
+# powr: produce input for EPRI-CELL (GAMTAP, LIBRAR) and EPRI-CPM (CLIB).
+# Card 1: ngendf nout
+# Card 2: lib iprint iclaps        (lib: 1=fast/GAMTAP, 2=thermal/LIBRAR, 3=cpm/CLIB)
+# Cards 3+: lib-specific (see powr.f90:82-232 — fast/therm/cpm have very
+# different per-material card layouts). Phase A keeps the per-mode card
+# parsing in the module body (raw_cards retained for future phases).
+# Ref: njoy-reference/src/powr.f90:63-296.
+struct PowrParams
+    ngendf::Int
+    nout::Int
+    lib::Int       # 1=fast, 2=thermal, 3=cpm
+    iprint::Int
+    iclaps::Int
+    raw_cards::Vector{Vector{String}}
+end
+
+function parse_powr(mc::ModuleCall)::PowrParams
+    cards = mc.raw_cards
+    length(cards) >= 2 || error(
+        "powr: need at least 2 control cards (ngendf nout / lib iprint iclaps)")
+
+    ngendf = abs(_fint(cards[1], 1))
+    nout   = abs(_fint(cards[1], 2))
+
+    c2     = cards[2]
+    lib    = _fint(c2, 1)
+    iprint = length(c2) >= 2 ? _fint(c2, 2) : 0
+    iclaps = length(c2) >= 3 ? _fint(c2, 3) : 0
+
+    lib in (1, 2, 3) ||
+        error("powr: lib must be 1 (fast), 2 (thermal), or 3 (cpm); got $lib")
+
+    PowrParams(ngendf, nout, lib, iprint, iclaps, cards)
 end
 
 struct UnresrParams

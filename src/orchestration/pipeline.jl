@@ -244,6 +244,18 @@ function run_njoy(input_path::AbstractString;
             params = parse_gaspr(mc)
             gaspr_module(tapes, params)
 
+        elseif mc.name == :mixr
+            params = parse_mixr(mc)
+            mixr_module(tapes, params)
+
+        elseif mc.name == :resxsr
+            params = parse_resxsr(mc)
+            resxsr_module(tapes, params)
+
+        elseif mc.name == :powr
+            params = parse_powr(mc)
+            powr_module(tapes, params)
+
         elseif mc.name == :wimsr
             params = parse_wimsr(mc)
             wimsr_module(tapes, params)

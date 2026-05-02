@@ -167,6 +167,9 @@ include("processing/wimsr_xsecs.jl")
 include("processing/wimsr_resint.jl")
 include("orchestration/modules/gaspr.jl")
 include("orchestration/modules/wimsr.jl")
+include("orchestration/modules/mixr.jl")
+include("orchestration/modules/resxsr.jl")
+include("orchestration/modules/powr.jl")
 include("orchestration/pipeline.jl")
 
 # Public API -- constants
@@ -386,6 +389,9 @@ export resolve, register!
 export run_njoy, build_tape_manager, RunContext, final_assembly!
 export read_pendf, write_pendf_tape, extract_mf3, extract_mf3_all, copy_with_modifications
 export reconr_module, broadr_module, heatr_module, thermr_module, moder_module
+export mixr_module, parse_mixr, MixrParams
+export resxsr_module, parse_resxsr, ResxsrParams, ResxsrMaterial
+export powr_module, parse_powr, PowrParams
 export compute_thnmax, resolve_thnmax, select_broadr_partials
 export lookup_bragg_params, extract_Z
 export ModuleCall, NJOYInputDeck, parse_njoy_input
