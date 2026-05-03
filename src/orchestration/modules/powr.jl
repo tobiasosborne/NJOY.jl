@@ -112,11 +112,10 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
         return :unknown
     end
     mf6_unsupported = filter(mt -> _powr_mf6_kind(mt) == :unknown, collect(keys(g.mf6)))
-    if nfs > 0 || !isempty(mf6_unsupported)
-        error("powr lib=1: not yet ported for matd=$(m.matd) " *
-              "(nfs=$nfs unsupported_mf6=$mf6_unsupported). " *
-              "Currently supported: absorption + MF=6 elastic / inelastic / n2n / " *
-              "fission + multi-T multi-σ₀ self-shielding (no delayed-neutron spectra).")
+    if !isempty(mf6_unsupported)
+        error("powr lib=1: unsupported MF=6 MTs for matd=$(m.matd): " *
+              "$mf6_unsupported. Currently supported: MT=2 elastic, MT=18 fission, " *
+              "MT∈[51,91] inelastic, MT∈{6-9,16,46-49} n2n.")
     end
 
     nid  = g.iza * 10
@@ -144,11 +143,14 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
         cfluxp1[jg] = cfluxp1[jg] != 0 ? 1 / cfluxp1[jg] : 0.0
     end
 
-    # Unified storage `a` mirrors Fortran's contiguous layout. Pointers:
+    # Unified storage `a` mirrors Fortran's contiguous layout (powr.f90:1061-1066).
+    # Pointers:
     #   locab0 = 1                     absorption (length ngnd)
     #   locsf0 = locab0 + ngnd         sigma_f    (length ngnd)
-    #   locchi = locsf0 + ngnd         chi        (length ngnd)
-    #   locnus = locchi + ngnd         nu*sigf → nu (length ngnd)
+    #   locchi = locsf0 + ngnd         prompt chi (length ngnd)
+    #   locdla = locchi + ngnd         delayed chi blocks (length ngnd*nfs;
+    #                                  laid out as nfs consecutive ngnd-vectors)
+    #   locnus = locdla + ngnd*nfs     nu*sigf → nu (length ngnd)
     # The fission-spectrum branch in Fortran gamxs (lines 1206-1208) writes
     # to `locchi + jg2c - 1` where jg2c can be 0 or -1, silently corrupting
     # the last 2 sigf cells. We replicate that exact behavior by using a
@@ -156,7 +158,8 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
     locab0 = 1
     locsf0 = locab0 + ngnd
     locchi = locsf0 + ngnd
-    locnus = locchi + ngnd
+    locdla = locchi + ngnd
+    locnus = locdla + ngnd * nfs
     a_total_len = locnus + ngnd
     a = zeros(Float64, a_total_len)
 
@@ -265,12 +268,113 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
                 a[locnus + ig - 1] /= sf
             end
         end
+    end
 
-        # Normalize chi: cnorm = 1/cnorm; chi *= cnorm (gamxs.f90:1366-1370).
-        if cnorm != 0.0
-            cnorm = 1 / cnorm
-            for ig in 1:ngnd
-                a[locchi + ig - 1] *= cnorm
+    # Delayed-neutron processing (gamxs.f90:1226-1262 + 1371-1392).
+    #
+    # MT=455 has TWO data branches at gamxs label 330:
+    #   mfh!=5 (MF=3/MT=455): sets dnu, dnorm, jgdnu from delayed-nubar +
+    #     average-spectrum LIST data. These three scalars are then used by
+    #     the MF=5 branch as multipliers and by the final-pass normalization.
+    #   mfh==5 (MF=5/MT=455): per (ig, k=outgoing-group, jgt=delayed-group)
+    #     accumulates `scr(jgt+loca)*dnorm` into prompt chi at locchi+jgc-1
+    #     and `scr(jgt+loca)*dnu` into delayed chi at
+    #     locdla + ngnd*(jgt-1) + jgc - 1, plus a special-case OVERWRITE
+    #     when jgc==ngnd: cell ← `a[jgt + locb]` where locb = l+lz-1 = 6,
+    #     i.e., the absorption XS at jg=7..12. Fortran reads from the OUTPUT
+    #     `a` array, not from `scr`.
+    dnu, dnorm, jgdnu = 0.0, 0.0, 0
+    nldla = 0
+    sumd = Float64[]
+    if !isempty(g.mf3_455)
+        # MF=3/MT=455 processing (gamxs lines 1226-1234). Each record carries
+        # delayed-nubar / chi-bar at one incoming group; cnorm + dnorm + dnu
+        # latch on the first significant entry (scr(loca+2) >= 0.1).
+        for r in g.mf3_455
+            ig    = r.ig
+            jg    = ngnd - ig + 1
+            1 <= jg <= ngnd || continue
+            data  = r.data
+            # Fortran: scr(loca) = data[1], scr(loca+1) = data[2],
+            #          scr(loca+2) = data[3]; scr(l+lz) = data[1]
+            length(data) >= 3 || continue
+            d0, d1, d2 = data[1], data[2], data[3]
+            a[locnus + jg - 1] += d1 * d2 * d0 * cflux[jg]
+            dnorm += d0 * d1 * d2
+            if d2 >= 0.1 && dnu == 0.0
+                jgdnu = jg
+                dnu = d1
+            end
+        end
+    end
+
+    if !isempty(g.mf5_455)
+        # MF=5/MT=455 processing (gamxs lines 1235-1262).
+        for r in g.mf5_455
+            ig    = r.ig
+            jg    = ngnd - ig + 1
+            1 <= jg <= ngnd || continue
+            ng2   = r.ng2
+            ig2lo = r.ig2lo
+            nl    = r.nl
+            data  = r.data
+            # locb = l + lz - 1 = 6 (with l=1, lz=6). a[jgt + locb] reads from
+            # the absorption region (locab0=1..ngnd) — Fortran quirk.
+            locb_offset = 6
+            if nldla == 0
+                nldla = nl
+                resize!(sumd, nl)
+                fill!(sumd, 0.0)
+            end
+            for k in 2:ng2
+                ig2  = ig2lo + k - 2
+                ig2c = ig2
+                (ig2c == 0 || ig2c > ngnd) && continue
+                jgc  = ngnd - ig2c + 1
+                loc  = locchi + jgc - 1
+                # loca: 0-based offset into `data`. Fortran:
+                #   loca = l + lz - 1 + nl*(k-1)
+                # Then scr(jgt+loca) for jgt=1..nl. In Julia (1-based data),
+                # the value scr(jgt+loca) corresponds to data[nl*(k-1) + jgt].
+                loca_off = nl * (k - 1)
+                locd     = locdla + jgc - 1
+                for jgt in 1:nl
+                    val = data[loca_off + jgt]
+                    a[loc] += val * dnorm
+                    a[ngnd*(jgt - 1) + locd] += val * dnu
+                    if jgc == ngnd
+                        # Overwrite (not accumulate) with absorption-region cell.
+                        a[ngnd*(jgt - 1) + locd] = a[jgt + locb_offset]
+                    end
+                    if jgc < ngnd - 1
+                        sumd[jgt] += val * dnu
+                    end
+                    cnorm += val * dnorm
+                end
+            end
+        end
+    end
+
+    # Normalize chi: cnorm = 1/cnorm; chi *= cnorm (gamxs.f90:1366-1370).
+    # Then if dnu != 0 also normalize delayed chi by rnorm = 1/nu(jgdnu)
+    # (gamxs.f90:1371-1393), with the sumd[il]*rnorm replacement at ig=ngnd-1.
+    if cnorm != 0.0
+        cnorm_inv = 1.0 / cnorm
+        for ig in 1:ngnd
+            a[locchi + ig - 1] *= cnorm_inv
+        end
+        if dnu != 0.0
+            rnorm = 1.0 / a[locnus + jgdnu - 1]
+            lim = ngnd - 1
+            for ig in 1:lim
+                locd = locdla - 1 + ig
+                for il in 1:nldla
+                    if ig < lim
+                        a[ngnd*(il - 1) + locd] *= rnorm
+                    else
+                        a[ngnd*(il - 1) + locd] = sumd[il] * rnorm
+                    end
+                end
             end
         end
     end
@@ -319,13 +423,22 @@ function _powr_fast_one_material(io::IO, gendf_path::String,
 
     # Fission-spectrum (kscr) block, written FIRST when iwf=1 or nfs>0
     # (fast.f90:497-524). Header line is `(i6,i2,10a4)` followed by chi
-    # (`(1p,6e12.5)` × 12 lines for ngnd=68).
+    # (`(1p,6e12.5)` × 12 lines for ngnd=68). When nfs>0, an additional
+    # `nfs` delayed-chi blocks follow with i2 = 1..nfs.
     if iwf > 0 || nfs > 0
-        # `(i6,i2,10a4)` header: nid (i6) + 0 (i2) + fsn 40 chars (10×a4).
+        # Prompt chi: `(i6,i2,10a4)` header with i2=0 + fsn 40 chars (10×a4).
         chi_header = @sprintf("%6d%2d", nid, 0) * _powr_a4_pack(m.fsn, 10)
         println(io, _powr_pad80(chi_header))
         chi_view = view(a, locchi:locchi + ngnd - 1)
         _powr_write_e125_block(io, chi_view)
+        # Delayed chi blocks (fast.f90:511-521): one per delayed group, with
+        # i2 = ifs (1..nfs), reading from a[locdla + ngnd*(ifs-1) ..]
+        for ifs in 1:nfs
+            chi_header_d = @sprintf("%6d%2d", nid, ifs) * _powr_a4_pack(m.fsn, 10)
+            println(io, _powr_pad80(chi_header_d))
+            base = locdla + ngnd * (ifs - 1)
+            _powr_write_e125_block(io, view(a, base:base + ngnd - 1))
+        end
     end
 
     # Main (nscr) block. iwr is the gamff-computed value (count of self-
@@ -662,9 +775,19 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
     tmpr = Float64[]
     rtemp_idx = 0
 
-    mf3   = Vector{Dict{Int, Dict{Int, Tuple{Float64, Vector{Float64}}}}}()
-    mf3p1 = Vector{Dict{Int, Dict{Int, Tuple{Float64, Vector{Float64}}}}}()
-    mf6   = Dict{Int, Vector{NamedTuple}}()
+    mf3     = Vector{Dict{Int, Dict{Int, Tuple{Float64, Vector{Float64}}}}}()
+    mf3p1   = Vector{Dict{Int, Dict{Int, Tuple{Float64, Vector{Float64}}}}}()
+    mf6     = Dict{Int, Vector{NamedTuple}}()
+    # MF=5/MT=455 (delayed-neutron spectra) records at reference temperature.
+    # Each record carries `nl` delayed-neutron group spectra per outgoing group.
+    # gamxs reads MF=5/MT=455 only at rtemp (powr.f90:1118-1120 temp filter).
+    mf5_455 = NamedTuple[]
+    # MF=3/MT=455 (delayed nubar + average spectrum) records at rtemp. If
+    # present, gamxs's mfh!=5 branch (powr.f90:1226-1234) consumes them to
+    # set dnu/dnorm/jgdnu used in delayed-chi normalization. Empty when the
+    # GENDF carries only MF=5/MT=455 (e.g., the standard groupr `5 455/`
+    # request without a separate `3 455/`).
+    mf3_455 = NamedTuple[]
 
     lines = readlines(gendf_path)
     nlines = length(lines)
@@ -787,18 +910,28 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
                         data = _read_list_data(idx + 1, nw)
                         nl   = nl_section
                         nz   = nz_section
-                        flux_p0 = data[1]
-                        # XS per σ₀ at Legendre order l=1: data[nl*(jz+nz-1) + 1].
-                        xs_vec = Float64[data[nl*(jz + nz - 1) + 1] for jz in 1:nz]
-                        mt_data = get!(mf3[t_idx], mt,
-                                       Dict{Int, Tuple{Float64, Vector{Float64}}}())
-                        mt_data[ig] = (flux_p0, xs_vec)
-                        if nl >= 2
-                            flux_p1 = data[2]
-                            xs_p1_vec = Float64[data[nl*(jz + nz - 1) + 2] for jz in 1:nz]
-                            mt_data_p1 = get!(mf3p1[t_idx], mt,
-                                              Dict{Int, Tuple{Float64, Vector{Float64}}}())
-                            mt_data_p1[ig] = (flux_p1, xs_p1_vec)
+                        if mt == 455
+                            # MF=3/MT=455: stash raw record for the gamxs
+                            # mfh!=5 branch (powr.f90:1226-1234). Only at ref
+                            # temp; data layout differs from regular MF=3.
+                            if abs(temp - rtemp) <= eps
+                                push!(mf3_455, (ig=ig, nl=nl, nz=nz, data=data))
+                            end
+                        else
+                            flux_p0 = data[1]
+                            # XS per σ₀ at Legendre order l=1:
+                            #   data[nl*(jz+nz-1) + 1].
+                            xs_vec = Float64[data[nl*(jz + nz - 1) + 1] for jz in 1:nz]
+                            mt_data = get!(mf3[t_idx], mt,
+                                           Dict{Int, Tuple{Float64, Vector{Float64}}}())
+                            mt_data[ig] = (flux_p0, xs_vec)
+                            if nl >= 2
+                                flux_p1 = data[2]
+                                xs_p1_vec = Float64[data[nl*(jz + nz - 1) + 2] for jz in 1:nz]
+                                mt_data_p1 = get!(mf3p1[t_idx], mt,
+                                                  Dict{Int, Tuple{Float64, Vector{Float64}}}())
+                                mt_data_p1[ig] = (flux_p1, xs_p1_vec)
+                            end
                         end
                     end
                 end
@@ -832,11 +965,31 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
             end
 
         elseif m.mf == 5 && m.mt == 455 && m.seq == 1
-            if idx + 1 <= nlines
-                p2 = rpad(lines[idx + 1], 80)
-                nfs += _parse_int(p2[23:33])
-            end
+            # MF=5/MT=455 HEAD: L1 = nl = number of delayed-neutron groups
+            # (typically 6); gamll bumps `nfs += nl` (powr.f90:932-934).
+            nl_section = _parse_int(m.line[23:33])
+            nz_section = max(1, _parse_int(m.line[34:44]))
+            nfs += nl_section
             idx += 1
+            while idx <= nlines
+                length(lines[idx]) < 75 && (idx += 1; continue)
+                p2 = rpad(lines[idx], 80)
+                m2 = (mat=_parse_int(p2[67:70]), mf=_parse_int(p2[71:72]),
+                      mt=_parse_int(p2[73:75]))
+                (m2.mat != matd || m2.mf != 5 || m2.mt != 455) && break
+                temp  = parse_endf_float(p2[1:11])
+                ng2   = _parse_int(p2[23:33])
+                ig2lo = _parse_int(p2[34:44])
+                nw    = _parse_int(p2[45:55])
+                ig    = _parse_int(p2[56:66])
+                if abs(temp - rtemp) <= eps && ig >= 0 && nw > 0 &&
+                   idx + 1 <= nlines
+                    data = _read_list_data(idx + 1, nw)
+                    push!(mf5_455, (ig=ig, ig2lo=ig2lo, ng2=ng2,
+                                    nl=nl_section, nz=nz_section, data=data))
+                end
+                idx += 1 + cld(nw, 6)
+            end
         else
             idx += 1
         end
@@ -846,8 +999,8 @@ function _powr_read_gendf_for_fast(gendf_path::String, matd::Int, rtemp::Float64
         "powr lib=1: reference temperature $rtemp K not found on gendf tape " *
         "(tape carries temps $tmpr). Ref: powr.f90:847.")
 
-    (mf3=mf3, mf3p1=mf3p1, mf6=mf6, iza=iza, nsigz=nsigz, nfs=nfs,
-     sigz=sigz, tmpr=tmpr, rtemp_idx=rtemp_idx)
+    (mf3=mf3, mf3p1=mf3p1, mf6=mf6, mf5_455=mf5_455, mf3_455=mf3_455,
+     iza=iza, nsigz=nsigz, nfs=nfs, sigz=sigz, tmpr=tmpr, rtemp_idx=rtemp_idx)
 end
 
 # ============================================================================
