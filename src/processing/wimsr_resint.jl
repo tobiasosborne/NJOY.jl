@@ -36,6 +36,20 @@ function wimsr_extract_resint(in_path::AbstractString, p::WimsrParams,
     nrg  = p.nrg
     ires = p.ires
 
+    # Validate temperature axis BEFORE slicing — converts the otherwise opaque
+    # `BoundsError [1:ires]` on `xs_data.tempr[1:ires]` (line ~275 below) into
+    # a self-explaining error that names the upstream gap. Currently
+    # src/orchestration/modules/groupr.jl:31 uses only
+    # `params.temperatures[1]`, so multi-temperature decks (T11 Pu-238 with
+    # 3 broadr temperatures) hit this path. Fixing requires porting groupr's
+    # multi-temperature loop (Fortran groupr.f90 outer-temp do-loop).
+    length(xs_data.tempr) >= ires ||
+        error("wimsr_extract_resint: GENDF tape has $(length(xs_data.tempr)) " *
+              "temperature(s) but params.ires=$ires. " *
+              "Julia groupr (src/orchestration/modules/groupr.jl:31) currently " *
+              "writes only the first temperature; the multi-temperature " *
+              "groupr port is required before wimsr can run on multi-T decks.")
+
     # Resonance group range in GENDF top-down order:
     #   jg = ngnd - ig + 1, jg ∈ [nfg+1, nfg+nrg] (resonance window)
     # Equivalent ig: ig ∈ [ngnd-nfg-nrg+1, ngnd-nfg]

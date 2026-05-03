@@ -1152,9 +1152,16 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
 
     # MF1/MT451 — directory with group boundaries
-    # N1=-11 is the errorr convention (errorr.f90:5927), not a computed count.
+    # N1 ("mfflg" — covr.f90:317-320 reads `mfflg=nint(scr(5))`) selects the
+    # covariance-tape kind for downstream covr/covard:
+    #   -11 → MF=33 cross-section cov (also MF=34 mubar; MT=251 special-cased)
+    #   -12 → MF=35 spectrum / nubar cov  (errorr.f90:6098)
+    #   -14 → MF=40 lumped/derived cov   (errorr.f90:7824)
+    # Fortran writes these from THREE separate writer paths (errorr.f90:5927,
+    # 6098, 7823-7824); Julia has one writer, so dispatch on mfcov.
+    mfflg = mfcov == 35 ? -12 : (mfcov == 40 ? -14 : -11)
     seq = 1
-    _write_cont_line(io, za, awr, 5, 0, -11, 0, mat, 1, 451, seq); seq += 1
+    _write_cont_line(io, za, awr, 5, 0, mfflg, 0, mat, 1, 451, seq); seq += 1
     _write_cont_line(io, 0.0, 0.0, ngn, 0, nw, 0, mat, 1, 451, seq); seq += 1
     idx = 1
     while idx <= nw
