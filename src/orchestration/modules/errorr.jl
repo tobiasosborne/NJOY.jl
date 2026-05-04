@@ -361,7 +361,12 @@ function _errorr_group_average(pendf_path::String, mat::Int,
     ngn = length(egn) - 1
 
     for (mt, (energies, xs)) in mf3
-        mt in (1, 451) && continue
+        # Skip MT=451 (directory only); keep MT=1 — Fortran `colaps`
+        # (errorr.f90:9097+) walks every MF=3 MT on the input tape, and
+        # downstream `covard` (covr.f90:786-812 / covr_io.jl:255-265) needs
+        # MF=3/MT=k for every cov pair (k, k') it processes, including
+        # k=1 (total). Filtering MT=1 here was the T16 crash.
+        mt == 451 && continue
         if iwt == 3
             # 1/E weighting: use analytical integration matching Fortran epanel
             # For piecewise-linear σ(E) on each panel [E1,E2]:
@@ -1175,9 +1180,20 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     _write_send_line(io, mat, 1)
     _write_fend_line(io, mat)
 
-    # MF3 — group-averaged cross sections for each reaction
-    # Sequence resets to 1 at each SEND (new MT within same MF).
-    for mt in reaction_mts
+    # MF3 — group-averaged cross sections for the cov reactions, plus
+    # any extra MTs covard needs for sandwich-rule normalisation that
+    # are NOT in `reaction_mts` (MF=mfcov scan). Specifically, mubar
+    # (mfcov=34) needs MT=251 because covard's xs lookup for the
+    # collapsed MF=34/MT=251 section is on `tape.mf3_xs[251]`
+    # (covr_io.jl:255-264). Reverting to a literal `keys(group_xs)`
+    # walk would emit MTs covr doesn't expect for mfcov=33/35/40 and
+    # inflate covr's downstream output (T34 regression). Sequence
+    # resets to 1 at each SEND.
+    mf3_mts = Set{Int}(reaction_mts)
+    if mfcov == 34
+        haskey(group_xs, 251) && push!(mf3_mts, 251)
+    end
+    for mt in sort!(collect(mf3_mts))
         haskey(group_xs, mt) || continue
         xs = group_xs[mt]
         length(xs) == ngn || continue
@@ -1196,33 +1212,97 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     end
     _write_fend_line(io, mat)
 
-    # MFcov — covariance matrices. One sub-section per (mt, mt2) with
-    # mt2 >= mt in the active reactions list, matching Fortran covout
-    # (errorr.f90:7244 `scr(6)=nmts-ix+1` + inner loop 7254 `do 180
-    # ixp=ix,nmts`). Cross-pairs without computed data are emitted as a
-    # 2-line zero stub via _write_mfcov_rows' matrix===nothing branch
-    # (mirrors Fortran's iabort=1 path at lines 7350-7356, label 390).
-    # listed_pairs and nc_derived_mts kwargs are retained for callers
-    # but the geometry no longer depends on them.
-    for mt in reaction_mts
-        pair_set = Set{Tuple{Int,Int}}()
-        for (m1, m2) in keys(cov_matrices); m1 == mt && push!(pair_set, (m1, m2)); end
-        for (m1, m2) in listed_pairs; m1 == mt && push!(pair_set, (m1, m2)); end
-        for mt2 in reaction_mts
-            mt2 >= mt && push!(pair_set, (mt, mt2))
+    # MFcov — covariance matrices. Body-MF and outer-MT dispatch mirror
+    # Fortran covout (errorr.f90:7211-7587):
+    #
+    #   mfcov=31 (ν̄)    → body MF=33 (line 7214 + 7472 `if mfh.eq.31 mfh=33`)
+    #   mfcov=33 (XS)    → body MF=33 (no remap)
+    #   mfcov=34 (mubar) → body MF=34, outer MT collapsed to 251
+    #                      (lines 7245-7250 + 7480-7485 + 7585): all
+    #                      per-reaction (mt, mt2) pairs become sub-sections
+    #                      under one MF=34/MT=251 section, with each
+    #                      sub-section CONT carrying L1=251, L2=ld, N1=ld1.
+    #                      Default ld=ld1=1 (P1 self-cov) until full
+    #                      Legendre-order plumbing lands.
+    #   mfcov=35 (spec)  → body MF=35 (no remap)
+    #   mfcov=40 (act)   → body MF=40 (no remap)
+    #
+    # One sub-section per (mt, mt2) with mt2 >= mt in the active reactions
+    # list, matching Fortran's outer/inner loop (`do 170 ix=1,nmt` /
+    # `do 180 ixp=ix,nmts`). Cross-pairs without computed data are
+    # emitted as a 2-line zero stub via _write_mfcov_rows' matrix===nothing
+    # branch (mirrors Fortran's iabort=1 path at lines 7350-7356, label
+    # 390). listed_pairs and nc_derived_mts kwargs are retained for
+    # callers but the geometry no longer depends on them.
+    if mfcov == 34
+        # Mubar: emit ONE outer MF=34/MT=251 section. Fortran covout
+        # (errorr.f90:7211-7587) actually emits N separate MF=34/MT=251
+        # sections for N reactions (one per outer ix), each with its own
+        # SEND. Our reader (`read_errorr_tape` in covr_io.jl) keys
+        # sections by (mf, mt) so multiple same-(34, 251) sections
+        # collapse to the last one read; we therefore emit ONE section
+        # with all (mt, mt2) sub-sections under it. covard (covr.f90:823
+        # `if (mt.eq.251) mf3x=34`) only looks up `(34, 251)` regardless,
+        # so this is observationally equivalent for the single-reaction
+        # case (T65) and gives covr access to the first matching pair
+        # for multi-reaction cases (T15 mubar tape27). Bit-identical
+        # multi-section emission deferred to a follow-up phase.
+        #
+        # Fortran sub-section CONT writes L1=251 (=mth) and uses the
+        # Legendre orders (ld, ld1) in L2/N1 to differentiate per-pair
+        # entries — NOT the per-reaction MT. Default ld=ld1=1 (P1
+        # self-cov) until full Legendre dispatch lands.
+        all_pairs = Set{Tuple{Int,Int}}()
+        for (m1, m2) in keys(cov_matrices)
+            push!(all_pairs, (m1, m2))
         end
-        sub_keys = sort!(collect(pair_set), by = x -> x[2])
-        isempty(sub_keys) && continue
-        nl = length(sub_keys)
-        seq = 1
-        _write_cont_line(io, za, awr, 0, 0, 0, nl, mat, mfcov, mt, seq); seq += 1
+        for (m1, m2) in listed_pairs
+            push!(all_pairs, (m1, m2))
+        end
+        for mt1 in reaction_mts, mt2 in reaction_mts
+            mt2 >= mt1 && push!(all_pairs, (mt1, mt2))
+        end
+        pair_keys = sort!(collect(all_pairs))
+        if !isempty(pair_keys)
+            seq = 1
+            # Outer head (errorr.f90:7245-7250):
+            #   C1=za, C2=awr, L1=0, L2=irelco=1, N1=legord=1, N2=legord=1
+            _write_cont_line(io, za, awr, 0, 1, 1, 1, mat, 34, 251, seq); seq += 1
+            for (mt1, mt2) in pair_keys
+                matrix = get(cov_matrices, (mt1, mt2), nothing)
+                # Sub-section CONT (errorr.f90:7480-7485):
+                #   C1=0, C2=0, L1=251 (=mth), L2=ld=1, N1=ld1=1, N2=ngn
+                # covard (covr_io.jl:332 `mtx = mf3x == 34 ? l1 : l2`)
+                # reads L1 as mtx and matches against caller's mt1, so
+                # for mubar mt1 must be 251.
+                _write_cont_line(io, 0.0, 0.0, 251, 1, 1, ngn,
+                                 mat, 34, 251, seq); seq += 1
+                seq = _write_mfcov_rows(io, matrix, ngn, mat, 34, 251, seq)
+            end
+            _write_send_line(io, mat, 34)
+        end
+    else
+        body_mf = mfcov == 31 ? 33 : mfcov
+        for mt in reaction_mts
+            pair_set = Set{Tuple{Int,Int}}()
+            for (m1, m2) in keys(cov_matrices); m1 == mt && push!(pair_set, (m1, m2)); end
+            for (m1, m2) in listed_pairs; m1 == mt && push!(pair_set, (m1, m2)); end
+            for mt2 in reaction_mts
+                mt2 >= mt && push!(pair_set, (mt, mt2))
+            end
+            sub_keys = sort!(collect(pair_set), by = x -> x[2])
+            isempty(sub_keys) && continue
+            nl = length(sub_keys)
+            seq = 1
+            _write_cont_line(io, za, awr, 0, 0, 0, nl, mat, body_mf, mt, seq); seq += 1
 
-        for (mt1, mt2) in sub_keys
-            matrix = get(cov_matrices, (mt1, mt2), nothing)
-            _write_cont_line(io, 0.0, 0.0, 0, mt2, 0, ngn, mat, mfcov, mt, seq); seq += 1
-            seq = _write_mfcov_rows(io, matrix, ngn, mat, mfcov, mt, seq)
+            for (mt1, mt2) in sub_keys
+                matrix = get(cov_matrices, (mt1, mt2), nothing)
+                _write_cont_line(io, 0.0, 0.0, 0, mt2, 0, ngn, mat, body_mf, mt, seq); seq += 1
+                seq = _write_mfcov_rows(io, matrix, ngn, mat, body_mf, mt, seq)
+            end
+            _write_send_line(io, mat, body_mf)
         end
-        _write_send_line(io, mat, mfcov)
     end
     _write_fend_line(io, mat)
 
