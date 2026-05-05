@@ -22,64 +22,75 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
     # Get group structure
     egn = _groupr_group_structure(params)
     ngn = length(egn) - 1
-    @info "groupr: $ngn groups, $(length(params.mt_list)) MT requests"
 
-    # Read ZA and AWR
+    # Read ZA and AWR (invariant across temperatures)
     za, awr = _read_za_awr(endf_path, params.mat)
 
-    # Temperature and sigz
-    temp = isempty(params.temperatures) ? 0.0 : params.temperatures[1]
-    sigz = isempty(params.sigz) ? 1.0e10 : params.sigz[1]
+    # Temperatures + sigz (Fortran groupr.f90:479 outer-T loop, line 1059
+    # allocates `temp(ntemp)`). Fall back to a single zero-T if the deck
+    # omits temperatures (legacy single-T tests).
+    temps = isempty(params.temperatures) ? [0.0] : copy(params.temperatures)
+    sigz_list = isempty(params.sigz) ? [1.0e10] : copy(params.sigz)
+    @info "groupr: $ngn groups, $(length(params.mt_list)) MT requests, $(length(temps)) temps"
 
-    # Weight function
+    # Weight function (T-independent)
     wfn = _groupr_weight_function(params.iwt)
 
-    # Read PENDF data for fission XS (needed for nubar weighting)
+    # Read PENDF once; broadr writes one MEND-bounded material entry per T
+    # so we extract per-T MF3 from each entry (Fortran groupr.f90:484
+    # `tempin=temp(itemp)` + matching MAT/T find loop at 487-525).
     tape = read_pendf(pendf_path)
-    mf3 = extract_mf3_all(tape, params.mat)
 
-    # Expand Fortran auto-reaction sentinel. Ref: groupr.f90:622,628-632 +
-    # nextr at groupr.f90:1104-1123. A deck card like `3 /` (mfd=3, mtd
-    # absent) leaves mtdp=-1000; Fortran then walks MF=3 on the PENDF and
-    # yields every MT passing: mt<=200 OR 203<=mt<=207 OR mt>300 (thermal
-    # 201-202 and derived 208-300 excluded; those must be named explicitly).
-    mt_list = _groupr_expand_auto(params.mt_list, mf3)
+    # Per-temperature mt_results buffer; outer index = temperature index.
+    MTRes = NamedTuple{(:mfd,:mt,:name,:records),
+                       Tuple{Int,Int,String,Vector{NTuple{3,Float64}}}}
+    per_temp_results = Vector{Vector{MTRes}}()
 
-    # Process each MT request
-    mt_results = Vector{NamedTuple{(:mfd,:mt,:name,:records),
-                                   Tuple{Int,Int,String,Vector{NTuple{3,Float64}}}}}()
+    for ti in 1:length(temps)
+        temp = temps[ti]
+        mf3 = extract_mf3_at_temperature(tape, params.mat, temp)
 
-    for (mfd, mtd, name) in mt_list
-        if mfd == 3
-            if mtd == 452 || mtd == 455 || mtd == 456
-                # Nubar: read from ENDF MF1, weight by fission XS from PENDF
-                nubar_data = _read_nubar(endf_path, params.mat, mtd)
-                if nubar_data !== nothing
-                    # Get fission XS from PENDF (MT=18 or MT=19)
-                    fis_mt = haskey(mf3, 18) ? 18 : (haskey(mf3, 19) ? 19 : 0)
-                    records = _groupr_nubar_records(nubar_data, mf3, fis_mt,
-                                                    egn, wfn)
-                    push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
-                end
-            else
-                # Standard XS from PENDF
-                if haskey(mf3, mtd)
-                    records = _groupr_xs_records(mf3[mtd], egn, wfn)
-                    push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
+        # Expand Fortran auto-reaction sentinel. Ref: groupr.f90:622,628-632 +
+        # nextr at groupr.f90:1104-1123. A deck card like `3 /` (mfd=3, mtd
+        # absent) leaves mtdp=-1000; Fortran then walks MF=3 on the PENDF and
+        # yields every MT passing: mt<=200 OR 203<=mt<=207 OR mt>300 (thermal
+        # 201-202 and derived 208-300 excluded; those must be named explicitly).
+        mt_list = _groupr_expand_auto(params.mt_list, mf3)
+
+        mt_results = MTRes[]
+        for (mfd, mtd, name) in mt_list
+            if mfd == 3
+                if mtd == 452 || mtd == 455 || mtd == 456
+                    # Nubar: read from ENDF MF1, weight by fission XS from PENDF
+                    nubar_data = _read_nubar(endf_path, params.mat, mtd)
+                    if nubar_data !== nothing
+                        fis_mt = haskey(mf3, 18) ? 18 : (haskey(mf3, 19) ? 19 : 0)
+                        records = _groupr_nubar_records(nubar_data, mf3, fis_mt,
+                                                        egn, wfn)
+                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
+                    end
+                else
+                    if haskey(mf3, mtd)
+                        records = _groupr_xs_records(mf3[mtd], egn, wfn)
+                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
+                    end
                 end
             end
         end
+        push!(per_temp_results, mt_results)
+        @info "groupr: T=$(temp)K → $(length(mt_results)) MT sections"
     end
 
-    # Write GENDF output tape
+    # Write GENDF output tape (per-T MF=1/MT=451 + per-T MF=3 sections,
+    # MEND between temps, single TEND at end). Mirrors Fortran groupr.f90:479-959.
     open(nout_path, "w") do io
-        _write_groupr_tape(io, params.mat, za, awr, egn, mt_results,
-                           params.title, temp, sigz)
+        _write_groupr_tape(io, params.mat, za, awr, egn, per_temp_results,
+                           params.title, temps, sigz_list)
     end
     register!(tapes, params.nout, nout_path)
 
     lines = countlines(nout_path)
-    @info "groupr: wrote $nout_path ($lines lines, $ngn groups)"
+    @info "groupr: wrote $nout_path ($lines lines, $ngn groups, $(length(temps)) T)"
     nothing
 end
 
@@ -313,60 +324,103 @@ end
 # GENDF output tape writer
 # =========================================================================
 
-"""Write GROUPR output tape in GENDF format matching Fortran groupr."""
-function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
-                            egn::Vector{Float64}, mt_results, title::String,
-                            temp::Float64, sigz::Float64)
-    ngn = length(egn) - 1
+"""Write GROUPR output tape in GENDF format matching Fortran groupr.
 
-    # TPID record
+Per-temperature layout (Fortran groupr.f90:479-943, outer-T loop):
+  TPID once
+  for each T:
+    HEAD CONT (mat,1,451) (za, awr, 0, nz, -1, 1)
+    CONT      (mat,1,451) (tempin, 0, ngn, 0, nw_dir, 0)  ← C1=tempin (Fortran 551)
+    DATA      egn boundaries packed 6/line
+    FEND      (mat,0,0)
+    for each MT:
+      HEAD CONT (mat,3,mt)  (za, 0, 1, nz, 0, ngn)
+      per (g,ig2) records   (C1=tempin per Fortran 857)
+      SEND
+    MEND      (0,0,0)
+  TEND        (-1,0,0)
+
+`per_temp_results` is `Vector{Vector{MTRes}}` indexed [temp_index][mt_index].
+"""
+function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
+                            egn::Vector{Float64},
+                            per_temp_results::AbstractVector,
+                            title::String,
+                            temps::Vector{Float64},
+                            sigz_list::Vector{Float64})
+    ngn = length(egn) - 1
+    nz  = length(sigz_list)
+
+    # TPID record (once)
     @printf(io, "%-66s%4d%2d%3d%5d\n", title, 0, 0, 0, 0)
 
-    seq = 1
-    # MF1/MT451 HEAD: ZA, AWR, 0, ntemp=1, NFC=-1, nmod=1
-    _write_cont_line(io, za, awr, 0, 1, -1, 1, mat, 1, 451, seq); seq += 1
-    # CONT: 0, 0, NGN, 0, NW, 0
-    nw_dir = ngn + 4  # 2 (elow,ehigh) + ngn+1 (bounds) + 1 (trailing zero)
-    _write_cont_line(io, 0.0, 0.0, ngn, 0, nw_dir, 0, mat, 1, 451, seq); seq += 1
+    for ti in 1:length(temps)
+        temp = temps[ti]
+        mt_results = ti <= length(per_temp_results) ? per_temp_results[ti] :
+                     eltype(per_temp_results)()
 
-    # Write elow=0, ehigh=max, then group boundaries, then trailing zero
-    all_vals = Float64[0.0, 1e10]
-    append!(all_vals, egn)
-    push!(all_vals, 0.0)
-
-    idx = 1
-    while idx <= length(all_vals)
-        buf = ""
-        for col in 1:6
-            idx > length(all_vals) && break
-            buf *= format_endf_float(all_vals[idx]); idx += 1
-        end
-        _write_data_line(io, buf, mat, 1, 451, seq); seq += 1
-    end
-
-    # Fortran groupr (see referenceTape24): MF1/MT451 goes straight to FEND,
-    # no SEND. MF3 sections use SEND=99999 but skip FEND; MEND follows directly.
-    _write_fend_line(io, mat)
-
-    for res in mt_results
-        mt = res.mt
-        records = res.records
         seq = 1
+        # MF1/MT451 HEAD: (za, awr, 0, nz, -1, 1) — Fortran groupr.f90:544-549.
+        # We keep N2=1 (single title word) until full title plumbing lands.
+        _write_cont_line(io, za, awr, 0, nz, -1, 1, mat, 1, 451, seq); seq += 1
 
-        _write_cont_line(io, za, 0.0, 1, 1, 0, ngn, mat, 3, mt, seq); seq += 1
+        # MF1/MT451 second record: C1=tempin (Fortran groupr.f90:551). Wimsr's
+        # `_wimsr_read_gendf_metadata` extracts tempr from this field
+        # (wimsr_xsecs.jl:209). L1=ngn so the same reader picks up the group
+        # count (cols 23-33).
+        nw_dir = ngn + 4   # 2 (elow,ehigh) + ngn+1 (bounds) + 1 (trailing zero)
+        _write_cont_line(io, temp, 0.0, ngn, 0, nw_dir, 0, mat, 1, 451, seq); seq += 1
 
-        for (g, rec) in enumerate(records)
-            _write_cont_line(io, 0.0, 0.0, 3, 1, 3, g, mat, 3, mt, seq); seq += 1
-            buf = format_endf_float(rec[1]) *
-                  format_endf_float(rec[2]) *
-                  format_endf_float(rec[3])
-            _write_data_line(io, buf, mat, 3, mt, seq); seq += 1
+        # Boundary data: elow, ehigh, then ascending egn (wimsr reverses to
+        # descending at wimsr_xsecs.jl:240), then trailing zero.
+        all_vals = Float64[0.0, 1e10]
+        append!(all_vals, egn)
+        push!(all_vals, 0.0)
+
+        idx = 1
+        while idx <= length(all_vals)
+            buf = ""
+            for col in 1:6
+                idx > length(all_vals) && break
+                buf *= format_endf_float(all_vals[idx]); idx += 1
+            end
+            _write_data_line(io, buf, mat, 1, 451, seq); seq += 1
         end
 
-        _write_send_line(io, mat, 3)
+        # FEND closes MF=1 (Fortran afend at line 585)
+        _write_fend_line(io, mat)
+
+        # Per-MT MF=3 sections for this temperature
+        for res in mt_results
+            mt = res.mt
+            records = res.records
+            seq = 1
+
+            # Per-MT HEAD (Fortran groupr.f90:833-838): (za, izam=0, nl=1, nz, lrflag=0, ngi=ngn).
+            # We emit `nz_mf3=1` because the current per-(g, ig2) body holds only
+            # one σ₀ column. Fortran's full nsigz×ngn block matrix (URR self-
+            # shielding) is a follow-up; this preserves wimsr's body indexing
+            # (`_bidx(i, iz, ig2, nl, nz)` at wimsr_xsecs.jl:260) for nl=nz=1.
+            nz_mf3 = 1
+            _write_cont_line(io, za, 0.0, 1, nz_mf3, 0, ngn, mat, 3, mt, seq); seq += 1
+
+            # Per-(g, ig2) record. Fortran 857-862 puts tempin in C1, ng2=3 (NW
+            # words = flux, sigma, sigma_int), ig2lo=1, lim=NW, ig=g.
+            for (g, rec) in enumerate(records)
+                _write_cont_line(io, temp, 0.0, 3, 1, 3, g, mat, 3, mt, seq); seq += 1
+                buf = format_endf_float(rec[1]) *
+                      format_endf_float(rec[2]) *
+                      format_endf_float(rec[3])
+                _write_data_line(io, buf, mat, 3, mt, seq); seq += 1
+            end
+
+            _write_send_line(io, mat, 3)
+        end
+
+        # MEND closes this temperature's material block (Fortran amend at line 923).
+        _write_fend_line(io, 0)
     end
 
-    # MEND + TEND
-    _write_fend_line(io, 0)
+    # TEND closes the entire tape (Fortran atend after line 943)
     @printf(io, "%66s%4d%2d%3d%5d\n", "", -1, 0, 0, 0)
 end

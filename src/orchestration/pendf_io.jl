@@ -222,6 +222,81 @@ function extract_mf3_all(tape::PENDFTape, mat::Int)
     result
 end
 
+"""
+Extract the temperature stored in a PENDFMaterial's MF1/MT451 block.
+Locates the TEMP CONT record by walking lines 2..5 and selecting the last
+line where (L2=0, N1>0, 0 ≤ C1 < 1e6) — TEMP CONT is the last numeric CONT
+before description Hollerith. Handles both ENDF-IV layout (TEMP at line 3 of
+the tape, mf1_lines[2]) and ENDF-V/VI layout (TEMP at mf1_lines[3] or [4]).
+Returns 0.0 if no plausible TEMP CONT is found.
+"""
+function _pendf_material_temperature(material::PENDFMaterial)::Float64
+    isempty(material.mf1_lines) && return 0.0
+    found_temp = 0.0
+    found_any = false
+    for li in 2:min(5, length(material.mf1_lines))
+        p = rpad(material.mf1_lines[li], 80)
+        # Parse integer CONT fields first; description text lines won't parse
+        # and are skipped before we attempt the float parse on cols 1-11.
+        l1 = tryparse(Int, strip(p[23:33]))
+        l2 = tryparse(Int, strip(p[34:44]))
+        n1 = tryparse(Int, strip(p[45:55]))
+        (l1 === nothing || l2 === nothing || n1 === nothing) && continue
+        c1 = try
+            parse_endf_float(p[1:11])
+        catch
+            continue
+        end
+        if l2 == 0 && n1 > 0 && c1 >= 0.0 && c1 < 1.0e6
+            found_temp = c1
+            found_any = true
+        end
+    end
+    found_any ? found_temp : 0.0
+end
+
+"""
+    extract_mf3_at_temperature(tape::PENDFTape, mat::Int, target_temp::Float64;
+                                tol::Float64=0.5) -> Dict{Int, Tuple{...}}
+
+Extract all MF3 sections for the material entry whose stored TEMP matches
+`target_temp` within `tol` Kelvin. Multi-T PENDFs (broadr output) place each
+temperature in a separate MEND-bounded material entry. If no exact match is
+found and the target is the only candidate (single-T PENDF), return its
+sections regardless. Errors loudly per Rule 6 if no candidate exists.
+"""
+function extract_mf3_at_temperature(tape::PENDFTape, mat::Int, target_temp::Float64;
+                                     tol::Float64=0.5)
+    candidates = [m for m in tape.materials if m.mat == mat]
+    isempty(candidates) && error(
+        "extract_mf3_at_temperature: no PENDF material with mat=$mat (target_temp=$target_temp K)")
+    chosen = nothing
+    for m in candidates
+        t = _pendf_material_temperature(m)
+        if abs(t - target_temp) <= max(tol, 1e-3 * target_temp)
+            chosen = m
+            break
+        end
+    end
+    if chosen === nothing
+        if length(candidates) == 1
+            chosen = candidates[1]   # single-T PENDF: return what we have
+        else
+            avail = join([string(_pendf_material_temperature(m), " K") for m in candidates], ", ")
+            error("extract_mf3_at_temperature: mat=$mat target_temp=$target_temp K not found "
+                  * "among PENDF temperatures [$avail]")
+        end
+    end
+    result = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+    for sec in chosen.sections
+        sec.mf != 3 && continue
+        e, xs = _parse_mf3_lines(sec.lines)
+        isempty(e) && continue
+        result[sec.mt] = (e, xs)
+    end
+    result
+end
+
 """Parse MF3 TAB1 data from raw ENDF lines into (energies, xs) vectors."""
 function _parse_mf3_lines(lines::Vector{String})
     energies = Float64[]

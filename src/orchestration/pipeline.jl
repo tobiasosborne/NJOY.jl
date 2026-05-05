@@ -259,7 +259,6 @@ function run_njoy(input_path::AbstractString;
         elseif mc.name == :wimsr
             params = parse_wimsr(mc)
             wimsr_module(tapes, params)
-            _collect_gaspr!(ctx, tapes, params)
 
         else
             @warn "Module $(mc.name) not yet implemented"
