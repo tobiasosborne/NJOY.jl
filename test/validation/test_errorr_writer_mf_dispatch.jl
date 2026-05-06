@@ -163,6 +163,32 @@ end
         result = NJOY.covard(tape, _MAT, 251, _MAT, 251)
         @test result !== nothing
     end
+
+    @testset "mfcov=34 MF=3 echo restricted to MT=251 (T65/T15/T16 crash)" begin
+        # T65/T15-mubar/T16-mubar all crash with `covard: MF33/MT=2 not
+        # present` because the writer echoed the source-reaction MTs
+        # ([2, 51] for T65) into MF=3. covr's wildcard `expand_mt_list`
+        # (covr_io.jl:421) scans MF=3 to enumerate the cov pair list, so
+        # those echoed MTs become covard calls with mt=2 → mf3x=33 → look
+        # up (33, 2) → not present → crash.
+        #
+        # Fortran tape (referenceTape41 for T65, referenceTape27 for T15
+        # mubar): ONLY MF=3/MT=251 is emitted. musigc (errorr.f90:5970-6021)
+        # writes ONLY MT=251 to nout; the source reaction MTs (MT=2/51) are
+        # used INPUT to compute the integrated mubar but never echoed to
+        # the cov tape.
+        tape = _writer_roundtrip(34, [2, 51]; extra_xs_mts=[251])
+
+        @test haskey(tape.mf3_xs, 251)              # mubar value present
+        @test !haskey(tape.mf3_xs, 2)               # source MTs NOT echoed
+        @test !haskey(tape.mf3_xs, 51)              # ^^
+
+        # Wildcard expansion must return ONLY [251] for mubar tapes —
+        # otherwise covr generates spurious pairs with mt=2/51 that
+        # covard then looks up under MF=33.
+        mts = NJOY.expand_mt_list(tape)
+        @test mts == [251]
+    end
 end
 
 @testset "errorr writer — MF=3 echo must NOT filter MT=1 (T16 regression)" begin

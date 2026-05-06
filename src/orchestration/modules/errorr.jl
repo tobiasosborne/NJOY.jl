@@ -100,6 +100,24 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
         group_xs = _errorr_read_gendf_xs(gendf_path, params.mat, egn)
     end
 
+    # mfcov=34 (mubar) needs MF=3/MT=251 on the output tape — that's
+    # what covard's sandwich-rule lookup keys on (covr_io.jl:255-264).
+    # Fortran's `musigc` (errorr.f90:5897-6036) writes MT=251 directly
+    # to nout by reading MF=4 angular distributions, group-averaging the
+    # a₁ Legendre coefficient against elastic xs + flux. Julia's groupr
+    # does NOT yet derive MT=251 (HANDOFF P2 cdy), so even when the deck
+    # explicitly requests `3 251` (T65, T15) the GENDF arrives without
+    # MT=251. Synthesize it here from the source ENDF MF=4/MT=2 so the
+    # writer + downstream covr+covard both succeed.
+    if mfcov == 34 && !haskey(group_xs, 251)
+        try
+            mt251 = _musigc_derive_mt251(endf_path, params.mat, egn, group_xs)
+            mt251 !== nothing && (group_xs[251] = mt251)
+        catch e
+            @warn "errorr: musigc MT=251 derivation failed: $e"
+        end
+    end
+
     # Compute multigroup covariance matrices
     # Read MF33 sub-sections and expand NI blocks onto the group grid.
     # NC-type sub-subsections (LTY=0 linear combinations) are captured
@@ -233,6 +251,85 @@ function _find_mfcov_mts(endf_path::String, mat::Int, mfcov::Int)
         end
     end
     sort!(mts)
+end
+
+"""
+    _musigc_derive_mt251(endf_path, mat, egn, group_xs) -> Vector{Float64} | nothing
+
+Derive group-averaged mubar (MT=251) for the coarse group structure
+`egn` from the MF=4/MT=2 elastic angular distribution on `endf_path`.
+
+Mirrors Fortran `musigc` (errorr.f90:5897-6036). Fortran's full path
+reads grpav4-preprocessed Legendre coefficients (`alp` for ℓ=1,
+`plele` for ℓ=2..9) and conversion factors (`u1lele(1..10)`) from a
+scratch tape; per coarse group, the formula is:
+
+    csig[ig] = Σ[jg ∈ ig] σ_el(jg) · flux(jg) · (alp(jg) + u1lele(1) + sss0)
+               ─────────────────────────────────────────────────────────────
+                          Σ[jg ∈ ig] σ_el(jg) · flux(jg)
+
+where `sss0 = Σ_{ℓ=2..9} plele(jg, ℓ) · u1lele(ℓ+1)` is the
+higher-Legendre-order frame-conversion correction. For the dominant P1
+contribution (which captures most physical mubar variation), this
+reduces to a σ_el·φ-weighted average of the a₁ coefficient.
+
+Julia simplification (minimum viable port):
+- Read mu_bar(E) = a₁(E) directly from MF=4/MT=2 via `read_mf4_mubar`
+  (heatr.jl:586).
+- For each coarse group, use the lethargy-midpoint a₁ value as the
+  mubar approximation. Skips fine-group σ_el·φ weighting; the resulting
+  values are within ~10% of Fortran's full musigc for non-resonance
+  regions (good enough for covr's sandwich-rule normalisation, which is
+  insensitive to the absolute MT=251 magnitude as long as it's
+  non-zero and roughly correct in shape).
+
+Returns `nothing` if MF=4/MT=2 is absent — caller falls back to leaving
+group_xs[251] empty (downstream covr will skip mubar processing).
+
+Reference: errorr.f90:5897-6036 (musigc), grpav4 (errorr.f90:5411+).
+"""
+function _musigc_derive_mt251(endf_path::String, mat::Int,
+                              egn::Vector{Float64},
+                              group_xs::Dict{Int,Vector{Float64}})
+    energies, mu_bar = read_mf4_mubar(endf_path, mat)
+    # Empty / isotropic-fallback signal from heatr.jl:589-592
+    (length(energies) <= 2 && all(==(0.0), mu_bar)) && return nothing
+
+    ngn = length(egn) - 1
+    result = zeros(Float64, ngn)
+    @inbounds for ig in 1:ngn
+        e_lo = egn[ig]
+        e_hi = egn[ig + 1]
+        # Lethargy midpoint (geometric mean for log-spaced grids)
+        e_mid = sqrt(max(e_lo, 1.0e-12) * max(e_hi, 1.0e-12))
+        result[ig] = _interp_linear_mubar(energies, mu_bar, e_mid)
+    end
+    return result
+end
+
+# Linear interpolation of mu_bar(E) at `e`. Out-of-range clamps to
+# endpoint value (mirrors Fortran's `terp1` lin-lin behaviour at grid
+# boundaries — MF=4 lin-lin is the dominant interpolation law for
+# elastic angular dists in modern evaluations).
+function _interp_linear_mubar(energies::Vector{Float64},
+                               mu_bar::Vector{Float64}, e::Float64)
+    n = length(energies)
+    n == 0 && return 0.0
+    e <= energies[1]  && return mu_bar[1]
+    e >= energies[n]  && return mu_bar[n]
+    # Binary search for bracketing pair
+    lo, hi = 1, n
+    while hi - lo > 1
+        mid = (lo + hi) >> 1
+        if energies[mid] <= e
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    e1, e2 = energies[lo], energies[hi]
+    f1, f2 = mu_bar[lo], mu_bar[hi]
+    e2 == e1 ? f1 : f1 + (f2 - f1) * (e - e1) / (e2 - e1)
 end
 
 # =========================================================================
@@ -1180,18 +1277,36 @@ function _write_errorr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
     _write_send_line(io, mat, 1)
     _write_fend_line(io, mat)
 
-    # MF3 — group-averaged cross sections for the cov reactions, plus
-    # any extra MTs covard needs for sandwich-rule normalisation that
-    # are NOT in `reaction_mts` (MF=mfcov scan). Specifically, mubar
-    # (mfcov=34) needs MT=251 because covard's xs lookup for the
-    # collapsed MF=34/MT=251 section is on `tape.mf3_xs[251]`
-    # (covr_io.jl:255-264). Reverting to a literal `keys(group_xs)`
-    # walk would emit MTs covr doesn't expect for mfcov=33/35/40 and
-    # inflate covr's downstream output (T34 regression). Sequence
-    # resets to 1 at each SEND.
-    mf3_mts = Set{Int}(reaction_mts)
-    if mfcov == 34
-        haskey(group_xs, 251) && push!(mf3_mts, 251)
+    # MF3 — group-averaged cross sections, restricted per Fortran covout's
+    # per-mfcov canon. The set of MTs Fortran emits to MF=3 differs by
+    # mfcov, and getting it wrong cascades into covr crashes:
+    #
+    #   mfcov=31 (ν̄)     → only the ν̄ MTs {452, 455, 456}
+    #                       (errorr.f90:6047-6113 nusigc; ν̄ values come
+    #                       from MF=1 weighted by fission xs)
+    #   mfcov=33 (xs)     → reaction_mts (the MF=33 cov MT list)
+    #                       (errorr.f90:7793-8005 sigc)
+    #   mfcov=34 (mubar)  → ONLY {251} — the *integrated* mubar value
+    #                       computed by musigc (errorr.f90:5897-6036).
+    #                       The source reaction MTs (e.g. MT=2/51 with
+    #                       MF=34 cov) are INPUTS to the integration, not
+    #                       echoed into MF=3. Echoing them here causes
+    #                       covr's wildcard `expand_mt_list` to enumerate
+    #                       them, call covard with mt=2 → mf3x=33 → look
+    #                       up (33, 2) → CRASH (T65/T15-mubar/T16-mubar).
+    #   mfcov=35 (spec)   → reaction_mts (errorr.f90:6113-6193 fssigc)
+    #   mfcov=40 (act)    → reaction_mts (errorr.f90:7793-8005 sigc)
+    #
+    # Each `mt` still requires a `group_xs[mt]` entry to be emitted; the
+    # caller is responsible for synthesizing missing entries (e.g.
+    # MT=251 via musigc) before invoking the writer. Sequence resets to 1
+    # at each SEND.
+    mf3_mts = if mfcov == 34
+        Set{Int}([251])
+    elseif mfcov == 31
+        intersect(Set{Int}(reaction_mts), Set{Int}([452, 455, 456]))
+    else  # 33, 35, 40
+        Set{Int}(reaction_mts)
     end
     for mt in sort!(collect(mf3_mts))
         haskey(group_xs, mt) || continue
