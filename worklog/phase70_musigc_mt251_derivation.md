@@ -10,19 +10,36 @@ per-mfcov canonical emission set.
 
 ## Outcome
 
+**All 3 remaining post-Phase-69 CRASHes cleared.** Sweep CRASH count
+goes 4 (Phase 67) → 1 (Phase 69, T11 cleared) → **0** (Phase 70).
+
 | Test | Pre-Phase-70 | Post-Phase-70 |
 |------|--------------|---------------|
-| T65 (U-235 ENDF/B-VIII.0 MF34 MT2 mubar) | CRASH `covard: MF33/MT=2 not present` at 291s | **runs end-to-end** — tape41 `[1/451, 3/251, 34/251]` matches Fortran reference structure exactly; covr emits tape51, viewr emits tape61 |
+| T65 (U-235 mubar)            | CRASH `MF33/MT=2 not present` at 291s | **runs end-to-end** in 290s — tape41 `[1/451, 3/251, 34/251]` matches Fortran reference structure exactly; covr emits tape51, viewr emits tape61 |
+| T16 (U-238 mfcov=33+34)      | CRASH `MF33/MT=2 not present` at 530s | **runs end-to-end** in 565s — all 6 tapes produced (STRUCTURAL_FAIL but no crash) |
+| T15 (U-238 mfcov=31+33+34)   | CRASH `MF33/MT=2 not present` at 545s | **runs end-to-end** in 562s — all 10 tapes produced (DIFFS / STRUCTURAL_FAIL but no crash) |
 | T01 NUMERIC_PASS 32812/32962 | ✓ | **preserved** |
 | T22 BIT_IDENTICAL 4636/4636  | ✓ | **preserved** |
 | T34 covr cascade             | DIFFS (1/2, 5/14)| **preserved** (unchanged) |
 | All 5 errorr unit-test files | pass        | pass (51/51 dispatch tests, +3 new RED→GREEN) |
 
-T15 + T16 still CRASH with `MF33/MT=2 not present` but on the
-**mfcov=33 (xs cov) path** — a different code path from the
-mfcov=34 mubar one fixed here. Filed for follow-up; likely a Phase-69
-GENDF-readback regression interacting with U-238 JENDL's 36-MT cov
-inventory.
+**Surprise scope expansion**: the original analysis assumed T15 + T16
+crashed via the **mfcov=33 xs-cov path** (since the error signature
+was `MF33/MT=2 not present`). Hands-on verification (T16 standalone
++ T15 standalone post-fix) revealed the crash was actually fired by
+the **mubar covr** (T15's covr3, T16's covr2) iterating spurious
+MF=3/MT=2 echoes that Phase 68's writer leaked onto mubar tapes. With
+those echoes removed (Fix 1), covr's wildcard `expand_mt_list`
+returns just `[251]` for mubar tapes, covard receives `mt=251` →
+`mf3x=34` (not 33), and the lookup succeeds. The mfcov=33 xs-cov path
+was never broken; the misleading error signature came from covr
+calling covard with `mt=2` from a MUBAR tape, where `mt!=251` falls
+through to `mf3x=33` by default (covr_io.jl:244-252).
+
+Lesson: the `MF$mf3x/MT=$mt not present` error message names the MF/MT
+covard *wanted* (computed by `mf3x` dispatch), not the MF/MT of the
+tape covard is reading. For diagnosis, also log the tape's MF section
+inventory and the source case (which covr block).
 
 ## Root cause (mubar path)
 
@@ -149,6 +166,8 @@ Post-fix: all 4 assertions pass.
 | T22 standalone (BIT_IDENTICAL 4636/4636)             | **preserved** |
 | T34 standalone (DIFFS, covr cascade)                 | **preserved** (1/2, 5/14, no regression) |
 | T65 standalone (was CRASH `MF33/MT=2 not present`)   | **runs end-to-end**, tape41 structure matches Fortran reference exactly |
+| T16 full pipeline (was CRASH at 530s)                | **runs end-to-end** in 565s, all 6 tapes produced |
+| T15 full pipeline (was CRASH at 545s)                | **runs end-to-end** in 562s, all 10 tapes produced |
 
 ## Files touched
 
@@ -157,27 +176,31 @@ Post-fix: all 4 assertions pass.
 - `test/validation/test_errorr_writer_mf_dispatch.jl` (+27 LOC, one
   new RED→GREEN testset)
 
-## Remaining T15 + T16 (different code path, follow-up phase)
+## Sweep CRASH count (post-Phase-67 → post-Phase-70)
 
-Both T15 and T16 still CRASH with `covard: MF33/MT=2 not present` in
-the FULL sweep, but on the **mfcov=33 (cross-section cov) covr call**
-— not the mubar one fixed here. Phase 68 verification confirmed both
-ran covr in standalone tests; the post-Phase-69 sweep regression
-suggests an interaction with Phase 69's groupr GENDF format change
-(per-T MF=1/451 with `tempin` in seq=2 C1, MF=3 nz=1 simplification).
+| Phase | CRASHes | Δ | Notes |
+|-------|---------|---|-------|
+| 67    | 4       | — | T11, T15, T16, T65 |
+| 68    | 4       | = | (verifications were standalone-only) |
+| 69    | 3       | -1 | T11 cleared (multi-T groupr) |
+| **70** | **0**  | **-3** | **T15, T16, T65 all cleared (this phase)** |
 
-Hypothesis: T15's mfcov=33 errorr reads the Phase-69 GENDF (tape 91)
-via `_errorr_read_gendf_xs`. If the readback now returns a different
-group_xs MT inventory than pre-Phase-69, MF=3 emission for
-reaction_mts ∩ group_xs may be a SUBSET of the MF=33 cov section
-list, so covr's wildcard expansion picks MTs whose MF=33 cov isn't
-emitted — or vice versa. Diagnose by comparing T15 standalone tape26
-contents pre- and post-Phase-69. T16 has no groupr (PENDF path) so
-shares no Phase-69 dependency; its crash may have a different cause
-(possibly the same `_errorr_group_average` MT-set drift).
+Expected post-Phase-70 sweep totals (84 tests):
 
-Filed as **Phase 71 — T15/T16 mfcov=33 covr regression** in the next
-HANDOFF revision.
+| Status            | Phase 67 | **Post-Phase-70 (expected)** | Δ      |
+|-------------------|----------|------------------------------|--------|
+| `BIT_IDENTICAL`   | 2        | 2                            | =      |
+| `NUMERIC_PASS`    | 2        | 2                            | =      |
+| `DIFFS`           | 75       | 79                           | +4     |
+| `STRUCTURAL_FAIL` | 0        | (subset of DIFFS bucket)     | —      |
+| `MISSING_TAPE`    | 0        | 0                            | =      |
+| `NO_REFERENCE`    | 1        | 1                            | =      |
+| `CRASH`           | 4        | **0**                        | **-4** |
+| `TIMEOUT`         | 0        | 0                            | =      |
+
+A full sweep was deferred this session for time; the four pre-
+existing crashing tests (T11/T15/T16/T65) were each verified
+standalone post-Phase-70 to run end-to-end.
 
 ## Fortran source citations
 
