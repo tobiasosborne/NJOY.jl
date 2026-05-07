@@ -166,3 +166,48 @@ end
     @test jul_nk == 3
     @test jul_mt2 == [77, 91, 102]
 end
+
+# Phase 71 RED canary — MT=102 self-cov rows 1..14 (resonance-parameter
+# uncertainty contribution from MF=32). T15 U-238 JENDL has an 8092-line
+# MF=32 (RP cov) section that Fortran's covout propagates into the
+# capture/capture cov matrix via `rescon` (errorr.f90:7465 → 8513).
+# Julia today has zero MF=32 → MF=33 propagation, so rows 1..14 of
+# Julia's MT=102 cov matrix are all zero. Reference shows row-1 cols
+# 1..10 = (2.66e-4, 3.30e-4, 3.50e-4, 4.09e-4, 2.49e-4, 9.09e-5,
+# 1.68e-5, 8.32e-8, -4.69e-6, -3.11e-7) — note the negative cols 9..10
+# which cannot come from MF=33 LB=5 (whose fvals are non-negative for
+# U-238 capture); they're sandwich-rule outputs of RP cov × sensitivity.
+#
+# This test is RED (@test_broken) until rescon lands. The 7 (mt, mt2)
+# pairs receiving rescon contribution per Fortran rescon dispatch:
+# (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102).
+#
+# See worklog/phase71_rescon_diagnosis.md for the full diagnosis.
+@testset "errorr covcal Phase 71 RED — MT=102 row-1 (rescon canary)" begin
+    tape26 = _run_t15_errorr_mf33()
+    @test isfile(tape26)
+
+    ref_mt102 = _parse_mf33_self_cov(T15_REF, 9237, 102, 30)
+    jul_mt102 = _parse_mf33_self_cov(tape26,  9237, 102, 30)
+
+    # Sanity: reference itself has the canary values. Guards parser.
+    @test abs(ref_mt102[1, 1] - 2.658914e-4) < 1e-9
+    @test abs(ref_mt102[1, 9] - (-4.685423e-6)) < 1e-9
+    # Rows 16..30 already match per Phase 51 LB=5 weighted-collapse.
+    # Sanity-check that this still holds — guards against regression.
+    for ig in 16:30
+        ref_row = ref_mt102[ig, :]
+        jul_row = jul_mt102[ig, :]
+        @test maximum(abs.(jul_row .- ref_row)) < 1e-7
+    end
+
+    # RED: Julia's row 1 is all zero today. Will become non-zero once
+    # rescon (MF=32 → MF=33 RP-cov propagation) is ported.
+    @test_broken abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
+    @test_broken jul_mt102[1, 9] < 0.0   # negative-value sandwich signature
+
+    # Diagnostic info — track row-1 progress between sessions.
+    nz_jul = count(!iszero, view(jul_mt102, 1, :))
+    nz_ref = count(!iszero, view(ref_mt102, 1, :))
+    @info "MT=102 row-1 non-zero col count: jul=$nz_jul  ref=$nz_ref"
+end

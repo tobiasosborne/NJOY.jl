@@ -219,6 +219,31 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # NC-derived (e.g. T15 Cov(2,4)) are not yet computed here.
     _expand_nc_blocks!(cov_matrices, nc_blocks, egn)
 
+    # Resonance-parameter uncertainty propagation (MF=32 → MF=33).
+    # Mirrors Fortran covout (errorr.f90:7465) → rescon (errorr.f90:8513).
+    # When MF=32 is present, Fortran reads RP cov via resprx/rpxlc0/
+    # rpxlc12/rpxsamm, builds dσ_X/dRP sensitivities via grpav4 etc.,
+    # and adds J·Cov_RP·J^T contributions to seven specific (mt, mt2)
+    # pairs: (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102).
+    #
+    # For T15 (U-238 JENDL with 8092-line MF=32) this is the dominant
+    # missing piece in the MT=102 self-cov drift: rows 1..14 of the
+    # output cov are pure RP-cov contribution and currently zero in
+    # Julia. See worklog/phase71_rescon_diagnosis.md for the matrix-
+    # level diagnosis and RED canary in test_errorr_covcal_lb5.jl.
+    #
+    # PORT TODO (multi-session, blocked on resprx/rpxlc0/sensitivity
+    # build): wire `_apply_rescon!(cov_matrices, mf32_data, sigs, egn)`
+    # below the early-return when MF=32 is absent.
+    if mfcov == 33 && _mf32_present(endf_path, params.mat)
+        @warn "errorr: MF=32 present (MAT=$(params.mat)) — rescon \
+              (resonance-parameter cov contribution to MF=33) is not \
+              yet ported. Output covariances for (1,1), (2,2), (2,18), \
+              (2,102), (18,18), (18,102), (102,102) will be missing \
+              the RP-cov sandwich contribution. \
+              See worklog/phase71_rescon_diagnosis.md."
+    end
+
     # Write output tape
     open(nout_path, "w") do io
         _write_errorr_tape(io, params.mat, za, awr, egn, group_xs,
@@ -251,6 +276,31 @@ function _find_mfcov_mts(endf_path::String, mat::Int, mfcov::Int)
         end
     end
     sort!(mts)
+end
+
+"""
+    _mf32_present(endf_path, mat) -> Bool
+
+Detect whether `endf_path` carries a non-empty MF=32 (resonance-
+parameter covariance) section for `mat`. Used to gate the rescon
+(MF=32 → MF=33) propagation TODO; returns false when the section
+is absent so downstream behaviour is unchanged for evaluations
+without RP covariance.
+
+Ref: ENDF-6 manual MF=32 (resonance parameter uncertainty).
+"""
+function _mf32_present(endf_path::String, mat::Int)
+    return open(endf_path) do io
+        while !eof(io)
+            line = readline(io); length(line) < 75 && continue
+            p = rpad(line, 80)
+            mat_val = _parse_int(p[67:70])
+            mf_val  = _parse_int(p[71:72])
+            mt_val  = Int(_parse_int(p[73:75]))
+            mat_val == mat && mf_val == 32 && mt_val > 0 && return true
+        end
+        false
+    end
 end
 
 """

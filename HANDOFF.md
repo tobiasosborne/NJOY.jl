@@ -98,6 +98,8 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
+| 71    | 2026-05-07 | T15 covcal MT=102 row-1 diagnosis — rescon (MF=32→MF=33) is the missing piece | **Diagnosis only — no functional code change.** Matrix-level dump of T15 MT=102 self-cov reveals rows 1..14 zero in Julia, populated in ref (with negative entries proving sandwich-rule output, not MF=33 LB=5 lookup). Fortran covout (errorr.f90:7465) calls rescon (errorr.f90:8513-8819) to add MF=32 resonance-parameter cov contributions to seven (mt, mt2) pairs: (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102). Disproves HANDOFF P1's "Bug-B siblings (LB=1/LB=2 midpoint sampling)" hypothesis as the dominant cause — the LB=5 weighted-collapse path (Phase 51) produces *exact* values for output rows that fall in covered input bins (MT=102 rows 16..30 are byte-identical between Julia and ref). The drift is missing rescon. Landed: MF=32 detection scaffold + loud-warn at the would-be rescon call site (errorr.jl, no functional change), Phase 71 RED testset in `test_errorr_covcal_lb5.jl` asserting `MT=102 C[1,1] ≈ 2.658914e-4` (currently `@test_broken`), HANDOFF P1 Covcal section updated to point at rescon. Multi-session port estimate: ~1500-2500 LOC across 8+ Fortran subroutines (resprx, rpxlc0/12/2, rpxsamm, rpxunr, rpendf, grpav4, rescon). T15/T22/T01 unit-test regression-clean. | `worklog/phase71_rescon_diagnosis.md` |
+| 70    | 2026-05-06 | musigc MT=251 derivation + per-mfcov MF=3 echo restriction (T15+T16+T65 CRASH→runs, sweep CRASH count 4→0) | See worklog. | `worklog/phase70_musigc_mt251_derivation.md` |
 | 69    | 2026-05-05 | multi-temperature groupr port (T11 CRASH→DIFFS, last CRASH from Phase 67 cleared) | **All 4 Phase-67 CRASHes now resolved.** T11 (Pu-238 WIMS, ntemp=3 at 300/900/2100K) was crashing in `wimsr_extract_resint` because Julia groupr only emitted one temperature, so wimsr's GENDF reader (`_wimsr_read_gendf_metadata`, wimsr_xsecs.jl:188-248) saw `tempr` of length 1 and threw `BoundsError` on `tempr[1:ires]` for ires=3. Three layered fixes: (1) `_pendf_material_temperature` + `extract_mf3_at_temperature` added to `pendf_io.jl` (+75 LOC) — heuristic locates TEMP CONT in MF1/MT451 by walking lines 2..5 picking last (L2=0, N1>0, 0≤C1<1e6) match; integer-fields-parse-first guard skips description Hollerith; handles ENDF-IV (TEMP at mf1_lines[2], T11) and ENDF-V/VI (mf1_lines[3] or [4], T01); errors loudly if no match listing available temperatures. (2) `groupr_module` (groupr.jl) refactored to outer-T loop mirroring Fortran groupr.f90:479-943 — `temps = copy(params.temperatures)`; per-T `extract_mf3_at_temperature` + per-T mt_results buffer indexed `[ti][mti]`. (3) `_write_groupr_tape` signature changed to take `temps::Vector` + `sigz_list::Vector` + `per_temp_results::Vector{Vector{MTRes}}` — emits per-T MF=1/MT=451 (HEAD `(za, awr, 0, nz, -1, 1)` + LIST `(tempin, 0, ngn, 0, NW, 0)` ← C1=tempin per Fortran 551, was 0.0) + per-MT MF=3 (head with `nz_mf3=1` simplification + per-(g, ig2) records `(tempin, 0, 3, 1, 3, g)`) + MEND between temps + single TEND. The `nz=1` MF=3 simplification keeps body length ≥ wimsr's `_bidx(i, iz, ig2, nl, nz)` requirement; full nsigz×ngn block-matrix output (URR self-shielding via Fortran `genflx`) is a follow-up. Side fix: removed Phase-58a leftover `_collect_gaspr!(ctx, tapes, params)` call inside the wimsr branch in pipeline.jl:262 — gaspr collector is typed `GasprParams`, the wimsr branch passes `WimsrParams`, MethodError for every wimsr-using test. Verified single-test: T01 NUMERIC_PASS 32812/32962 preserved, T22 BIT_IDENTICAL 4636/4636 preserved, T11 CRASH→DIFFS (tape27 13/455 STRUCTURAL_FAIL ref 1169; tape28 0/10379 STRUCTURAL_FAIL ref 15722). Remaining T11 work to BIT_IDENTICAL: multi-σ₀ MF=3 emission (~40 LOC), Fortran-faithful MF=1 LIST body (titles+sigz+egn+egg), MF=6 transfer matrix port (substantive), MT=251/252 derivation (HANDOFF P2 cdy), moder tape28 TPID. | `worklog/phase69_groupr_multi_T.md` |
 | 68    | 2026-05-04 | errorr body-MF dispatch (mfcov∈{31, 34} remap) + MT=1 PENDF unfilter (T15 + T16 + T65 CRASH→runs) | **3 of 4 CRASHes resolved.** `_write_errorr_tape` (errorr.jl) now mirrors Fortran `covout` (errorr.f90:7211-7587): mfcov=31 (ν̄) → body MF=33 (L7214/7472 remap), mfcov=34 (mubar) → ONE outer MF=34/MT=251 with sub-section CONT carrying L1=251/L2=ld/N1=ld1 (L7245-7250, 7480-7485, 7585), mfcov=33/35/40 unchanged. Mubar fix collapses per-reaction pairs into one section (Fortran emits N sections; Julia reader keys by (mf, mt) so multi-section emission needs reader-side multi-section support, deferred). MF=3 echo: removed `mt in (1, 451) && continue` → `mt == 451` only (PENDF path, errorr.jl:364) — Fortran `colaps` (errorr.f90:9097+) walks every MT incl. MT=1; T16 crash was Julia-side over-filtering. MF=3 emission iterates `reaction_mts ∪ {251 if mfcov==34}` (NOT all of group_xs — first-iteration `keys(group_xs)` regressed T34 covr boxer-format output 2→1150 lines because GENDF readback puts every MF=3 MT into group_xs). 47-assertion unit test landed (`test/validation/test_errorr_writer_mf_dispatch.jl`) covering all 5 mfcov branches + T34 + T16 regression guards. T15 mfcov=33 tape26 dropped 5985→5964 lines (ref 5958, gap 27→6). T22 BIT_IDENTICAL preserved; T15/T16/T65 errorr no longer crashes covr (was: covard MF33/MT=452, MF3/MT=1, MF33/MT=2). T11 wimsr CRASH unchanged (orthogonal — multi-T groupr port). Deferred: mubar multi-section emission for T15 mubar tape27, MF=3/MT=251 musigc derivation for T16's mubar errorr call, TPID descriptor + iverf=6 + temperature in MF1/451. | `worklog/phase68_errorr_body_mf_dispatch.md` |
 | 67    | 2026-05-03 | full 84-test sweep + errorr/covr `mfflg` fix + wimsr loud diagnosis | See worklog. | `worklog/phase67_full_sweep_post_phase66.md` |
@@ -169,16 +171,42 @@ the work.
   match to reference). Full walkthrough in
   `worklog/T15_covcal_lb5_weighted.md`.
 
+- **Status (2026-05-07, post Phase 71)**: **Diagnosis revised — rescon
+  is the dominant missing piece, NOT Bug-B siblings.** Matrix-level
+  diff of T15 MT=102 self-cov reveals rows 1..14 zero in Julia,
+  populated in ref (with negative entries proving sandwich-rule output).
+  Fortran's `covout` (errorr.f90:7465) calls `rescon` (errorr.f90:8513)
+  to add MF=32 RP-cov contributions to seven (mt, mt2) pairs:
+  (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102). Julia
+  has zero MF=32 → MF=33 propagation. U-238 JENDL has an 8092-line
+  MF=32 section. MF=32 detection scaffold + loud-warn landed in
+  `errorr_module`; no functional rescon port yet. Worklog:
+  `worklog/phase71_rescon_diagnosis.md`. RED canary in
+  `test/validation/test_errorr_covcal_lb5.jl` (Phase 71 testset).
+
 - **Scope (remaining — sub-section content drift)**: Per-MT line-count
   gaps within sub-sections after Bug A: MT=1 −100, MT=2 +106, MT=18
   +38, MT=102 −38, net +6 vs ref (Julia 5964 vs 5958). NK is correct;
-  the gap is in *what* each sub-section emits. Two open paths:
-  - **LTY=1/2/3 standards / ratio** (HANDOFF P1 sub-item 2 above) —
-    Fortran's `stand` (errorr.f90 ~7800) synthesises NDS-standard
-    covariance + ratio data; Julia returns `nothing`.
-  - **Bug B siblings**: `expand_lb1` / `expand_lb2` likely have the
-    midpoint-sampling class of bug Bug B fixed for LB=5 (smaller
-    blast radius — diagonal only).
+  the gap is in *what* each sub-section emits. Three open paths,
+  ordered by impact:
+  - **rescon (MF=32 → MF=33 RP-cov sandwich)** — multi-session port
+    (~1500-2500 LOC across 8+ Fortran subroutines: resprx, rpxlc0,
+    rpxlc12, rpxlc2, rpxsamm, rpxunr, rpendf, grpav4, rescon).
+    Closes the dominant share of MT=1 (−100), MT=18 (+38 mixed),
+    MT=102 (−38), and contributes to MT=2 (+106 mixed). The rows-1..14
+    drift in MT=102 self-cov is purely this.
+  - **NC expansion v2 sub-item 2 — LTY=1/2/3 standards/ratio**
+    (HANDOFF P1 sub-item 2 above) — Fortran's `stand` (errorr.f90:2939)
+    synthesises NDS-standard covariance + ratio data; Julia returns
+    `nothing`. Affects MT=2 NC-cross-pairs (the ~+106 overflow).
+  - **Bug-B siblings (LB=1/LB=2 union-grid collapse)** — `expand_lb1`
+    / `expand_lb2` use midpoint-sampling on the output grid, bypassing
+    union-grid + flux/xs-weighted collapse. Smallest blast radius;
+    likely contributes the small (e.g. MT=91 −6 lines) drifts.
+    Originally hypothesised as the dominant cause; matrix dump in
+    Phase 71 disproved this — the LB=5 weighted-collapse path
+    produces *exact* values for output rows that fall in covered
+    input bins (e.g. MT=102 rows 16..30 byte-identical).
 
 #### Bug B — `expand_lb5_symmetric` midpoint sampling (large)
 
