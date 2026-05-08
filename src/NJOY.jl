@@ -79,6 +79,10 @@ include("processing/resxsr.jl")
 include("processing/moder.jl")
 
 # Processing modules (ERRORR -- covariance processing)
+# MF=32 reader + rescon (RP-cov sandwich) loaded first so errorr.jl
+# can dispatch to apply_rescon! when MF=32 is present.
+include("processing/mf32_reader.jl")
+include("processing/rescon.jl")
 include("processing/errorr.jl")
 
 # Processing modules (COVR -- covariance visualization and library output)
@@ -205,6 +209,11 @@ export psi_chi, faddeeva_w_julia
 
 # Public API -- MF2 reader
 export MF2Data, IsotopeData, read_mf2
+
+# Public API -- MF32 reader (resonance-parameter covariance) + rescon
+export MF32Data, MF32IsotopeData, MF32ResolvedRange, MF32ResolvedSubsection
+export read_mf32, mf32_resonance_count, mf32_param_count
+export apply_rescon!, rescon_pair_index, rescon_supports_pair, RESCON_PAIRS
 
 # Public API -- Cross section evaluation
 export cross_section, cross_section_slbw, cross_section_mlbw, cross_section_rm, cross_section_sammy

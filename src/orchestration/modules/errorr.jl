@@ -222,26 +222,20 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # Resonance-parameter uncertainty propagation (MF=32 → MF=33).
     # Mirrors Fortran covout (errorr.f90:7465) → rescon (errorr.f90:8513).
     # When MF=32 is present, Fortran reads RP cov via resprx/rpxlc0/
-    # rpxlc12/rpxsamm, builds dσ_X/dRP sensitivities via grpav4 etc.,
-    # and adds J·Cov_RP·J^T contributions to seven specific (mt, mt2)
+    # rpxlc12/rpxsamm, builds dσ_X/dRP sensitivities via finite-difference
+    # perturbations of the resonance evaluator (rpendf + rpxgrp), and
+    # adds J·Cov_RP·J^T contributions to seven specific (mt, mt2)
     # pairs: (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102).
     #
-    # For T15 (U-238 JENDL with 8092-line MF=32) this is the dominant
-    # missing piece in the MT=102 self-cov drift: rows 1..14 of the
-    # output cov are pure RP-cov contribution and currently zero in
-    # Julia. See worklog/phase71_rescon_diagnosis.md for the matrix-
-    # level diagnosis and RED canary in test_errorr_covcal_lb5.jl.
-    #
-    # PORT TODO (multi-session, blocked on resprx/rpxlc0/sensitivity
-    # build): wire `_apply_rescon!(cov_matrices, mf32_data, sigs, egn)`
-    # below the early-return when MF=32 is absent.
+    # Phase 72 (2026-05-08): MF=32 reader landed (`read_mf32` in
+    # processing/mf32_reader.jl, LRU=1/LRF=1,2,3/LCOMP=1/NRO=0/NLRS=0).
+    # `apply_rescon!` parses + validates but does NOT yet compute
+    # sensitivities — that port (rpendf + rpxgrp + perturbation loop,
+    # errorr.f90:4249-4523) is the next session's work. The Phase-71
+    # RED canary in test_errorr_covcal_lb5.jl stays @test_broken until
+    # the sensitivity builder lands.
     if mfcov == 33 && _mf32_present(endf_path, params.mat)
-        @warn "errorr: MF=32 present (MAT=$(params.mat)) — rescon \
-              (resonance-parameter cov contribution to MF=33) is not \
-              yet ported. Output covariances for (1,1), (2,2), (2,18), \
-              (2,102), (18,18), (18,102), (102,102) will be missing \
-              the RP-cov sandwich contribution. \
-              See worklog/phase71_rescon_diagnosis.md."
+        apply_rescon!(cov_matrices, endf_path, params.mat, egn, group_xs)
     end
 
     # Write output tape
