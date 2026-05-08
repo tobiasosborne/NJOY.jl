@@ -98,6 +98,7 @@ under `worklog/T*.md`. Most-recent first.
 
 | Phase | Date       | Topic | Outcome | Worklog |
 |-------|------------|-------|---------|---------|
+| 72b   | 2026-05-08 | rescon sensitivity builder + sandwich (MT=102 row 1: all-zero → 10/10 nonzero, sign-matches ref, magnitudes within factor of 2) | **Phase 71 canary partially flipped GREEN.** `apply_rescon!` no-op skeleton replaced with full Fortran-faithful pipeline (~400 LOC delta in rescon.jl) mirroring `rpxlc12` (errorr.f90:4399-4593) + rpendf-equivalent grid (5015-5089) + rpxgrp-equivalent group-average (5227-5367) for LRU=1/LRF=3/LCOMP=1. Builds dense pointwise grid (200 pts/decade + tanh-stretched per-resonance refinement spanning ±30·Γ + output-group boundaries), evaluates `cross_section_rm` at each point for unperturbed + ±-perturbed RM parameters (ER ±1e-4, widths ±1e-2 — verbatim Fortran factors), central-differences pointwise dσ/dRP, group-averages with iwt=2 flat weight, sandwiches via triangular-or-full walk over MF=32 cov per (mt, mt2) pair, divides by σ̄·σ̄ for relative cov. T15 MT=102 row 1: jul=10/10 nonzero (was 0/10), sign-pattern matches ref for every nonzero col, ratios 0.76..1.69 (most within 35%), C[1,9]<0 negative-sandwich signature confirmed (flipped from @test_broken to @test). 1e-7 bound on C[1,1] still @test_broken (ratio 1.346 — needs FP-grind alignment with rpendf adaptive eskip mesh + rpxgrp accumulation order). T22 BIT_IDENTICAL preserved (4636/4636). T15 errorr tape26 6108 lines (was 5964; ref 5958). Test suite: 40 PASS + 1 BROKEN canary, 5 PASS Bug A NK, 57 PASS reader. Worklog: `worklog/phase72b_rescon_sandwich.md`. | `worklog/phase72b_rescon_sandwich.md` |
 | 72    | 2026-05-08 | rescon foundation — MF=32 reader + apply_rescon! skeleton (LRU=1/LRF=1,2,3/LCOMP=1) | **Foundation landed; canary stays @test_broken by design.** New `read_mf32` (213 LOC) parses U-238 JENDL into typed structs (10 resolved ranges, 317 resonances, 951 uncertain parameters); URR (LRU=2) skipped cleanly. New `apply_rescon!` (rescon.jl, 86 LOC) parses + validates + logs but does NOT yet compute sensitivities. Wired into `errorr_module` replacing the Phase-71 `@warn`. `test_mf32_reader.jl` (NEW, 57 PASS assertions) exercises the reader against actual J33U238 ENDF data — top-level header + range 1 (1e-5..1000 eV, RM/LCOMP=1, NRB=26, MPAR=3) + cov symmetry/non-negative-diagonal across all 10 ranges + range 2 sanity. Phase 71 RED canary suite: 18 PASS + 2 BROKEN preserved. T15 errorr tape26 5964 lines unchanged. Next session: port `rpendf` (errorr.f90:5015-5089), `rpxgrp` (5227-5367), the rpxlc12 perturbation loop (4399-4523), and the sandwich fill (4541-4593) — then GREEN the `MT=102 C[1,1] ≈ 2.658914e-4` canary. | `worklog/phase72_mf32_reader.md` |
 | 71    | 2026-05-07 | T15 covcal MT=102 row-1 diagnosis — rescon (MF=32→MF=33) is the missing piece | **Diagnosis only — no functional code change.** Matrix-level dump of T15 MT=102 self-cov reveals rows 1..14 zero in Julia, populated in ref (with negative entries proving sandwich-rule output, not MF=33 LB=5 lookup). Fortran covout (errorr.f90:7465) calls rescon (errorr.f90:8513-8819) to add MF=32 resonance-parameter cov contributions to seven (mt, mt2) pairs: (1,1), (2,2), (2,18), (2,102), (18,18), (18,102), (102,102). Disproves HANDOFF P1's "Bug-B siblings (LB=1/LB=2 midpoint sampling)" hypothesis as the dominant cause — the LB=5 weighted-collapse path (Phase 51) produces *exact* values for output rows that fall in covered input bins (MT=102 rows 16..30 are byte-identical between Julia and ref). The drift is missing rescon. Landed: MF=32 detection scaffold + loud-warn at the would-be rescon call site (errorr.jl, no functional change), Phase 71 RED testset in `test_errorr_covcal_lb5.jl` asserting `MT=102 C[1,1] ≈ 2.658914e-4` (currently `@test_broken`), HANDOFF P1 Covcal section updated to point at rescon. Multi-session port estimate: ~1500-2500 LOC across 8+ Fortran subroutines (resprx, rpxlc0/12/2, rpxsamm, rpxunr, rpendf, grpav4, rescon). T15/T22/T01 unit-test regression-clean. | `worklog/phase71_rescon_diagnosis.md` |
 | 70    | 2026-05-06 | musigc MT=251 derivation + per-mfcov MF=3 echo restriction (T15+T16+T65 CRASH→runs, sweep CRASH count 4→0) | See worklog. | `worklog/phase70_musigc_mt251_derivation.md` |
@@ -171,6 +172,20 @@ the work.
   matching Fortran covcal. T15 MT=77 C[20, 20] = 0.02987998 (exact
   match to reference). Full walkthrough in
   `worklog/T15_covcal_lb5_weighted.md`.
+
+- **Status (2026-05-08, post Phase 72b)**: **Sandwich landed — MT=102
+  row 1 0/10 nonzero → 10/10 nonzero, signs match ref, magnitudes
+  within factor of 2 (most within 35%); 1e-7 bound on `[1,1]` still
+  pending FP-grind.** `apply_rescon!` now does the full pipeline:
+  pointwise grid → 78 perturbation pairs (×2 for central diff) →
+  `cross_section_rm` at each point → group-averaged sens →
+  triangular/full sandwich over the 7 RESCON_PAIRS → divide by σ̄·σ̄
+  for relative cov. Phase 71 canary suite: 40 PASS + 1 @test_broken.
+  T22 BIT_IDENTICAL preserved. Next session: FP-grind to close the
+  ~30% systematic on C[1,1] — likely the rpendf adaptive `eskip`
+  mesh or the rpxgrp `(2·wt1+wt2)·x12/six` higher-order moment
+  formula (errorr.f90:5284-5285). Worklog:
+  `worklog/phase72b_rescon_sandwich.md`.
 
 - **Status (2026-05-08, post Phase 72)**: **Foundation landed — MF=32
   reader + apply_rescon! skeleton.** `src/processing/mf32_reader.jl`

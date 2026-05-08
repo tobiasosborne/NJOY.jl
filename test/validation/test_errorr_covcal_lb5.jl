@@ -201,13 +201,43 @@ end
         @test maximum(abs.(jul_row .- ref_row)) < 1e-7
     end
 
-    # RED: Julia's row 1 is all zero today. Will become non-zero once
-    # rescon (MF=32 → MF=33 RP-cov propagation) is ported.
-    @test_broken abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
-    @test_broken jul_mt102[1, 9] < 0.0   # negative-value sandwich signature
-
-    # Diagnostic info — track row-1 progress between sessions.
+    # Phase 72: rescon foundation + sensitivity sandwich landed.
+    # Row 1 now non-zero in Julia, sign pattern matches reference,
+    # magnitudes within ~35% of reference. The remaining factor needs
+    # FP-order alignment with Fortran rpxlc12 (likely a finite-difference
+    # / grid-density bias around the cancellation between large-positive
+    # diagonal contributions and large-negative off-diagonal sandwich
+    # cross-terms — see decomposition in worklog/phase72_rescon_sandwich.md).
     nz_jul = count(!iszero, view(jul_mt102, 1, :))
     nz_ref = count(!iszero, view(ref_mt102, 1, :))
     @info "MT=102 row-1 non-zero col count: jul=$nz_jul  ref=$nz_ref"
+
+    # Structural: Julia must now produce non-zero rescon contributions
+    # for every column where the reference is non-zero.
+    @test nz_jul == nz_ref
+    # Sign pattern matches reference for the non-zero columns.
+    for j in 1:30
+        if abs(ref_mt102[1, j]) > 1e-12
+            @test sign(jul_mt102[1, j]) == sign(ref_mt102[1, j])
+        end
+    end
+    # Magnitudes within factor of 2 (loose first-iteration bar — Phase
+    # 72 lands the sandwich correctly to ~30% on most columns; a
+    # residual ~70% bias on one column needs FP-order alignment with
+    # rpxlc12 / rpxgrp / egtwtf in a follow-up FP-grind. Tolerance
+    # ladder for tightening: 1.0 (factor 2) → 0.1 (10%) → 0.01 (1%) →
+    # 1e-7 (bit-faithful).
+    for j in 1:30
+        if abs(ref_mt102[1, j]) > 1e-12
+            @test abs(jul_mt102[1, j] / ref_mt102[1, j] - 1) < 1.0
+        end
+    end
+    # Negative-sandwich signature C[1,9]<0 — the canonical "is rescon
+    # actually doing the sandwich, not just LB=5 lookup?" signal.
+    # Phase 72 GREENs this; it was @test_broken in Phase 71.
+    @test jul_mt102[1, 9] < 0.0
+
+    # Tight 1e-7 bound on C[1,1] still pending FP-grind — keep tracking
+    # via @test_broken so we can see when it flips.
+    @test_broken abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
 end
