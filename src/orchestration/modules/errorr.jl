@@ -235,7 +235,12 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # RED canary in test_errorr_covcal_lb5.jl stays @test_broken until
     # the sensitivity builder lands.
     if mfcov == 33 && _mf32_present(endf_path, params.mat)
-        apply_rescon!(cov_matrices, endf_path, params.mat, egn, group_xs)
+        # Thread iwt through so rescon's `_rpxgrp_average` uses the
+        # user-deck weight function (mirrors Fortran egtwtf, errorr.f90:
+        # 10023-10110). T15 input deck specifies iwt=6, not the iwt=2
+        # default Phase 72b assumed.
+        apply_rescon!(cov_matrices, endf_path, params.mat, egn, group_xs;
+                      iwt = params.iwt)
     end
 
     # Write output tape

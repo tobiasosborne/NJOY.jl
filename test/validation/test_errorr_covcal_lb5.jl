@@ -237,7 +237,10 @@ end
     # Phase 72 GREENs this; it was @test_broken in Phase 71.
     @test jul_mt102[1, 9] < 0.0
 
-    # Tight 1e-7 bound on C[1,1] still pending FP-grind — keep tracking
-    # via @test_broken so we can see when it flips.
-    @test_broken abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
+    # Phase 72c: rescon now plumbs the user-deck iwt through the
+    # group-averaging integrator (Fortran rpxgrp + egtwtf). T15 uses
+    # iwt=6 (thermal + 1/E + fission + fusion), not iwt=2 (flat) as
+    # Phase 72b assumed. With the correct weight, C[1,1] matches the
+    # reference 2.658914e-4 within 1e-7.
+    @test abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
 end

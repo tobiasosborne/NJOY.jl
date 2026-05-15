@@ -18,8 +18,12 @@
 #           · loopn≥2 → width perturbed by ±0.01·width (gwidth=w·0.01)
 #         Two cross_section_rm evaluations per perturbation.
 #         Central difference: dσ/dRP = (σ_+ - σ_-) / (2·gwidth).
-#         Group-average via lethargy-weighted trapezoidal integral
-#         (rpxgrp-equivalent — errorr.f90:5227-5367).
+#         Group-average via the iwt-aware Simpson formula from
+#         `_rpxgrp_average` (rpxgrp port — errorr.f90:5227-5366), with
+#         the per-E weight function selected by the user-deck `iwt`
+#         (egtwtf, errorr.f90:10023-10110). T15 uses iwt=6 (thermal +
+#         1/E + fission + fusion). Phase 72c fix: previously this
+#         module assumed iwt=2 (flat) which biased C[1,1] by ~16%.
 #         Stash sens[channel ∈ 1..4, p ∈ 1..npar, ig ∈ 1..ngn].
 #   4. Sandwich (errorr.f90:4541-4593): for each (mt, mt2) ∈ RESCON_PAIRS:
 #         absolute_cov[ig, ig'] = Σ_{i ≤ j} sens[ch,i,ig]·cov[i,j]·sens[ch,j,ig']
@@ -34,7 +38,7 @@
 #   sens[3,*,*] = fission → cff/cef/cfg (18,18)/(2,18)/(18,102)
 #   sens[4,*,*] = capture → cgg/ceg/cfg (102,102)/(2,102)/(18,102)
 #
-# Status: targets the U-238 MT=102 row-1 canary (Phase 71 RED test).
+# Status: Phase 72c — T15 MT=102 row-1 canary GREEN.
 # Acceptance: |jul_mt102[1,1] - 2.658914e-4| < 1e-7,  jul_mt102[1,9] < 0.
 # =========================================================================
 
@@ -160,66 +164,187 @@ function _build_pointwise_grid(elr::Float64, ehr::Float64,
 end
 
 # -------------------------------------------------------------------------
-# Lethargy-weighted trapezoidal group-average (rpxgrp-equivalent)
+# Weight-aware Simpson group-average (rpxgrp port)
 # -------------------------------------------------------------------------
 
-# Group-average σ(E) over the output groups in `egn`. For T15 iwt=2
-# (the standard input weight), the per-E flux weight is 1.0 (flat in
-# linear E) — the same convention the Phase 51 LB=5 collapse uses
-# (`flx_u[k] = u_hi - u_lo` in `_collapse_pair_blocks!`).
-#
-# Returns Vector{Float64}(ngn) of σ̄(g) = ∫σ dE / ΔE_g over the points
-# of `grid` falling inside group g. Groups with no grid points get 0.0.
-#
-# `grid` and `sig` must be the same length; `grid` must be sorted.
-function _group_average_flat(grid::AbstractVector{Float64},
-                              sig::AbstractVector{Float64},
-                              egn::AbstractVector{<:Real})
+"""
+    _rpxgrp_average(grid, sig, egn, weight_fn) -> Vector{Float64}
+
+Group-average a pointwise vector using the iwt-aware Simpson formula
+from Fortran NJOY's `rpxgrp` (errorr.f90:5227-5366).
+
+For each segment `(x2, x1)` fully inside the current group:
+
+    z1     = (2·wt1 + wt2)·dx/6   # endpoint x1 coefficient
+    z2     = (2·wt2 + wt1)·dx/6   # endpoint x2 coefficient
+    de     = ½·(wt1 + wt2)·dx
+    gsig  += y1·z1 + y2·z2        (per channel)
+    sumde += de
+
+At group boundaries: linear interpolation of both `wt` and `y` at the
+crossing energy `ebb = egn(ig+1)`, then accumulate the partial segment
+`[x2, ebb]` into the current group and finalize (`gsig /= sumde`).
+
+The multi-group-spanning case (Fortran goto 1000 loop, lines 5323-5341)
+fills intermediate groups via `gsig[ig] = yl*zl + yr*zr/sumde` — note
+the Fortran precedence quirk: `yr*zr/sumde` is evaluated as
+`(yr*zr)/sumde` first, then added to `yl*zl`. This looks like a Fortran
+bug (the obvious intent is `(yl*zl + yr*zr)/sumde`) but we replicate it
+verbatim to match canonical NJOY output (CLAUDE.md Rule 1, Law 2).
+
+After the spanning loop, the segment tail `[egn(ig), x1]` is accumulated
+into the new group without finalizing (Fortran 5343-5357).
+
+For iwt=2 (`weight_fn(E) = 1`), the Simpson coefficients reduce to
+`z1 = z2 = dx/3`, and the per-group integral is exactly the trapezoid
+sum — algebraically equivalent to the previous `_group_average_flat`
+implementation in the iwt=2 limit. For iwt=6 (T15 default), the
+thermal/1/E/fission/fusion weight reshapes the integrand and changes
+the group-averaged answer by ~16% on group 1 (capture peak energy
+range), which was the root cause of the Phase 72b C[1,1] bias.
+
+`grid` and `sig` must be the same length; `grid` must be sorted and
+all entries must fall inside `[egn[1], egn[end]]`.
+"""
+function _rpxgrp_average(grid::AbstractVector{Float64},
+                         sig::AbstractVector{Float64},
+                         egn::AbstractVector{<:Real},
+                         weight_fn)
     ngn = length(egn) - 1
-    sigbar = zeros(Float64, ngn)
-    flxbar = zeros(Float64, ngn)
     npts = length(grid)
-    for i in 1:(npts - 1)
-        e1, e2 = grid[i], grid[i + 1]
-        s1, s2 = sig[i], sig[i + 1]
-        e2 <= e1 && continue
-        # Find which group(s) the segment [e1, e2] crosses. A segment
-        # may straddle a group boundary; we split it.
-        es = e1
-        ss = s1
-        while es < e2
-            ig = _find_output_group(es, egn, ngn)
-            if ig == 0 || ig > ngn
-                # Segment foot outside the output grid — advance to next
-                # boundary.
-                # Find first boundary ≥ es, otherwise break.
-                next_boundary = e2
-                for k in 1:(ngn + 1)
-                    eb = Float64(egn[k])
-                    if eb > es
-                        next_boundary = min(eb, e2)
-                        break
-                    end
-                end
-                es = next_boundary > es ? next_boundary : e2
-                # Update ss by linear interp at es.
-                ss = e2 > e1 ? s1 + (s2 - s1) * (es - e1) / (e2 - e1) : s1
-                continue
+    gsig = zeros(Float64, ngn)
+    npts < 2 && return gsig
+
+    # Locate the initial group containing grid[1] (Fortran lines
+    # 5254-5264 do the same scan; we replace `goto 100 + i0=i0+1` with
+    # explicit linear search and treat off-grid points as advancing the
+    # scan, matching the Fortran `i0<ipoint` recovery path).
+    i0 = 1
+    ig = 0
+    while i0 <= npts
+        ig = _find_output_group(grid[i0], egn, ngn)
+        ig > 0 && break
+        i0 += 1
+    end
+    (ig == 0 || i0 >= npts) && return gsig
+
+    sumde = 0.0
+    x1 = grid[i0]
+    wt1 = Float64(weight_fn(x1))
+
+    @inbounds for i in (i0 + 1):npts
+        x2 = x1
+        wt2 = wt1
+        y2 = sig[i - 1]
+
+        x1 = grid[i]
+        wt1 = Float64(weight_fn(x1))
+        y1 = sig[i]
+        x12 = x1 - x2
+        x12 <= 0 && continue
+
+        egnt  = Float64(egn[ig])
+        egnt1 = Float64(egn[ig + 1])
+
+        if x1 >= egnt && x1 <= egnt1
+            # Case A — segment lies wholly inside the current group.
+            # Ref: errorr.f90:5281-5300.
+            de = 0.5 * (x1 - x2) * (wt1 + wt2)
+            sumde += de
+            z1 = (2.0 * wt1 + wt2) * x12 / 6.0
+            z2 = (2.0 * wt2 + wt1) * x12 / 6.0
+            if y1 != 0.0 || y2 != 0.0
+                gsig[ig] += y1 * z1 + y2 * z2
             end
-            eb_top = Float64(egn[ig + 1])
-            ee = min(e2, eb_top)
-            # Linear interp σ at ee.
-            se = e2 > e1 ? s1 + (s2 - s1) * (ee - e1) / (e2 - e1) : s2
-            de = ee - es
-            sigbar[ig] += 0.5 * (ss + se) * de
-            flxbar[ig] += de
-            es, ss = ee, se
+            if x1 == egnt1
+                gsig[ig] = sumde != 0.0 ? gsig[ig] / sumde : 0.0
+                ig += 1
+                sumde = 0.0
+                ig > ngn && break
+            end
+        elseif x1 > egnt1
+            # Case B — segment crosses one or more group boundaries.
+            # Ref: errorr.f90:5301-5358.
+            ebb  = egnt1
+            ebx  = ebb - x2
+            wt12 = wt1 - wt2
+            coef = ebx / x12
+            wt3  = wt2 + wt12 * ebx / x12
+            de   = ebx * (wt2 + wt3) / 2.0
+            sumde += de
+            z2 = (2.0 * wt2 + wt3) * ebx / 6.0
+            z3 = (2.0 * wt3 + wt2) * ebx / 6.0
+            y3 = y2 + (y1 - y2) * coef
+            if y2 != 0.0 || y3 != 0.0
+                gsig[ig] += y2 * z2 + y3 * z3
+            end
+            gsig[ig] = sumde != 0.0 ? gsig[ig] / sumde : 0.0
+
+            # Walk through any wholly-spanned intermediate groups
+            # (Fortran "1000 continue" goto loop, lines 5323-5341).
+            while true
+                ig += 1
+                ig > ngn && break
+                if x1 > Float64(egn[ig + 1])
+                    xl = Float64(egn[ig])
+                    xr = Float64(egn[ig + 1])
+                    ebx_in = xr - xl
+                    wtl = wt2 + wt12 * (xl - x2) / x12
+                    wtr = wt2 + wt12 * (xr - x2) / x12
+                    sumde = ebx_in * (wtl + wtr) / 2.0
+                    zl = (2.0 * wtl + wtr) * ebx_in / 6.0
+                    zr = (2.0 * wtr + wtl) * ebx_in / 6.0
+                    yl = y2 + (y1 - y2) * (xl - x2) / (x1 - x2)
+                    yr = y2 + (y1 - y2) * (xr - x2) / (x1 - x2)
+                    if yl != 0.0 || yr != 0.0
+                        # NOTE: Fortran precedence quirk (errorr.f90:5338):
+                        #   gsig(j,ig) = yl*zl + yr*zr/sumde
+                        # Parsed as `yl*zl + (yr*zr)/sumde`. Replicated
+                        # verbatim to match canonical NJOY output;
+                        # do NOT "fix" to `(yl*zl + yr*zr)/sumde`.
+                        gsig[ig] = yl * zl + yr * zr / sumde
+                    end
+                    # Loop continues — try next spanned group.
+                else
+                    # Spanning ended in this group — accumulate the
+                    # tail `[egn(ig), x1]` into it without finalizing.
+                    # Ref: errorr.f90:5343-5357.
+                    ebx_in = x1 - Float64(egn[ig])
+                    de_tail = ebx_in * (wt3 + wt1) / 2.0
+                    sumde = de_tail
+                    z1 = (2.0 * wt3 + wt1) * ebx_in / 6.0
+                    z3 = (2.0 * wt1 + wt3) * ebx_in / 6.0
+                    y3_tail = y2 + (y1 - y2) * coef
+                    if y3_tail != 0.0 || y1 != 0.0
+                        gsig[ig] += y1 * z1 + y3_tail * z3
+                    end
+                    break
+                end
+            end
         end
     end
-    @inbounds for ig in 1:ngn
-        sigbar[ig] = flxbar[ig] > 0 ? sigbar[ig] / flxbar[ig] : 0.0
+
+    # Finalize any group still mid-accumulation. (Fortran finalizes
+    # only at exact boundary crossings; on the typical pointwise grid,
+    # the last segment lands exactly on the topmost egn boundary, so
+    # nothing remains. We add a guard for the rare case where the grid
+    # ends mid-group, mirroring the implicit "leave gsig as ∫y·w" with
+    # a `/sumde` normalize so the result is a proper average.)
+    @inbounds if ig >= 1 && ig <= ngn && sumde != 0.0 && gsig[ig] != 0.0
+        # Detect whether this group was already finalized: the Fortran
+        # path only normalises on exact boundary crossing. If the last
+        # x1 didn't equal egn(ig+1), `gsig[ig]` is still pre-normalised.
+        # Heuristic: if we got here without an `x1 == egnt1` finalize
+        # for the current `ig`, normalise now. This guards against the
+        # "grid ends mid-group" edge case rpxgrp's input layout makes
+        # impossible (its sig array is built to end on a group boundary).
+        last_eb = Float64(egn[ig + 1])
+        if grid[end] < last_eb
+            gsig[ig] /= sumde
+        end
     end
-    sigbar
+
+    return gsig
 end
 
 # Output-group index (1..ngn) containing energy `e`; 0 if outside.
@@ -371,6 +496,7 @@ function _build_subsection_sensitivities_rm(
     mf2_range::ResonanceRange{ReichMooreParameters},
     egn::AbstractVector{<:Real},
     ngn::Int,
+    weight_fn,
 )
     rm = mf2_range.parameters
     npar = sub.mpar * sub.nrb
@@ -395,10 +521,10 @@ function _build_subsection_sensitivities_rm(
     # σ̄_unperturbed per channel (for sandwich denominator and as the
     # central-difference reference in case we ever switch to forward).
     σtot0, σel0, σfis0, σcap0 = _eval_xs_grid_rm(grid, rm, mf2_range)
-    σ̄_tot0 = _group_average_flat(grid, σtot0, egn)
-    σ̄_el0  = _group_average_flat(grid, σel0,  egn)
-    σ̄_fis0 = _group_average_flat(grid, σfis0, egn)
-    σ̄_cap0 = _group_average_flat(grid, σcap0, egn)
+    σ̄_tot0 = _rpxgrp_average(grid, σtot0, egn, weight_fn)
+    σ̄_el0  = _rpxgrp_average(grid, σel0,  egn, weight_fn)
+    σ̄_fis0 = _rpxgrp_average(grid, σfis0, egn, weight_fn)
+    σ̄_cap0 = _rpxgrp_average(grid, σcap0, egn, weight_fn)
 
     sens = zeros(Float64, 4, npar, ngn)
 
@@ -442,10 +568,10 @@ function _build_subsection_sensitivities_rm(
             dfis = @. (σp[3] - σm[3]) * inv2g
             dcap = @. (σp[4] - σm[4]) * inv2g
 
-            ḡ_tot = _group_average_flat(grid, dtot, egn)
-            ḡ_el  = _group_average_flat(grid, del,  egn)
-            ḡ_fis = _group_average_flat(grid, dfis, egn)
-            ḡ_cap = _group_average_flat(grid, dcap, egn)
+            ḡ_tot = _rpxgrp_average(grid, dtot, egn, weight_fn)
+            ḡ_el  = _rpxgrp_average(grid, del,  egn, weight_fn)
+            ḡ_fis = _rpxgrp_average(grid, dfis, egn, weight_fn)
+            ḡ_cap = _rpxgrp_average(grid, dcap, egn, weight_fn)
 
             @inbounds for ig in 1:ngn
                 sens[1, p, ig] = ḡ_tot[ig]
@@ -561,7 +687,7 @@ end
 # -------------------------------------------------------------------------
 
 """
-    apply_rescon!(cov_matrices, endf_path, mat, egn, group_xs)
+    apply_rescon!(cov_matrices, endf_path, mat, egn, group_xs; iwt=2)
 
 Add MF=32 (resonance-parameter) covariance contributions to the seven
 relevant `(mt, mt2)` entries of `cov_matrices`. Mirrors Fortran covout
@@ -572,6 +698,13 @@ Reads MF=32 + MF=2 from `endf_path`, builds finite-difference
 sensitivity Jacobians by perturbing each resonance parameter, and
 applies the sandwich to update `cov_matrices` in place.
 
+The `iwt` keyword threads the user-deck weight function (errorr card 2
+`iwt`) through the group-averaging integrator (`_rpxgrp_average`),
+mirroring Fortran `egtwtf` (errorr.f90:10023-10110). For T15 U-238
+JENDL, `iwt=6` (thermal + 1/E + fission + fusion) is the correct
+weight; Phase 72b mistakenly used `iwt=2` (flat), biasing the
+sensitivities by ~16% on group 1.
+
 Returns the parsed `MF32Data` (or `nothing` if MF=32 is absent).
 """
 function apply_rescon!(
@@ -579,8 +712,10 @@ function apply_rescon!(
     endf_path::AbstractString,
     mat::Integer,
     egn::AbstractVector{<:Real},
-    group_xs::Dict{Int,Vector{Float64}},
+    group_xs::Dict{Int,Vector{Float64}};
+    iwt::Int = 2,
 )
+    weight_fn = get_weight_function(iwt)
     open(endf_path, "r") do io
         find_section(io, 32, 151; target_mat=Int(mat)) || return nothing
     end
@@ -628,7 +763,8 @@ function apply_rescon!(
             for sub in rng.subsections
                 # Build sensitivities for this subsection.
                 sens, σ̄_local_tot, σ̄_local_el, σ̄_local_fis, σ̄_local_cap =
-                    _build_subsection_sensitivities_rm(sub, rng, rm_range, egn, ngn)
+                    _build_subsection_sensitivities_rm(sub, rng, rm_range, egn, ngn,
+                                                       weight_fn)
 
                 # Apply sandwich for each of the seven pairs. For the
                 # σ̄·σ̄ relative-cov denominator, prefer Fortran-equivalent
