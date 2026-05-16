@@ -582,7 +582,62 @@ function _build_subsection_sensitivities_rm(
         end
     end
 
+    # Trim sens to the resolved-range group window [iest, ieed].
+    # Ref: errorr.f90:3093-3108 (iest/ieed derivation in resprx) + 4509
+    # (sensitivity is only WRITTEN inside [iest, ieed]; outside, sens
+    # stays at its initial zero from `sens = zeros(...)`). Without this,
+    # _rpxgrp_average returns small but non-zero values for groups
+    # outside the resolved range (FP noise from boundary handling),
+    # which the sandwich amplifies across npar² parameters into
+    # spurious rel-cov entries that survive the 1e-20 row-trim
+    # threshold. The MF=33 self-cov rows for groups well above the
+    # resolved range then bloat to span ~all output groups.
+    iest, ieed = _resonance_group_window(mf32_range.elr, mf32_range.ehr, egn)
+    if iest == 0 || ieed == 0 || iest > ieed
+        fill!(sens, 0.0)
+    else
+        @inbounds for ig in 1:ngn
+            (iest <= ig <= ieed) && continue
+            for ch in 1:4, p in 1:npar
+                sens[ch, p, ig] = 0.0
+            end
+        end
+    end
+
     return sens, σ̄_tot0, σ̄_el0, σ̄_fis0, σ̄_cap0
+end
+
+"""
+    _resonance_group_window(elr, ehr, egn) -> (iest::Int, ieed::Int)
+
+Find the output-group window [iest, ieed] covering the resolved range
+[elr, ehr], matching Fortran's iest/ieed derivation at errorr.f90:3093-3108.
+
+- iest = first group whose upper bound exceeds elr
+- ieed = last group whose upper bound is ≥ ehr
+- if elg (lower bound of iest's group) ≥ ehr the range collapses to ieed=0
+
+Returns (0, 0) if no group satisfies the criteria.
+"""
+function _resonance_group_window(elr::Real, ehr::Real,
+                                 egn::AbstractVector{<:Real})
+    ngn = length(egn) - 1
+    iest = 0; ieed = 0
+    elg = Float64(elr); ehg = Float64(ehr)
+    ip1 = false; ip2 = false
+    @inbounds for i in 2:(ngn+1)
+        ee = Float64(egn[i])
+        if !ip1 && ee > elr
+            ip1 = true; elg = Float64(egn[i-1]); iest = i - 1
+        end
+        if !ip2 && ee >= ehr
+            ip2 = true; ehg = ee; ieed = i - 1
+        end
+    end
+    if elg >= ehr
+        ieed = 0
+    end
+    return (iest, ieed)
 end
 
 # -------------------------------------------------------------------------

@@ -143,10 +143,21 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                 head = read_cont(io); nl = Int(head.N2)
                 for _ in 1:nl
                     sh = read_cont(io)
+                    mat1 = Int(sh.L1)
                     mt2 = Int(sh.L2); mt2 == 0 && (mt2 = mt)
-                    push!(listed_pairs, (mt, mt2))
                     nc = Int(sh.N1); ni = Int(sh.N2)
-                    nc > 0 && push!(nc_derived_mts, mt)
+                    # Cross-material sub-section (MAT1 != 0): Fortran's
+                    # covout / rescon discard these (errorr.f90:8531
+                    # `if (mats(ixp).ne.0) return`). The single-MAT errorr
+                    # processing path uses only intra-material covariances.
+                    # We still need to advance the file position past the
+                    # NC + NI blocks so subsequent sub-sections parse
+                    # correctly — read and discard.
+                    skip_pair = (mat1 != 0)
+                    if !skip_pair
+                        push!(listed_pairs, (mt, mt2))
+                        nc > 0 && push!(nc_derived_mts, mt)
+                    end
                     # Read NC sub-subsections — capture LTY=0 linear
                     # combinations for the post-pass; ignore LTY=1,2,3
                     # (standards/ratios) until a test needs them.
@@ -154,6 +165,7 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                         try
                             blk = _read_nc_subsection(io)
                             blk === nothing && continue
+                            skip_pair && continue
                             push!(get!(nc_blocks, mt, NCSubSubsection[]), blk)
                         catch
                             break
@@ -166,6 +178,7 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
                     for _ in 1:ni
                         try
                             lst = read_list(io)
+                            skip_pair && continue
                             nc > 0 && continue  # Skip NI in derived sub-sections
                             lb = Int(lst.L2)
                             lb in (0,1,2,5,6) || continue
@@ -217,7 +230,7 @@ function errorr_module(tapes::TapeManager, params::ErrorrParams)
     # covariances are zero (true for U-238 JENDL — every referenced MT has
     # NC=0/NI=1 self-cov only). Cross-pairs where BOTH endpoints are
     # NC-derived (e.g. T15 Cov(2,4)) are not yet computed here.
-    _expand_nc_blocks!(cov_matrices, nc_blocks, egn)
+    _expand_nc_blocks!(cov_matrices, nc_blocks, egn, group_xs)
 
     # Resonance-parameter uncertainty propagation (MF=32 → MF=33).
     # Mirrors Fortran covout (errorr.f90:7465) → rescon (errorr.f90:8513).
@@ -1124,7 +1137,7 @@ function _find_output_group(e::Float64, egn::Vector{Float64}, ngn::Int)
 end
 
 """
-    _expand_nc_blocks!(cov_matrices, nc_blocks, egn)
+    _expand_nc_blocks!(cov_matrices, nc_blocks, egn, group_xs)
 
 For each MT with NC blocks, populate cov_matrices entries from the linear
 combination of referenced MT covariances. Mirrors Fortran `gridd` `akxy`
@@ -1158,7 +1171,8 @@ pass instead.
 """
 function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                             nc_blocks::Dict{Int,Vector{NCSubSubsection}},
-                            egn::Vector{Float64})
+                            egn::Vector{Float64},
+                            group_xs::Dict{Int,Vector{Float64}})
     ngn = length(egn) - 1
     isempty(nc_blocks) && return
     # Snapshot input covariances. Fortran covout (errorr.f90:7431-7438)
@@ -1167,6 +1181,19 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
     # let an MT's NC-derived self-cov flow into another MT's NC formula.
     cov_in = copy(cov_matrices)
     nc_set = Set(keys(nc_blocks))  # MTs whose Cov_in self is implicitly 0
+
+    # σ-ratio weighting helper. Cov matrices in `cov_in` are RELATIVE
+    # (Phase 51). The NC formula propagates ABSOLUTE cov:
+    #   abs_cov(Y)[ig, igp] = Σ_i c_i² · abs_cov(ref_i)[ig, igp]
+    # Converted to relative on the Y side:
+    #   rel_cov(Y)[ig, igp] = Σ_i c_i² · rel_cov(ref_i)[ig, igp]
+    #                        · σ_i[ig]·σ_i[igp] / (σ_Y[ig]·σ_Y[igp])
+    # without the σ-ratio factor, contributions from refs with σ_i ≪ σ_Y
+    # bloat the derived rel cov by orders of magnitude. Same factor
+    # applies to cross-pair (σ_i/σ_Y in row, σ_j/σ_ref_j=1 in col) and
+    # double-NC (σ_iz/σ_a in row, σ_iz/σ_b in col).
+    σ_zero(mt, ig) = haskey(group_xs, mt) && ig <= length(group_xs[mt]) ?
+        group_xs[mt][ig] : 0.0
 
     # Geometric group center used for the [e1, e2] mask. Fortran's `gridd`
     # uses bin-edge containment over the union grid `ek`; on the output
@@ -1195,9 +1222,9 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
             any(in_range) || continue
             any_block = true
 
-            # Self-cov contribution: Σ_i c_i² Cov_in(ref_i, ref_i). NC-derived
-            # ref_i contributes 0 (Cov_in self-cov is implicitly zero — the
-            # NI input was empty for those MTs).
+            # Self-cov contribution: Σ_i c_i² · rel_cov(ref_i) · (σ_i/σ_Y)².
+            # The σ-ratio factor converts the relative cov from ref_i's
+            # σ_i denominator to Y's σ_Y denominator (see helper comment).
             for (i, ref_i) in enumerate(blk.mts_ref)
                 ref_i in nc_set && continue
                 cov_ii = get(cov_in, (ref_i, ref_i), nothing)
@@ -1206,12 +1233,16 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                 w = ci * ci
                 @inbounds for ig in 1:ngn, igp in 1:ngn
                     in_range[ig] && in_range[igp] || continue
-                    self_acc[ig, igp] += w * cov_ii[ig, igp]
+                    σY_r = σ_zero(mt, ig); σY_c = σ_zero(mt, igp)
+                    (σY_r > 0 && σY_c > 0) || continue
+                    σi_r = σ_zero(ref_i, ig); σi_c = σ_zero(ref_i, igp)
+                    ratio = (σi_r / σY_r) * (σi_c / σY_c)
+                    self_acc[ig, igp] += w * cov_ii[ig, igp] * ratio
                 end
             end
 
-            # Cross-cov to NON-NC refs only: c_j · Cov_in(ref_j, ref_j) for
-            # ref_j > mt. Double-NC pairs handled in the next pass.
+            # Cross-cov to NON-NC refs only: c_j · rel_cov(ref_j) · σ_j/σ_Y
+            # (only one σ-ratio — the col side keeps σ_j denominator).
             for (j, ref_j) in enumerate(blk.mts_ref)
                 ref_j > mt || continue
                 ref_j in nc_set && continue
@@ -1221,7 +1252,10 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                 M = get!(() -> zeros(Float64, ngn, ngn), cross_acc, ref_j)
                 @inbounds for ig in 1:ngn, igp in 1:ngn
                     in_range[ig] && in_range[igp] || continue
-                    M[ig, igp] += cj * cov_jj[ig, igp]
+                    σY_r = σ_zero(mt, ig)
+                    σY_r > 0 || continue
+                    σj_r = σ_zero(ref_j, ig)
+                    M[ig, igp] += cj * cov_jj[ig, igp] * (σj_r / σY_r)
                 end
             end
         end
@@ -1271,7 +1305,11 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                         end
                         @inbounds for ig in 1:ngn, igp in 1:ngn
                             in_range[ig] && in_range[igp] || continue
-                            pair_acc[ig, igp] += w * cov_jj[ig, igp]
+                            σA_r = σ_zero(mt_a, ig); σB_c = σ_zero(mt_b, igp)
+                            (σA_r > 0 && σB_c > 0) || continue
+                            σ_r = σ_zero(ref_j, ig); σ_c = σ_zero(ref_j, igp)
+                            ratio = (σ_r / σA_r) * (σ_c / σB_c)
+                            pair_acc[ig, igp] += w * cov_jj[ig, igp] * ratio
                         end
                     end
                 end
