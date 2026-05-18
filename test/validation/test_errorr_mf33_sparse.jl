@@ -112,4 +112,69 @@ end
     mt4_gap = get(ref, 4, 0) - get(jul, 4, 0)
     @info "Residual gap: MT=2 under by $mt2_gap lines, \
            MT=4 under by $mt4_gap lines"
+
+    # Phase 74 — MT=1/mt2=2 cross-pair from MT=2's NC formula (MT=2 =
+    # MT=1 − Σ partials). By cov symmetry the (MT=1, MT=2) cross-pair is
+    # populated at rows/cols 15-30 (where U-238 MF=33 MT=1's input
+    # self-cov is nonzero). Pre-fix Julia emitted only a 2-line zero
+    # stub; post-fix it should emit ~16 row records × ~3 lines each.
+    function _sub_section_lines(path, mat, outer_mt, target_mt2)
+        # Walk the MF=33 section for `outer_mt` and count the lines in
+        # the sub-section whose CONT has L2 == target_mt2. Returns
+        # (sub_lines, nonzero_rows) where sub_lines includes the
+        # sub-section's CONT.
+        return open(path, "r") do io
+            NJOY.find_section(io, 33, outer_mt; target_mat=mat) || return (0, 0)
+            head = NJOY.read_cont(io)
+            nl = Int(head.N2)
+            for _ in 1:nl
+                # Sub-section CONT carries (C1,C2,L1=0,L2=mt2,N1=0,N2=ngn).
+                sub_cont = NJOY.read_cont(io)
+                mt2 = Int(sub_cont.L2)
+                # Each LIST row CONT carries (0,0,count,ig2lo,count,ig).
+                # We need to walk LIST records until the next sub-CONT,
+                # but they all share (mf=33, mt=outer_mt) — so we read
+                # row-by-row tracking the LIST header.
+                ngn_sub = Int(sub_cont.N2)
+                row_count = 0
+                line_count = 1  # the sub-CONT itself
+                last_seq = 0
+                for _ in 1:ngn_sub
+                    row_cont = NJOY.read_cont(io)
+                    count = Int(row_cont.N1)
+                    ig = Int(row_cont.N2)
+                    line_count += 1
+                    row_count += 1
+                    # Read the (count) data values — 6 per line, ceil(count/6) lines.
+                    nfloat_lines = cld(count, 6)
+                    for _ in 1:nfloat_lines
+                        readline(io)
+                        line_count += 1
+                    end
+                    # Last all-zero row sentinel: ig == ngn AND count == 1
+                    # marks the final stub. Don't count it as a "data" row.
+                    if mt2 == target_mt2
+                        # Don't break; keep reading until ig=ngn signals end.
+                    end
+                    if ig >= ngn_sub; break; end
+                end
+                if mt2 == target_mt2
+                    return (line_count, row_count)
+                end
+            end
+            (0, 0)
+        end
+    end
+
+    ref_lines, ref_rows = _sub_section_lines(T15_REF,  9237, 1, 2)
+    jul_lines, jul_rows = _sub_section_lines(tape26,   9237, 1, 2)
+    @info "MT=1/mt2=2 sub-section — Julia: $jul_lines lines / $jul_rows rows, \
+           ref: $ref_lines lines / $ref_rows rows"
+    # Pre-Phase-74 baseline: jul_lines ≈ 3 (sub-CONT + 1 stub row CONT +
+    # 1 data line), jul_rows = 1. Post-fix: jul_rows should be ≥ 12
+    # (16 in ref, allow a few rows tolerance for off-by-one σ-ratio cells
+    # near the edge of the populated band).
+    @test jul_rows >= 12
+    # Total tape26 should close to within ~10 lines of reference (5958).
+    @test abs(total_lines - ref_total) <= 15
 end

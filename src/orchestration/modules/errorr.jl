@@ -1211,9 +1211,26 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
     end
 
     # ---- Single-NC pass: per-MT self-cov + cross-cov to NON-NC refs ----
+    # Storage key convention: cov_matrices[(a, b)] always has a ≤ b. So a
+    # cross-pair (mt, ref_j) is stored at (min, max), with the σ-ratio
+    # routed to the row or column side per cov symmetry:
+    #   ref_j > mt : stored at (mt, ref_j) — ROW    σ-ratio σ_ref/σ_mt at ig
+    #   ref_j < mt : stored at (ref_j, mt) — COLUMN σ-ratio σ_ref/σ_mt at igp
+    # This catches MT=2's NC reference to MT=1 (T15 U-238: MT=2 = MT=1
+    # − Σ partials), which by symmetry is the dominant contributor to
+    # Cov(MT=1, MT=2) — the missing 16-row × 16-col block at rows/cols
+    # 15-30 in the reference tape (where MT=1's input self-cov is
+    # populated).
+    # Refs (errorr.f90 covout, lines 7406-7438): the full sandwich loop
+    # `cova(igp,ig) += akxy(iy,ix,k)·akxy(iyp,ixp,kp)·cov(jgp)` is
+    # iterated for both orderings of (ix, ixp); we collapse the two
+    # passes (ref_j > mt and ref_j < mt) into the appropriate (min, max)
+    # storage key using cov symmetry rather than walking the input tape
+    # twice.
     for (mt, blocks) in nc_blocks
         self_acc = zeros(Float64, ngn, ngn)
-        cross_acc = Dict{Int, Matrix{Float64}}()
+        cross_acc_hi = Dict{Int, Matrix{Float64}}()  # ref_j > mt → (mt, ref_j)
+        cross_acc_lo = Dict{Int, Matrix{Float64}}()  # ref_j < mt → (ref_j, mt)
         any_block = false
 
         for blk in blocks
@@ -1241,21 +1258,35 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
                 end
             end
 
-            # Cross-cov to NON-NC refs only: c_j · rel_cov(ref_j) · σ_j/σ_Y
-            # (only one σ-ratio — the col side keeps σ_j denominator).
+            # Cross-cov to NON-NC refs. Stored key is (min(mt, ref_j),
+            # max(mt, ref_j)); σ-ratio side mirrors the row/col of the
+            # derived MT in the storage matrix.
             for (j, ref_j) in enumerate(blk.mts_ref)
-                ref_j > mt || continue
+                ref_j == mt && continue
                 ref_j in nc_set && continue
                 cov_jj = get(cov_in, (ref_j, ref_j), nothing)
                 cov_jj === nothing && continue
                 cj = blk.coeffs[j]
-                M = get!(() -> zeros(Float64, ngn, ngn), cross_acc, ref_j)
-                @inbounds for ig in 1:ngn, igp in 1:ngn
-                    in_range[ig] && in_range[igp] || continue
-                    σY_r = σ_zero(mt, ig)
-                    σY_r > 0 || continue
-                    σj_r = σ_zero(ref_j, ig)
-                    M[ig, igp] += cj * cov_jj[ig, igp] * (σj_r / σY_r)
+                if ref_j > mt
+                    # (mt, ref_j): row is mt → σ-ratio σ_ref/σ_mt at ig.
+                    M = get!(() -> zeros(Float64, ngn, ngn), cross_acc_hi, ref_j)
+                    @inbounds for ig in 1:ngn, igp in 1:ngn
+                        in_range[ig] && in_range[igp] || continue
+                        σY_r = σ_zero(mt, ig)
+                        σY_r > 0 || continue
+                        σj_r = σ_zero(ref_j, ig)
+                        M[ig, igp] += cj * cov_jj[ig, igp] * (σj_r / σY_r)
+                    end
+                else
+                    # (ref_j, mt): col is mt → σ-ratio σ_ref/σ_mt at igp.
+                    M = get!(() -> zeros(Float64, ngn, ngn), cross_acc_lo, ref_j)
+                    @inbounds for ig in 1:ngn, igp in 1:ngn
+                        in_range[ig] && in_range[igp] || continue
+                        σY_c = σ_zero(mt, igp)
+                        σY_c > 0 || continue
+                        σj_c = σ_zero(ref_j, igp)
+                        M[ig, igp] += cj * cov_jj[ig, igp] * (σj_c / σY_c)
+                    end
                 end
             end
         end
@@ -1263,8 +1294,18 @@ function _expand_nc_blocks!(cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
 
         # Self-cov REPLACES any zero-NI placeholder (Fortran akxy diag = 0).
         cov_matrices[(mt, mt)] = self_acc
-        for (ref_j, M) in cross_acc
+        for (ref_j, M) in cross_acc_hi
             cov_matrices[(mt, ref_j)] = M
+        end
+        # Lower-MT cross-pairs ACCUMULATE: another NC-derived MT may have
+        # already written into (ref_j, mt) (e.g. ref_j's own NC pass), and
+        # the Fortran cova accumulator is additive across iy/iyp passes.
+        for (ref_j, M) in cross_acc_lo
+            if haskey(cov_matrices, (ref_j, mt))
+                cov_matrices[(ref_j, mt)] .+= M
+            else
+                cov_matrices[(ref_j, mt)] = M
+            end
         end
     end
 
