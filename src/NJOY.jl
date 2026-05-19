@@ -211,7 +211,8 @@ export psi_chi, faddeeva_w_julia
 export MF2Data, IsotopeData, read_mf2
 
 # Public API -- MF32 reader (resonance-parameter covariance) + rescon
-export MF32Data, MF32IsotopeData, MF32ResolvedRange, MF32ResolvedSubsection
+export MF32Data, MF32IsotopeData, MF32ResolvedRange, MF32ResolvedSubsection,
+       MF32UnresolvedRange, MF32URRLState, MF32URRJState
 export read_mf32, mf32_resonance_count, mf32_param_count
 export apply_rescon!, rescon_pair_index, rescon_supports_pair, RESCON_PAIRS
 

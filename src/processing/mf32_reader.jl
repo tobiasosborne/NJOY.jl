@@ -65,6 +65,60 @@ struct MF32ResolvedRange
 end
 
 """
+    MF32URRJState
+
+One J-state of an MF=32 LRU=2 (URR) L-state record. Six raw words per
+J-state per ENDF-6 §32.2 — see the LIST body iterated by Fortran
+ggunr1 at errorr.f90:6846-6851:
+  (D, AJ, GNO, GG, GF, GX)
+"""
+struct MF32URRJState
+    D::Float64                         # average level spacing
+    AJ::Float64                        # J-value
+    GNO::Float64                       # avg reduced neutron width
+    GG::Float64                        # avg radiation width
+    GF::Float64                        # avg fission width
+    GX::Float64                        # avg competitive width
+end
+
+"""
+    MF32URRLState
+
+One L-state of an MF=32 LRU=2 range. Carries AWRI, orbital angular
+momentum `l`, and NJS J-states. Mirrors one LIST record per
+Fortran rpxunr at errorr.f90:4824-4830.
+"""
+struct MF32URRLState
+    awri::Float64
+    l::Int
+    j_states::Vector{MF32URRJState}
+end
+
+"""
+    MF32UnresolvedRange
+
+One energy range of MF=32 LRU=2 (URR) covariance data. Mirrors the
+per-range records read by Fortran rpxunr (errorr.f90:4822-4837).
+Cov matrix is NPAR × NPAR, NPAR = MPAR × Σ_L NJS_L, packed
+upper-triangular in the LIST body.
+"""
+struct MF32UnresolvedRange
+    elr::Float64                       # range lower energy [eV]
+    ehr::Float64                       # range upper energy [eV]
+    lrf::Int                           # 1 (LFW=0 or LFW=1), single URR format in MF=32
+    naps::Int
+    spi::Float64
+    ap::Float64
+    lssf::Int
+    isr::Int
+    dap::Float64                       # global ΔAP if isr=1
+    nls::Int
+    l_states::Vector{MF32URRLState}
+    mpar::Int                          # uncertain parameters per J-state
+    cov_RP::Matrix{Float64}            # NPAR × NPAR symmetric
+end
+
+"""
     MF32IsotopeData
 
 MF=32 data for one isotope.
@@ -74,14 +128,15 @@ struct MF32IsotopeData
     abn::Float64                       # abundance
     lfw::Int                           # fission widths flag (URR)
     resolved_ranges::Vector{MF32ResolvedRange}
+    unresolved_ranges::Vector{MF32UnresolvedRange}
 end
 
 """
     MF32Data
 
 Top-level MF=32 (resonance-parameter covariance) data for one material.
-Returned by `read_mf32`. Currently carries only resolved-range data;
-URR covariance (LRU=2) is not yet supported.
+Returned by `read_mf32`. Holds resolved-range LRU=1 data (LCOMP=1
+only — see scope at the file head) and URR LRU=2 data per isotope.
 """
 struct MF32Data
     za::Float64
@@ -119,11 +174,17 @@ function read_mf32(filename::AbstractString, mat::Integer)
             ner = Int(iso.N1)
 
             resolved = MF32ResolvedRange[]
+            unresolved = MF32UnresolvedRange[]
             for ir in 1:ner
                 rng = _read_mf32_range(io, mat, ir)
-                rng === nothing || push!(resolved, rng)
+                if rng isa MF32ResolvedRange
+                    push!(resolved, rng)
+                elseif rng isa MF32UnresolvedRange
+                    push!(unresolved, rng)
+                end
             end
-            push!(isotopes, MF32IsotopeData(zai, abn, lfw, resolved))
+            push!(isotopes,
+                  MF32IsotopeData(zai, abn, lfw, resolved, unresolved))
         end
         return MF32Data(za, awr, isotopes)
     end
@@ -146,31 +207,70 @@ function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
     naps = Int(range_cont.N2)
 
     if lru == 2
-        # URR covariance (LRU=2). Skip cleanly so the file pointer is
-        # positioned at the next range header or MF=32 SEND. Mirrors
-        # Fortran rpxunr's record sequence (errorr.f90:4824-4837):
-        #   - one CONT (per-format header with NLS, ISR)
-        #   - if ISR=1: one CONT (URR DAP)
-        #   - NLS LIST records (per-l URR parameters)
-        #   - one LIST record (URR covariance: MPAR/NPAR header)
-        # The actual URR cov fill (uff/ugg/uee/utt/uef/ueg/ufg) is a
-        # separate port (see RESCON_URR_TODO in rescon.jl). For T15
-        # U-238 the URR range is [25 keV, 149 keV] — orthogonal to the
-        # MT=102 row 1..14 canary which lives entirely in the resolved
-        # range [1e-5, 1000] eV.
+        # URR covariance (LRU=2). Format per ENDF-6 §32.2:
+        #   [SPI, AP, LSSF, 0, NLS, ISR]       CONT
+        #   if ISR=1: [0, DAP, 0, 0, 0, 0]     CONT
+        #   for L=1..NLS:
+        #     [AWRI, 0, L, 0, 6·NJS, NJS / D, AJ, GNO, GG, GF, GX ...] LIST
+        #   [0, 0, MPAR, 0, NW, NPAR / cov(I,J) packed upper-triangular] LIST
+        # Used by Fortran rpxunr's perturbation+sandwich
+        # (errorr.f90:4824-4985). Julia rescon URR path lives in
+        # `_apply_rescon_urr_subsection!` in rescon.jl.
         urr_params_cont = read_cont(io)
-        nls_urr = Int(urr_params_cont.N1)
-        isr_urr = Int(urr_params_cont.N2)
+        spi_urr  = urr_params_cont.C1
+        ap_urr   = urr_params_cont.C2
+        lssf_urr = Int(urr_params_cont.L1)
+        nls_urr  = Int(urr_params_cont.N1)
+        isr_urr  = Int(urr_params_cont.N2)
+        dap_urr  = 0.0
         if isr_urr == 1
-            read_cont(io)
+            dap_cont = read_cont(io)
+            dap_urr = dap_cont.C2
         end
+
+        l_states = MF32URRLState[]
         for _ in 1:nls_urr
-            read_list(io)
+            list = read_list(io)
+            awri_l = list.C1
+            l_ang  = Int(list.L1)
+            njs    = Int(list.N2)
+            body   = list.data
+            length(body) == 6 * njs || error(
+                "read_mf32 LRU=2: MAT=$mat range $ir L-state expected \
+                 6·NJS=$(6*njs) body words, got $(length(body))")
+            j_states = MF32URRJState[]
+            for j in 1:njs
+                off = 6 * (j - 1)
+                push!(j_states, MF32URRJState(
+                    body[off + 1], body[off + 2], body[off + 3],
+                    body[off + 4], body[off + 5], body[off + 6]))
+            end
+            push!(l_states, MF32URRLState(awri_l, l_ang, j_states))
         end
-        read_list(io)
-        @info "read_mf32: MAT=$mat range $ir is URR [$elr, $ehr] eV — \
-              skipping (URR cov port deferred to next session)."
-        return nothing
+
+        cov_list = read_list(io)
+        mpar_urr = Int(cov_list.L1)
+        npar_urr = Int(cov_list.N2)
+        nw_urr   = Int(cov_list.N1)
+        expected_nw = npar_urr * (npar_urr + 1) ÷ 2
+        nw_urr == expected_nw || error(
+            "read_mf32 LRU=2: MAT=$mat range $ir cov NW=$nw_urr ≠ \
+             NPAR·(NPAR+1)/2 = $expected_nw")
+        cov_body = cov_list.data
+        length(cov_body) == nw_urr || error(
+            "read_mf32 LRU=2: MAT=$mat range $ir cov LIST body length \
+             $(length(cov_body)) ≠ NW=$nw_urr")
+        cov_RP = zeros(Float64, npar_urr, npar_urr)
+        k = 0
+        for i in 1:npar_urr, j in i:npar_urr
+            k += 1
+            cov_RP[i, j] = cov_body[k]
+            cov_RP[j, i] = cov_body[k]
+        end
+
+        return MF32UnresolvedRange(elr, ehr, lrf, naps, spi_urr, ap_urr,
+                                   lssf_urr, isr_urr, dap_urr,
+                                   nls_urr, l_states, mpar_urr, cov_RP)
     end
     if lru != 1
         error("read_mf32: MAT=$mat range $ir LRU=$lru not yet supported.")

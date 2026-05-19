@@ -737,6 +737,279 @@ function _apply_sandwich!(
     return nothing
 end
 
+# =========================================================================
+# URR rescon (LRU=2) — Phase 75
+#
+# Mirrors Fortran rpxunr (errorr.f90:4785-4985) + ggunr1
+# (errorr.f90:6800-6905). For each MF=32 LRU=2 range:
+#   1. Flatten per-J params (D, AJ, GNO, GG, GF, GX) from MF=32.
+#   2. Pull DOFs (mu, nu, lamda) per J-state from MF=2 (URR2Data via
+#      rdumrd2's amur table, errorr.f90:5196-5213).
+#   3. Build a dense URR XS grid via _build_urr_xs_grid (E-step ×1.015
+#      with elr/ehr/ehg breakpoints — errorr.f90:4904-4930).
+#   4. Group-average via _rpxgrp_average to get gsig_base[ch][ig].
+#   5. For each (J, param-within-J) — npar = mpar × ΣNJS total —
+#      perturb that param by 1.01×, recompute group-avg, build
+#      sens = 100·(gsig_p - gsig_0)/orig (forward diff). Trim to
+#      [iest, ieed] per errorr.f90:3093-3108.
+#   6. Convert MF=32 URR cov from relative-relative to absolute by
+#      multiplying by b_i·b_j (errorr.f90:4957-4964: cov(i,j)=a(l3)·bb
+#      with bb=b(l2+i)·b(l2+j)).
+#   7. Reuse _apply_sandwich! for each of the seven RESCON_PAIRS.
+# =========================================================================
+
+# MPAR-to-parameter-offset table (offsets index `params_per_j[k]` which
+# stores [D, AJ, GNO, GG, GF, GX]). Mirrors Fortran rpxunr perturbation
+# offsets at errorr.f90:4865-4897 — b(inow+1) D, b(inow+3) GNO,
+# b(inow+4) GG, then either b(inow+5) GF (lfw=1) or b(inow+6) GX (lfw=0)
+# for mpar=4, and finally b(inow+6) GX for mpar=5.
+function _urr_param_offsets(mpar::Int, lfw::Int)
+    mpar == 1 && return (1,)
+    mpar == 2 && return (1, 3)
+    mpar == 3 && return (1, 3, 4)          # U-238 JENDL
+    mpar == 4 && return lfw == 1 ? (1, 3, 4, 5) : (1, 3, 4, 6)
+    mpar == 5 && return (1, 3, 4, 5, 6)
+    error("URR rescon: unsupported MPAR=$mpar (Fortran rpxunr supports 1..5).")
+end
+
+# Flatten MF=32 LRU=2 L-states into per-J vectors of mutable params.
+# Returns (params, l_per_j, awri_per_j). params[k] is a 6-vector
+# (D, AJ, GNO, GG, GF, GX) that can be mutated during the perturbation
+# loop.
+function _flatten_urr_params(urr::MF32UnresolvedRange)
+    params = Vector{Float64}[]
+    l_per_j = Int[]
+    awri_per_j = Float64[]
+    for ls in urr.l_states
+        for js in ls.j_states
+            push!(params, [js.D, js.AJ, js.GNO, js.GG, js.GF, js.GX])
+            push!(l_per_j, ls.l)
+            push!(awri_per_j, ls.awri)
+        end
+    end
+    return params, l_per_j, awri_per_j
+end
+
+# DOFs (mu, nu, lamda) per J-state in (L, J) order — mirrors Fortran
+# rdumrd2's `amur(1:3, nlru2) = (AMUN, AMUF, AMUX)` at errorr.f90:5206-5208.
+function _urr_dofs_from_mf2(rng::ResonanceRange)
+    p = rng.parameters
+    if p isa URR2Data
+        return [(round(Int, s.AMUN), round(Int, s.AMUF), round(Int, s.AMUX))
+                for s in p.sequences]
+    elseif p isa URRData
+        return [(round(Int, s.AMUN), s.MUF, 0) for s in p.sequences]
+    else
+        error("_urr_dofs_from_mf2: unsupported URR formalism \
+              $(typeof(p)) (need URR2Data or URRData).")
+    end
+end
+
+# Evaluate URR XS at one E. Mirrors Fortran ggunr1 (errorr.f90:6800-6905).
+# Returns (sig_tot, sig_el, sig_fis, sig_cap) in barns.
+function _ggunr1(E::Float64,
+                 params::Vector{Vector{Float64}},
+                 l_per_j::Vector{Int},
+                 awri_per_j::Vector{Float64},
+                 dofs::Vector{NTuple{3,Int}},
+                 spi::Float64, ap::Float64)
+    Cp = PhysicsConstants
+    cwaven = sqrt(2 * Cp.amassn * Cp.amu * Cp.ev) * 1e-12 / Cp.hbar
+    sig_e = 0.0; sig_f = 0.0; sig_c = 0.0; spot = 0.0
+    prev_l = -1
+    @inbounds for k in eachindex(params)
+        p = params[k]
+        D, AJ, GNO, GG, GF, GX = p[1], p[2], p[3], p[4], p[5], p[6]
+        ll  = l_per_j[k]
+        awri = awri_per_j[k]
+        rat  = awri / (awri + 1)
+        aw   = awri * Cp.amassn
+        ra   = _RC1 * aw^_THIRD_URR + _RC2
+        cnst = (2 * Cp.pi^2) / (cwaven * rat)^2
+        mu, nu, lamda = dofs[k]
+        gj = (2 * AJ + 1) / (4 * spi + 2)
+        e2v = sqrt(E)
+        kwv = rat * e2v * cwaven
+        rho = kwv * ra
+        rhoc = kwv * ap
+        vl, ps = _unfac(ll, rho, rhoc, Float64(mu))
+        vl *= e2v
+        if ll != prev_l
+            spot += 4 * Cp.pi * (2 * ll + 1) * (sin(ps) / kwv)^2
+            prev_l = ll
+        end
+        gnx = GNO * vl
+        diff = GX
+        den = E * D
+        temp = cnst * gj * gnx / den
+        terg = temp * GG
+        ters = temp * gnx
+        terf = temp * GF
+        gs  = _gnrl(gnx, GF, GG, mu, nu, lamda, diff, 1)
+        gc  = _gnrl(gnx, GF, GG, mu, nu, lamda, diff, 2)
+        gff = _gnrl(gnx, GF, GG, mu, nu, lamda, diff, 3)
+        gc  *= terg
+        gff *= terf
+        gs  *= ters
+        # Interference correction (Fortran ggunr1 lines 6887-6890).
+        add = cnst * gj * 2 * gnx * sin(ps)^2 / den
+        gs -= add
+        sig_e += gs
+        sig_f += gff
+        sig_c += gc
+    end
+    sig_e += spot
+    return (sig_e + sig_f + sig_c, sig_e, sig_f, sig_c)
+end
+
+# Dense URR XS grid for one MF=32 URR range. Mirrors the E-stepping in
+# Fortran rpxunr (errorr.f90:4904-4930): start at elg, step ×1.015 with
+# forced breakpoints at elr / ehr / ehg. Outside [elr, ehr], XS = 0.
+function _build_urr_xs_grid(urr::MF32UnresolvedRange,
+                            params::Vector{Vector{Float64}},
+                            l_per_j::Vector{Int},
+                            awri_per_j::Vector{Float64},
+                            dofs::Vector{NTuple{3,Int}},
+                            elg::Float64, ehg::Float64)
+    elr = urr.elr; ehr = urr.ehr
+    spi = urr.spi; ap = urr.ap
+    e_pts = Float64[]
+    σtot = Float64[]; σel = Float64[]; σfis = Float64[]; σcap = Float64[]
+    e1 = elg
+    while true
+        e1 > ehg && (e1 = ehg)
+        if elr <= e1 <= ehr
+            (st, se, sf, sc) = _ggunr1(e1, params, l_per_j, awri_per_j,
+                                        dofs, spi, ap)
+        else
+            st = se = sf = sc = 0.0
+        end
+        push!(e_pts, e1); push!(σtot, st); push!(σel, se)
+        push!(σfis, sf); push!(σcap, sc)
+        e1 >= ehg && break
+        e1_new = e1 * 1.015
+        ebc = e1_new / 1.015
+        ebc < elr && e1_new > elr && (e1_new = elr)
+        ebc < ehr && e1_new > ehr && (e1_new = ehr)
+        e1 = e1_new
+    end
+    return e_pts, σtot, σel, σfis, σcap
+end
+
+# Sensitivity build + sandwich for one MF=32 URR range. Returns the
+# number of (mt, mt2) pair·subsection contributions applied.
+function _apply_rescon_urr_range!(
+    cov_matrices::Dict{Tuple{Int,Int},Matrix{Float64}},
+    urr::MF32UnresolvedRange,
+    mf2_urr_range::ResonanceRange,
+    egn::AbstractVector{<:Real},
+    group_xs::Dict{Int,Vector{Float64}},
+    weight_fn,
+)
+    ngn = length(egn) - 1
+    iest, ieed = _resonance_group_window(urr.elr, urr.ehr, egn)
+    (iest == 0 || ieed == 0 || iest > ieed) && return 0
+    elg = Float64(egn[iest])
+    ehg = Float64(egn[ieed + 1])
+
+    params, l_per_j, awri_per_j = _flatten_urr_params(urr)
+    nJ = length(params)
+    mpar = urr.mpar
+    npar = mpar * nJ
+    npar == size(urr.cov_RP, 1) || error(
+        "rescon URR: NPAR=$npar (= MPAR·nJ = $mpar·$nJ) ≠ cov_RP size \
+         $(size(urr.cov_RP)).")
+
+    dofs = _urr_dofs_from_mf2(mf2_urr_range)
+    length(dofs) == nJ || error(
+        "rescon URR: MF=32 has $nJ J-states but MF=2 URR has \
+         $(length(dofs)) — (L, J) walk mismatch.")
+
+    offsets = _urr_param_offsets(mpar, Int(mf2_urr_range.LFW))
+
+    # Base XS over the dense URR grid.
+    e_pts, σt0, σe0, σf0, σc0 = _build_urr_xs_grid(
+        urr, params, l_per_j, awri_per_j, dofs, elg, ehg)
+    g_tot0 = _rpxgrp_average(e_pts, σt0, egn, weight_fn)
+    g_el0  = _rpxgrp_average(e_pts, σe0, egn, weight_fn)
+    g_fis0 = _rpxgrp_average(e_pts, σf0, egn, weight_fn)
+    g_cap0 = _rpxgrp_average(e_pts, σc0, egn, weight_fn)
+
+    sens = zeros(Float64, 4, npar, ngn)
+    sigma_orig = zeros(Float64, npar)
+
+    # Walk (J, param-in-J) in J-major order — matches cov_RP layout per
+    # Fortran rpxunr (each J advances by mpar params before moving on).
+    p_idx = 0
+    for k in 1:nJ
+        for q in 1:mpar
+            p_idx += 1
+            off = offsets[q]
+            orig = params[k][off]
+            sigma_orig[p_idx] = orig
+            # Skip identically-zero params (e.g. GF=0 for U-238
+            # sub-threshold fission) — Fortran skips via the
+            # `if (b(l0+1+i).ne.zero)` guard at errorr.f90:4942.
+            orig == 0.0 && continue
+
+            params[k][off] = orig * 1.01
+            _, σt, σe, σf, σc = _build_urr_xs_grid(
+                urr, params, l_per_j, awri_per_j, dofs, elg, ehg)
+            g_tot = _rpxgrp_average(e_pts, σt, egn, weight_fn)
+            g_el  = _rpxgrp_average(e_pts, σe, egn, weight_fn)
+            g_fis = _rpxgrp_average(e_pts, σf, egn, weight_fn)
+            g_cap = _rpxgrp_average(e_pts, σc, egn, weight_fn)
+            params[k][off] = orig
+
+            # sens = (Δσ̄)/(0.01·orig) = forward-diff dσ̄/dp. Match
+            # Fortran rpxunr's `s = 100*s/b(l0+1+i)` at errorr.f90:4944
+            # (the `100·s/orig` form is algebraically identical to
+            # `s/(0.01·orig)`). The 1e-10 guard at line 4945 zeroes
+            # sub-threshold sensitivity components.
+            inv = 100.0 / orig
+            @inbounds for ig in iest:ieed
+                s1 = (g_tot[ig] - g_tot0[ig]) * inv
+                s2 = (g_el[ig]  - g_el0[ig])  * inv
+                s3 = (g_fis[ig] - g_fis0[ig]) * inv
+                s4 = (g_cap[ig] - g_cap0[ig]) * inv
+                abs(s1) >= 1e-10 && (sens[1, p_idx, ig] = s1)
+                abs(s2) >= 1e-10 && (sens[2, p_idx, ig] = s2)
+                abs(s3) >= 1e-10 && (sens[3, p_idx, ig] = s3)
+                abs(s4) >= 1e-10 && (sens[4, p_idx, ig] = s4)
+            end
+        end
+    end
+
+    # Convert MF=32 URR cov from relative-relative (cov_REL[i,j]) to
+    # absolute (cov_ABS[i,j] = cov_REL · b_i · b_j) — Fortran rpxunr
+    # lines 4957-4964 (`bb=b(l2+i)*b(l2+j); cov(i,j)=a(l3)*bb`).
+    cov_abs = Matrix{Float64}(undef, npar, npar)
+    @inbounds for i in 1:npar, j in 1:npar
+        cov_abs[i, j] = urr.cov_RP[i, j] * sigma_orig[i] * sigma_orig[j]
+    end
+
+    # Sandwich for each RESCON_PAIR. For the σ̄·σ̄ relative-cov
+    # denominator, prefer the GENDF-averaged σ from group_xs; fall back
+    # to the URR-local σ̄ when group_xs lacks the channel-MT.
+    σ̄_local = (g_tot0, g_el0, g_fis0, g_cap0)
+    ch_to_mt = (1, 2, 18, 102)
+    σ̄_by_ch = ntuple(ch -> begin
+        mt_for_ch = ch_to_mt[ch]
+        haskey(group_xs, mt_for_ch) ? group_xs[mt_for_ch] : σ̄_local[ch]
+    end, 4)
+
+    n_applied = 0
+    for (mt, mt2) in RESCON_PAIRS
+        (ch_row, ch_col) = _rescon_channel_pair(mt, mt2)
+        σ̄_row = σ̄_by_ch[ch_row]
+        σ̄_col = σ̄_by_ch[ch_col]
+        _apply_sandwich!(cov_matrices, mt, mt2,
+                         sens, cov_abs, σ̄_row, σ̄_col, ngn)
+        n_applied += 1
+    end
+    return n_applied
+end
+
 # -------------------------------------------------------------------------
 # Top-level: apply_rescon!
 # -------------------------------------------------------------------------
@@ -849,6 +1122,29 @@ function apply_rescon!(
                     n_pairs_applied += 1
                 end
             end
+        end
+
+        # URR (LRU=2) rescon — Phase 75 port. Each URR range maps to one
+        # MF=2 LRU=2 range (either LRF=1 → URRData or LRF=2 → URR2Data).
+        # The MF=32 LRR/LRF labelling differs from MF=2 (MF=32 LRU=2
+        # always reports LRF=1 in its range head — see ENDF-6 §32.2),
+        # so match purely by [EL, EH].
+        for urr in iso.unresolved_ranges
+            mf2_range_idx = findfirst(r ->
+                Int(r.LRU) == 2 &&
+                isapprox(Float64(r.EL), urr.elr; atol=1.0) &&
+                isapprox(Float64(r.EH), urr.ehr; atol=1.0),
+                mf2_iso.ranges)
+            if mf2_range_idx === nothing
+                @warn "apply_rescon!: MF=32 URR range \
+                      [$(urr.elr), $(urr.ehr)] has no matching MF=2 \
+                      URR range — skipping."
+                continue
+            end
+            mf2_urr_range = mf2_iso.ranges[mf2_range_idx]
+            n_applied = _apply_rescon_urr_range!(
+                cov_matrices, urr, mf2_urr_range, egn, group_xs, weight_fn)
+            n_pairs_applied += n_applied
         end
     end
 

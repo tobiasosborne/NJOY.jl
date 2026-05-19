@@ -184,10 +184,40 @@ the work.
   covout's sandwich-loop accumulation with the storage transpose
   derived from cov symmetry. Phase 72c canary preserved; T22
   BIT_IDENTICAL 4636/4636 preserved. 223 unit assertions PASS, zero
-  regressions. Worklog: `worklog/phase74_mt1_nc_lower_ref.md`. Residual
-  −6 lines split across MT=102 (−2, row-14 rescon edge), MT=2 (−2,
-  row 13-15 span — same rescon edge), and a couple of single-row span
-  edge cases — all rolled into Phase 75 below.
+  regressions. Worklog: `worklog/phase74_mt1_nc_lower_ref.md`.
+
+- **Status (2026-05-19, post Phase 75)**: **T15 tape26 line-count
+  EXACT MATCH (jul 5958 = ref 5958, gap −6 → 0).** URR (LRU=2) rescon
+  port. `read_mf32` now captures `MF32UnresolvedRange` (L-states with
+  per-J (D, AJ, GNO, GG, GF, GX) bodies + relative cov matrix). New
+  `_apply_rescon_urr_range!` in rescon.jl ports Fortran ggunr1
+  (errorr.f90:6800-6905) + rpxunr (errorr.f90:4785-4985): forward-diff
+  perturbation 1.01× per (J, param), ×1.015 E-step grid with
+  elr/ehr/ehg breakpoints, cov_rel → cov_abs via b_i·b_j, sandwich
+  through existing `_apply_sandwich!`. Sandwich contributions logged
+  70 → 77 (one URR range × 7 RESCON_PAIRS). All MF=33 sub-section row
+  layouts match ref byte-for-byte at the LIST-header level. Phase 72c
+  MT=102 row-1 canary preserved (10/10 nonzero cols). Phase 73/74 NC
+  expansion canaries preserved. T22 BIT_IDENTICAL 4636/4636 preserved.
+  **306/306 unit assertions PASS** across 6 errorr/MF32 test files,
+  zero regressions. Worklog: `worklog/phase75_urr_rescon.md`.
+
+  The Phase 74 worklog framed the residual −6 lines as a
+  `_resonance_group_window` boundary bug. That diagnosis was wrong —
+  `_resonance_group_window` matches errorr.f90:3093-3108 exactly. The
+  actual gap was URR rescon being unported (deferred since Phase 72).
+  Per-row diff of (1,1)/(2,2)/(2,102)/(102,102) showed cols 12-15 of
+  rows 13-15 zero in Julia where ref had nonzero values — exactly the
+  cells the URR range [10 keV, 150 keV] / LANL groups 13..15 contributes
+  to. Lesson: trust the Fortran source over the worklog when they
+  disagree (CLAUDE.md Rule 2 fired).
+
+  Residual sub-line-count work: MT=2/mt2=2 rows 10-12 sub-ULP FP
+  precision (~5e-8 relative on MT=102 C[1,1]) plausibly traces to
+  Julia's tanh-stretched perturbation grid vs Fortran's adaptive rpendf
+  eskip mesh + a 6-digit wt6b constant in weight_functions.jl
+  (3e-6 thermal effect). Deferred P3 — sub-line-count, doesn't affect
+  tape26 line totals.
 
 - **Status (2026-05-16, post Phase 73)**: **T15 tape26 line-count
   gap closed from +150 to −68 (jul 5890 vs ref 5958).** Two stacked
