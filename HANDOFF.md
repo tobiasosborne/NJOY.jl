@@ -493,20 +493,37 @@ the work.
   that energy (same recipe used to diagnose T34). Patch Julia to
   match the exact intermediate-rounding order.
 
-### P2 — T04 tape25 MF31 LB=2 union-grid collapse (11 residual diffs)
+### P3 — T04 tape25 12-line gap (sub-precision FP, same class as T34)
 
 - **Retired bead**: none.
-- **Scope**: T04 tape25 is the MF=31 (nubar cov) output from the
-  second errorr call. 11 lines differ from reference (currently 107
-  match out of 119). Issue noted in `worklog/T03_phase7_T04_handoff.md`:
-  the LB=2 block reconstruction uses direct group expansion while
-  Fortran `covcal` expects a union grid (all block breakpoints +
-  group boundaries) followed by collapse.
-- **Where**: `src/orchestration/modules/errorr.jl`
-  `_errorr_second_call` (the LB=2 branch inside the block-read loop).
-- **Acceptance**: T04 tape25 DIFFS 118/119 or better.
-- **Notes**: Orthogonal to Phase-48 work; touches MF=31 (nubar) not
-  MF=33. Port the Fortran union-grid path.
+- **Status (2026-05-23, Phase 76c diagnosis)**: HANDOFF's previous
+  "MF31 LB=2 union-grid collapse" diagnosis is **wrong** — verified
+  by tracing `_errorr_second_call`. The 12 differing lines (107/119
+  match at no-tolerance; 119/119 pass at 1e-7) are MF=3/MT=452 nubar
+  values, not MF=33 covariance.
+
+  The ENDF U-235 t511 MF=1/MT=452 evaluation has ν(E) = constant
+  2.4367 across [1e-5, 25000] eV (3 breakpoints with identical
+  value, INT=2). Yet Fortran's GENDF tape24 emits ν=2.436701 for
+  LANL group 10 (1235-3350 eV) while ν=2.436700 for the other groups
+  — a 1-unit-in-7th-digit shift from sigfig(7) rounding at the FP
+  boundary. Julia's groupr emits 2.436700 for all groups (rounds
+  the same way as the integer 2.4367). The user-grid nubar collapse
+  then propagates this 1e-6 fractional difference to user groups 3-7
+  of tape25.
+- **Where**: `src/orchestration/modules/groupr.jl`
+  `_groupr_nubar_records` — uses σ_f·flux-weighted integration with
+  1% sub-stepping. Already matches Fortran's groupr panel + getwtf
+  to first order. The remaining ULP shift comes from FP accumulation
+  order in the inner loop — same class as T34 capture `csrmat`
+  Frobenius-Schur accumulation (Phase 14 gdb-confirmed irreducible).
+- **Acceptance**: T04 tape25 119/119 at no-tolerance would require
+  matching Fortran's exact `panel` integration order in `_groupr_
+  nubar_records`. Needs a gdb diagnostic dump of Fortran's per-bracket
+  integrand values vs Julia's at LANL group 10.
+- **Notes**: Tape25 already passes at 1e-7 (the project's first-round
+  acceptance bar per CLAUDE.md Rule 1). Demoted from P2 to P3.
+  Orthogonal to NC-block / LB=5 / rescon work.
 
 ### P2 — broadr U-238 JENDL performance (TIMEOUT)
 
