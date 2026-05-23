@@ -805,6 +805,20 @@ function _urr_dofs_from_mf2(rng::ResonanceRange)
     end
 end
 
+# (L, J) tuple per sequence in MF=2 URR walk order. Used to verify
+# that MF=2 sequences[] and MF=32 L-states/J-states list the same
+# (L, J) pairs in the same order — the dofs/sandwich indexing assumes
+# this 1:1 alignment.
+function _urr_lj_pairs_from_mf2(rng::ResonanceRange)
+    p = rng.parameters
+    if p isa URR2Data || p isa URRData
+        return [(s.l, Float64(s.J)) for s in p.sequences]
+    else
+        error("_urr_lj_pairs_from_mf2: unsupported URR formalism \
+              $(typeof(p)).")
+    end
+end
+
 # Evaluate URR XS at one E. Mirrors Fortran ggunr1 (errorr.f90:6800-6905).
 # Returns (sig_tot, sig_el, sig_fis, sig_cap) in barns.
 function _ggunr1(E::Float64,
@@ -923,7 +937,28 @@ function _apply_rescon_urr_range!(
     dofs = _urr_dofs_from_mf2(mf2_urr_range)
     length(dofs) == nJ || error(
         "rescon URR: MF=32 has $nJ J-states but MF=2 URR has \
-         $(length(dofs)) — (L, J) walk mismatch.")
+         $(length(dofs)) — (L, J) walk count mismatch.")
+
+    # Defensive (L, J) tuple alignment check — Phase 75 follow-up.
+    # The dofs and sens arrays index J-states in MF=32's L-major walk
+    # order; the sandwich relies on MF=2's `sequences[k]` referring to
+    # the same (L, J) as MF=32's k-th flattened J-state. ENDF-6 §32.2
+    # does not formally guarantee this — verified empirically on
+    # U-238 JENDL. Error loudly if a future tape violates the assumption
+    # so we don't silently apply mismatched DOFs.
+    mf2_lj = _urr_lj_pairs_from_mf2(mf2_urr_range)
+    for k in 1:nJ
+        mf32_l = l_per_j[k]
+        mf32_j = params[k][2]
+        (mf2_l, mf2_j) = mf2_lj[k]
+        if mf32_l != mf2_l || !isapprox(mf32_j, mf2_j; atol=1e-4)
+            error("rescon URR: (L, J) mismatch at sequence $k — \
+                   MF=32 has (L=$mf32_l, J=$mf32_j) but MF=2 has \
+                   (L=$mf2_l, J=$mf2_j). The 1:1 walk assumption is \
+                   violated; rescon would apply wrong DOFs/sens. \
+                   Need a (L, J) lookup-based pairing instead.")
+        end
+    end
 
     offsets = _urr_param_offsets(mpar, Int(mf2_urr_range.LFW))
 
