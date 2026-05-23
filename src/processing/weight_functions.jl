@@ -120,21 +120,24 @@ end
     thermal_fission_fusion(E; kT=0.054)
 
 Combined thermal-1/E-fission+fusion weight (iwt=6).
-Matches NJOY getwtf logic for iwtt=6.
+Matches NJOY egtwtf logic for iwtt=6 (errorr.f90:10135-10156).
 """
 function thermal_fission_fusion(E::Real; kT::Real=0.054)
     Ef = Float64(E)
     kTf = Float64(kT)
     bb = 2.0 * kTf
-    wt6b = 1.578551e-3
+    # Ref: errorr.f90:10063 — wt6b = 1.57855e-3 (5 sigfigs); NOT 1.578551e-3.
+    wt6b = 1.57855e-3
     wt6c = 2.1e6
     wt6e = 1.4e6
     wt6f = 2.5e4
     wt6g = 1.407e7
 
     if Ef <= bb
-        cc = wt6b * exp(2.0) / bb^2
-        return cc * Ef * exp(-Ef / kTf)
+        # Ref: errorr.f90:10139-10142 — for iwt=6, cc=1 (unconditional).
+        # The cc = wt6b·exp(2)/bb^2 normalization only fires for iwt=7
+        # (gated by `if (iwtt.gt.6)` at line 10140).
+        return Ef * exp(-Ef / kTf)
     elseif Ef <= wt6c
         return wt6b / Ef
     else

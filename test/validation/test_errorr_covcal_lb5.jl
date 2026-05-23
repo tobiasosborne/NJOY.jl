@@ -242,5 +242,6 @@ end
     # iwt=6 (thermal + 1/E + fission + fusion), not iwt=2 (flat) as
     # Phase 72b assumed. With the correct weight, C[1,1] matches the
     # reference 2.658914e-4 within 1e-7.
+    @info "MT=102 C[1,1] canary: jul=$(jul_mt102[1, 1]) ref=2.658914e-4 diff=$(jul_mt102[1, 1] - 2.658914e-4)"
     @test abs(jul_mt102[1, 1] - 2.658914e-4) < 1e-7
 end
