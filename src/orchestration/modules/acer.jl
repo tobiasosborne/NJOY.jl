@@ -159,11 +159,24 @@ function acer_module(tapes::TapeManager, params::AcerParams)
         end
         if !isempty(ce_subs)
             elastic_col = findfirst(==(2), mt_sorted)
-            total_col   = findfirst(==(1), mt_sorted)
             esz_elastic = elastic_col === nothing ? zeros(n_e) :
                             xs_matrix[:, elastic_col]
-            esz_total   = total_col === nothing ? copy(esz_elastic) :
-                            xs_matrix[:, total_col]
+            # The ACE ESZ total column that acecpe reads is NOT the raw MT=1
+            # XS — Fortran builds it by accumulating the *sigfig-7-rounded*
+            # reaction cross sections (acefc.f90:5497-5505: MT=2 always, MT≥5
+            # added), then sigfig-9 (acefc.f90:6304). For the MT=2-only
+            # charged-particle case this is sigfig9(sigfig7(elastic)). The
+            # post-loop subtracts the sigfig-7 elastic and adds signow
+            # (acefc.f90:6659-6667); if `esz_total` were the raw elastic the
+            # residual (raw − sigfig7) corrupts the total at the 9th sigfig
+            # (T50 line-30 total 3.55810398 vs 3.5581040). Build the column
+            # the Fortran way.
+            esz_total = zeros(n_e)
+            for (col, mt) in enumerate(mt_sorted)
+                (mt == 2 || mt >= 5) || continue
+                @views esz_total .+= round_sigfig.(xs_matrix[:, col], 7, 0)
+            end
+            esz_total = round_sigfig.(esz_total, 9, 0)
             izai = mf1.nsub ÷ 10  # nsub=20040 → izai=2004 (alpha)
             ang, new_total, new_elastic, new_heat = acer_charged_elastic(
                 ce_subs, master_e, esz_total, esz_elastic,

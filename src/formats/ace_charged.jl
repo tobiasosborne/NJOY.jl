@@ -240,10 +240,21 @@ function acer_charged_elastic(subs::Vector{MF6Law5Subsection},
     target_z = za   ÷ 1000
 
     # 1. Per-incident-E processing.
+    # The ACE ESZ elastic column is sigfig-7-rounded BEFORE it is read by
+    # acecpe — Fortran acefc.f90:5497 (`s=sigfig(s,7,0)`) then 5499
+    # (`xss(ie+j)=s`). acecpe's xelas interpolation (6549-6553) and the
+    # post-loop `signi=xss(esz+3*nes+j)` (6659) both read THIS rounded
+    # column, not the raw PENDF elastic. Build it once, here.
+    # (Without this, xelas at incident energies that fall on/near a grid
+    #  point whose raw elastic rounds differently at the 7th sigfig shifts
+    #  signi=pmu*xelas, propagating into cumm and the interpolated signow —
+    #  this was the T50 ESZ 7th-sigfig divergence at E=4.0e6 and 1.29e7.)
+    esz_elastic_sig7 = [round_sigfig(x, 7, 0) for x in esz_elastic_xs]
+
     results = AceCpeIncident[]
     for sub in subs
-        # Linear-interp xelas from ESZ at sub.e (acefc.f90:6549-6553).
-        xelas = _esz_lin_interp(esz_e, esz_elastic_xs, sub.e)
+        # Linear-interp xelas from the sigfig-7 ESZ elastic (acefc.f90:6549-6553).
+        xelas = _esz_lin_interp(esz_e, esz_elastic_sig7, sub.e)
         push!(results, acecpe_one_incident(sub, xelas, awr, awi,
                                               izai_z, target_z))
     end
@@ -269,7 +280,8 @@ function acer_charged_elastic(subs::Vector{MF6Law5Subsection},
     nes = length(esz_e)
     for j in 1:nes
         e = esz_e[j]
-        signi_orig = esz_elastic_xs[j]
+        # signi here is the sigfig-7 ESZ elastic column (acefc.f90:6659).
+        signi_orig = esz_elastic_sig7[j]
         signow = _log_log_interp(xxs, yys, e)
         signow = round_sigfig(signow, 7, 0)
         new_elastic[j] = signow
@@ -300,23 +312,32 @@ end
     ys[j] * f + ys[j+1] * (1 - f)
 end
 
-"""Log-log interpolation matching Fortran terp1(...,...,5). For
-non-positive y the routine falls back to lin-lin."""
+"""Log-log interpolation reproducing Fortran terp1(x1,y1,x2,y2,x,y,5)
+exactly (endf.f90:1627-1632), driven by the same bracket-search the
+acecpe post-loop uses (acefc.f90:6653-6657):
+
+    jj=1; do while (xxs(jj+1) < e and jj < ne); jj=jj+1; enddo
+    terp1(xxs(jj),yys(jj),xxs(jj+1),yys(jj+1),e,signow,5)
+
+terp1's int=5 form is `y = y1*exp(log(x/x1)*log(y2/y1)/log(x2/x1))`, with
+the early exits `x2==x1 → y1`, `y2==y1 → y1`, `x==x1 → y1`, `y1==0 → y1`.
+We must match the ratio-then-log order (`log(x/x1)`, not `log(x)-log(x1)`)
+for bit-identical FP — this is the form that produces ENDF a11 sigfig
+boundaries identical to NJOY."""
 @inline function _log_log_interp(xs::Vector{Float64}, ys::Vector{Float64}, x::Float64)
     n = length(xs)
-    if x <= xs[1]
-        return ys[1]
-    elseif x >= xs[end]
-        return ys[end]
+    # Bracket search mirroring acefc.f90:6653-6657 (1-based jj over xxs).
+    jj = 1
+    while jj < n && xs[jj+1] < x
+        jj += 1
     end
-    j = searchsortedlast(xs, x)
-    if xs[j] <= 0 || xs[j+1] <= 0 || ys[j] <= 0 || ys[j+1] <= 0
-        f = (x - xs[j]) / (xs[j+1] - xs[j])
-        return ys[j] + f * (ys[j+1] - ys[j])
-    end
-    lx = log(x); lxj = log(xs[j]); lxj1 = log(xs[j+1])
-    lyj = log(ys[j]); lyj1 = log(ys[j+1])
-    exp(lyj + (lx - lxj) / (lxj1 - lxj) * (lyj1 - lyj))
+    x1 = xs[jj];   y1 = ys[jj]
+    x2 = xs[jj+1]; y2 = ys[jj+1]
+    # terp1 int=5 (endf.f90:1604-1632).
+    x2 == x1 && return y1
+    (y2 == y1 || x == x1) && return y1
+    y1 == 0.0 && return y1
+    y1 * exp(log(x / x1) * log(y2 / y1) / log(x2 / x1))
 end
 
 """Linearly interpolate the heating contribution `eht` on the (x=E, y=eht)
