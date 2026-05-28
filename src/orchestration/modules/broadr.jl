@@ -89,11 +89,16 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
         # Broaden partials via convergence stack
         b_e, b_xs = broadn_grid(cur_energies, cur_xs, alpha, tol, errmax, errint, thnmax)
 
-        # Broaden total separately on the same grid
+        # Broaden total separately on the same grid.
+        # Precompute the velocity array ONCE — cur_energies is constant across
+        # the loop, so rebuilding sqrt.(alpha .* cur_energies) per call made the
+        # kernel O(nseg²). Broadcast form is bit-identical to the old per-call
+        # map(e->sqrt(alpha*e), cur_energies). See sigma1.jl / broadr.jl:79.
+        vel_cur = sqrt.(alpha .* cur_energies)
         b_total = Vector{Float64}(undef, length(b_e))
         for i in eachindex(b_e)
             if b_e[i] <= thnmax
-                b_total[i] = sigma1_at(b_e[i], cur_energies, cur_total, alpha)
+                b_total[i] = sigma1_at(b_e[i], vel_cur, cur_total, alpha)
             else
                 idx = searchsortedfirst(cur_energies, b_e[i])
                 if idx <= 1

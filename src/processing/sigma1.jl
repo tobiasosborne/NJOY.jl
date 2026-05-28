@@ -134,16 +134,19 @@ Compute s1, s2 integral contributions from one interval (NJOY's hunky).
 end
 
 """
-    sigma1_at(E, seg_e, seg_xs, alpha) -> Float64
+    sigma1_at(E, vel, seg_xs, alpha) -> Float64
 Evaluate Doppler-broadened cross section at energy E using SIGMA1 kernel.
-`seg_e`: sorted segment energies [eV], `seg_xs`: XS values, `alpha`=AWR/(bk*T).
+`vel`: precomputed velocity array `sqrt.(alpha .* seg_e)` for the sorted segment
+energies [eV] (threaded in once instead of being rebuilt on every call — this is
+the O(nseg²) → O(nseg) fix). `seg_xs`: XS values, `alpha`=AWR/(bk*T) (still used
+for the eval point `y = sqrt(alpha*E)`).
 Two-pass structure: segments below E, then above E, with 1/v and constant
 extrapolation at boundaries.
 """
-function sigma1_at(E, seg_e::AbstractVector, seg_xs::AbstractVector, alpha)
-    nseg = length(seg_e); atop = 4.0
+function sigma1_at(E, vel::AbstractVector, seg_xs::AbstractVector, alpha)
+    nseg = length(vel); atop = 4.0
     y = sqrt(alpha*E); oy_neg = -1.0/y; yy = y*y
-    v = map(e -> sqrt(alpha*e), seg_e)
+    v = vel
     k = clamp(searchsortedlast(v, y), 1, nseg - 1)
     sbt = 0.0
 

@@ -103,7 +103,7 @@ function broadn_grid(energies::AbstractVector{<:Real},
 
     function eval_broadened!(out::Vector{Float64}, E_ev::Float64)
         for i in 1:nreac
-            out[i] = sigma1_at(E_ev, seg_e, @view(seg_xs[:, i]), alpha)
+            out[i] = sigma1_at(E_ev, vel, @view(seg_xs[:, i]), alpha)
         end
     end
 
@@ -265,7 +265,7 @@ function broadn_grid(energies::AbstractVector{<:Real},
                 if !converged
                     em, km, converged = _broadn_test_midpoint(
                         is, nreac, stack_es, stack_ss, stack_ks, stack_js,
-                        sn_buf, seg_e, seg_xs, alpha, errthn, errmax_tol,
+                        sn_buf, vel, seg_xs, alpha, errthn, errmax_tol,
                         errint_tol, j, out_e)
                 end
 
@@ -374,7 +374,7 @@ Matches broadr.f90 lines 1395-1436.
 """
 function _broadn_test_midpoint(is, nreac,
         stack_es, stack_ss, stack_ks, stack_js,
-        sn_buf, seg_e, seg_xs, alpha,
+        sn_buf, vel, seg_xs, alpha,
         errthn, errmax_tol, errint_tol,
         j, out_e)
 
@@ -414,7 +414,7 @@ function _broadn_test_midpoint(is, nreac,
 
     # ---- Evaluate broadened XS at midpoint (line 1413) ----
     for i in 1:nreac
-        sn_buf[i] = sigma1_at(em, seg_e, @view(seg_xs[:, i]), alpha)
+        sn_buf[i] = sigma1_at(em, vel, @view(seg_xs[:, i]), alpha)
     end
 
     # ---- Linear interpolation fraction (lines 1414-1417) ----

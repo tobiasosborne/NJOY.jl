@@ -2224,8 +2224,9 @@ using LinearAlgebra
         T = 300.0
         alpha = awr / (NJOY.PhysicsConstants.bk * T)
 
+        vel = sqrt.(alpha .* seg_e)
         for E in [0.1, 1.0, 10.0, 50.0]
-            val = sigma1_at(E, seg_e, seg_xs, alpha)
+            val = sigma1_at(E, vel, seg_xs, alpha)
             @test isapprox(val, 5.0, rtol=0.01)
         end
     end
