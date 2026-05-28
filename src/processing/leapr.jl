@@ -242,10 +242,11 @@ function generate_sab(dos::PhononDOS, T::Float64;
         tlast[1:npn] .= tnow[1:npn]; npl = npn
     end
     # SCT fallback for unconverged α — Ref: leapr.f90:565-579 (maxt monotone)
-    # + 605-612 (SCT formula). Note: Fortran's SCT replacement is gated by
-    # `iprt = mod(j-1,naint)+1 == 1` inside the moment-check loop; this Julia
-    # version replaces all (k, j>=maxt[k]) unconditionally. Aligning with
-    # Fortran's naint gating is Phase B follow-up.
+    # + 605-612 (SCT formula). The Fortran `iprt = mod(j-1,naint)+1 == 1`
+    # gate is a NON-issue: `naint` is hardcoded to 1 (leapr.f90:292-294,
+    # never read from input), so iprt==1 for every α and the gate is always
+    # open. This unconditional replacement therefore already matches Fortran;
+    # the residual T80 gap is phonon-loop FP accumulation order (see [[sc5]]).
     for i in 2:nb; maxt[i] > maxt[i-1] && (maxt[i] = maxt[i-1]); end
     pi_v = PhysicsConstants.pi
     for k in 1:nb, j in 1:na

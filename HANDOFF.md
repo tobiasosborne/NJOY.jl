@@ -627,14 +627,14 @@ the work.
   (91406/91453 lines). T22 BIT_IDENTICAL preserved. Worklog:
   `worklog/T80_leapr_contin_phase_a_lat_sc.md`. Three follow-up items
   to close the residual 47 lines:
-  1. **SCT-replacement `naint` gating.** Fortran `contin`
-     (leapr.f90:584-642) wraps `ssm(k,j)=ssct` (line 611) inside
-     `iprt = mod(j-1, naint)+1 == 1` — only every naint-th α (plus
-     `j=nalpha`) gets the SCT replacement; other α's >= maxt[k] keep
-     the unconverged-but-bounded phonon-sum value. Julia replaces all
-     (k, j>=maxt[k]) unconditionally. `naint` is a card-3 parser field
-     in `LeaprParams` (already parsed; just needs threading through to
-     `generate_sab` as a kwarg).
+  1. **SCT-replacement `naint` gating — NON-ISSUE (verified 2026-05-28).**
+     The earlier claim here was WRONG. `naint` is hardcoded to 1 in Fortran
+     (leapr.f90:292-294: `naint=0; if(naint.eq.0) naint=1`) and is **never
+     read from input**. So `iprt = mod(j-1,naint)+1 = mod(j-1,1)+1 = 1` for
+     every α — the gate at leapr.f90:585-587 is always open. Julia's
+     unconditional SCT replacement (leapr.jl:251-257) already matches Fortran
+     exactly; there is no naint kwarg to thread. (`naint` is NOT a card-3
+     field — that was HANDOFF drift.) Bead `NJOY_jl-a6q` closed as not-a-bug.
   2. **Phonon-loop FP-order alignment.** `_convol!` and the in-place
      `xa[j] += log(al*f0/n)` accumulation (leapr.f90:533) may differ
      in IEEE-754 order. Diagnose with `write(*,...)` traces in Fortran
