@@ -6,3 +6,6 @@ endf-data/
 .dolt/
 *.db
 test/validation/oracle_cache/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
