@@ -1097,6 +1097,13 @@ function apply_rescon!(
     ngn = length(egn) - 1
     n_pairs_applied = 0
 
+    # NOTE: `read_mf32` may return an MF32Data whose isotopes carry ZERO
+    # usable ranges when every range used an unported sub-format (LRF=4/7,
+    # LCOMP≠1, …) and was gracefully skipped there (INTERIM, bead
+    # NJOY_jl-4pz — proper fix: port rpxsamm, errorr.f90:3252). In that
+    # case both range loops below simply do not iterate, so apply_rescon!
+    # is a clean no-op (no RP-cov contribution) for that material — e.g.
+    # T20 Cl-35 RML LRF=7, matching the pre-rescon (Phase <72) behaviour.
     for iso in data.isotopes
         # Find matching MF=2 isotope.
         mf2_iso_idx = findfirst(i -> isapprox(i.ZAI, iso.zai; atol=1e-3),

@@ -13,9 +13,17 @@
 #   (no long-range covariance), ISR=0 or ISR=1 with LRF=1/2.
 #
 # This covers U-238 JENDL-3.3 (T15 reference), the canonical first
-# target. LCOMP=0 (legacy, errorr.f90:3734 rpxlc0), LCOMP=2 (compact,
-# errorr.f90:4634 rpxlc2), LRF=7 (RML/SAMMY, errorr.f90:3252 rpxsamm),
-# NRO≠0, NLRS≠0, and LRU=2 (URR cov) error loudly with named TODOs.
+# target, plus LRU=2 (URR cov) since Phase 75. The unported sub-formats
+# — LCOMP=0 (legacy, errorr.f90:3734 rpxlc0), LCOMP=2 (compact,
+# errorr.f90:4634 rpxlc2), LRF=4 (Adler-Adler), LRF=7 (RML/SAMMY,
+# errorr.f90:3252 rpxsamm), NRO≠0, NLRS≠0 — are INTERIM gracefully
+# SKIPPED: the reader emits a loud @warn (maxlog=1) naming MAT/range/LRF
+# and drops that range (returns no RP-cov contribution for it), instead
+# of aborting the whole errorr run. This matches the pre-rescon
+# (Phase <72) behaviour for those evaluators (e.g. T20 Cl-35 RML LRF=7:
+# no LRF=7 rescon contribution, errorr still produces output). The
+# proper fix is porting the corresponding Fortran reader (rpxsamm etc.)
+# — tracked as bead NJOY_jl-4pz.
 #
 # Data layout (LCOMP=1, per NSRS subsection):
 #   List of NRB resonances, each with 6 raw parameter words:
@@ -152,7 +160,12 @@ end
     read_mf32(filename::AbstractString, mat::Integer) -> MF32Data
 
 Read MF=32/MT=151 (resonance-parameter covariance) for material `mat`
-from an ENDF tape. Errors loudly on unsupported sub-formats.
+from an ENDF tape. Unported sub-formats (LRF=4/7, LCOMP≠1, NRO≠0,
+NLRS≠0, ISR=1 with LRF=3) are gracefully SKIPPED with a loud `@warn`
+rather than aborting the errorr run — INTERIM behaviour, bead
+NJOY_jl-4pz (proper fix: port rpxsamm, errorr.f90:3252). Structural /
+consistency violations (record-length mismatches) still error loudly
+per Rule 6.
 
 Mirrors Fortran `resprx` (errorr.f90:3011-3250) + `rpxlc12`
 (errorr.f90:4108-4632) for the LCOMP=1 path.
@@ -181,6 +194,26 @@ function read_mf32(filename::AbstractString, mat::Integer)
                     push!(resolved, rng)
                 elseif rng isa MF32UnresolvedRange
                     push!(unresolved, rng)
+                else
+                    # `nothing` ⇒ unsupported sub-format, gracefully
+                    # skipped (Phase 76d / bead NJOY_jl-4pz). We consumed
+                    # only this range's CONT head, not its variable-length
+                    # body records (the rpxsamm/rpxlc0/rpxlc2 part we
+                    # haven't ported), so the file is no longer positioned
+                    # at the next range. Stop reading further ranges for
+                    # this isotope rather than mis-parsing misaligned
+                    # records. T20 Cl-35 has NER=1 so nothing is lost; if
+                    # a future tape has a supported range *after* an
+                    # unsupported one, warn that it is being dropped too.
+                    if ir < ner
+                        @warn "read_mf32: MAT=$mat range $ir was skipped \
+                               (unsupported sub-format); the remaining \
+                               $(ner - ir) range(s) for this isotope are \
+                               also dropped because the reader cannot skip \
+                               past the unported body records. bead \
+                               NJOY_jl-4pz." maxlog=1
+                    end
+                    break
                 end
             end
             push!(isotopes,
@@ -194,10 +227,15 @@ end
 # Per-range reader — dispatches on LRU/LRF/LCOMP
 # -------------------------------------------------------------------------
 
-# Returns nothing for ranges we cannot parse but want to skip cleanly
-# (currently: none — every unsupported branch errors loudly per Rule 6).
-# When URR cov support lands, LRU=2 will return nothing here and the
-# parsed URR struct will live alongside resolved_ranges.
+# Returns an MF32ResolvedRange (LRU=1, supported LRF/LCOMP) or an
+# MF32UnresolvedRange (LRU=2). Returns `nothing` for ranges whose
+# sub-format we have not yet ported (LRF=4/7, LCOMP≠1, NRO≠0, NLRS≠0,
+# ISR=1 with LRF=3) — these are gracefully SKIPPED with a loud @warn
+# (INTERIM, bead NJOY_jl-4pz) rather than aborting, so errorr still
+# produces output for the material. Note: a `nothing` return consumed
+# only this range's CONT head; the caller therefore stops reading
+# further ranges for the isotope (see read_mf32 loop). Genuine
+# structural/consistency violations still error loudly per Rule 6.
 function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
     range_cont = read_cont(io)
     elr, ehr = range_cont.C1, range_cont.C2
@@ -273,16 +311,40 @@ function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
                                    nls_urr, l_states, mpar_urr, cov_RP)
     end
     if lru != 1
-        error("read_mf32: MAT=$mat range $ir LRU=$lru not yet supported.")
+        # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). Fortran
+        # handles every LRU/LRF combination (rpxunr for LRU=2, rpxsamm
+        # for LRF=7, etc. — resprx errorr.f90:3011-3250); we have not yet
+        # ported them all. Rather than aborting the whole errorr run (and
+        # losing tape output for the material), warn loudly and drop this
+        # range. Returns `nothing`; the caller pushes neither a resolved
+        # nor an URR struct, so the material gets no RP-cov contribution
+        # from this range — matching the pre-rescon (Phase <72) behaviour.
+        @warn "read_mf32: MAT=$mat range $ir LRU=$lru not yet supported — \
+               skipping this range (no RP-cov contribution). Proper fix: \
+               port the LRU=$lru reader (resprx, errorr.f90:3011); \
+               bead NJOY_jl-4pz." maxlog=1
+        return nothing
     end
     if !(lrf in (1, 2, 3))
-        error("read_mf32: MAT=$mat range $ir LRF=$lrf not yet supported \
-              (LRF=4 Adler-Adler / LRF=7 R-Matrix Limited — TODO: port \
-              rpxsamm, errorr.f90:3252).")
+        # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). LRF=4
+        # (Adler-Adler) and LRF=7 (R-Matrix Limited / SAMMY) need the
+        # rpxsamm port (errorr.f90:3252) which is a separate larger task.
+        # Skip the range instead of crashing errorr; this matches the
+        # pre-rescon behaviour for these evaluators (e.g. T20 Cl-35 RML:
+        # no LRF=7 rescon contribution, DIFFS not CRASH).
+        @warn "read_mf32: MAT=$mat range $ir LRF=$lrf not yet supported \
+               (LRF=4 Adler-Adler / LRF=7 R-Matrix Limited) — skipping \
+               this range (no RP-cov contribution). Proper fix: port \
+               rpxsamm (errorr.f90:3252); bead NJOY_jl-4pz." maxlog=1
+        return nothing
     end
     if nro != 0
-        error("read_mf32: MAT=$mat range $ir NRO=$nro (energy-dependent \
-              scattering radius) not yet supported.")
+        # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). Energy-
+        # dependent scattering radius (NRO≠0) reader not yet ported.
+        @warn "read_mf32: MAT=$mat range $ir NRO=$nro (energy-dependent \
+               scattering radius) not yet supported — skipping this range \
+               (no RP-cov contribution). bead NJOY_jl-4pz." maxlog=1
+        return nothing
     end
 
     params_cont = read_cont(io)
@@ -292,9 +354,16 @@ function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
     isr = Int(params_cont.N2)
 
     if lcomp != 1
-        error("read_mf32: MAT=$mat range $ir LCOMP=$lcomp not yet \
-              supported (LCOMP=0 legacy / LCOMP=2 compact — TODO: port \
-              rpxlc0 errorr.f90:3734 / rpxlc2 errorr.f90:4634).")
+        # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). LCOMP=0
+        # (legacy, rpxlc0 errorr.f90:3734) and LCOMP=2 (compact, rpxlc2
+        # errorr.f90:4634) readers are not yet ported. Skip rather than
+        # abort the errorr run.
+        @warn "read_mf32: MAT=$mat range $ir LCOMP=$lcomp not yet \
+               supported (LCOMP=0 legacy / LCOMP=2 compact) — skipping \
+               this range (no RP-cov contribution). Proper fix: port \
+               rpxlc0/rpxlc2 (errorr.f90:3734/4634); bead \
+               NJOY_jl-4pz." maxlog=1
+        return nothing
     end
 
     dap = 0.0
@@ -304,9 +373,15 @@ function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
             # Per rpxlc12 (errorr.f90:3157-3162): dap is C2 of the CONT.
             dap = dap_cont.C2
         else  # lrf == 3
-            error("read_mf32: MAT=$mat range $ir ISR=1 with LRF=3 \
-                  (per-l ΔAP LIST) not yet supported — TODO: port the \
-                  LIST branch at errorr.f90:3167-3196.")
+            # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). The
+            # per-l ΔAP LIST branch (errorr.f90:3167-3196) is not yet
+            # ported. Skip rather than abort the errorr run.
+            @warn "read_mf32: MAT=$mat range $ir ISR=1 with LRF=3 \
+                   (per-l ΔAP LIST) not yet supported — skipping this \
+                   range (no RP-cov contribution). Proper fix: port the \
+                   LIST branch at errorr.f90:3167-3196; bead \
+                   NJOY_jl-4pz." maxlog=1
+            return nothing
         end
     end
 
@@ -316,9 +391,14 @@ function _read_mf32_range(io::IO, mat::Integer, ir::Integer)
     nlrs = Int(nsrs_cont.N2)
 
     if nlrs != 0
-        error("read_mf32: MAT=$mat range $ir NLRS=$nlrs (long-range \
-              covariance) not yet supported — Fortran rpxlc12 errors \
-              with 'nlrs>0 not coded' at errorr.f90:4618.")
+        # INTERIM graceful skip (Phase 76d / bead NJOY_jl-4pz). Long-range
+        # covariance (NLRS>0) is unported — and Fortran rpxlc12 itself
+        # aborts here ('nlrs>0 not coded', errorr.f90:4618), so skipping
+        # is the most graceful interim. Skip rather than crash errorr.
+        @warn "read_mf32: MAT=$mat range $ir NLRS=$nlrs (long-range \
+               covariance) not yet supported — skipping this range (no \
+               RP-cov contribution). bead NJOY_jl-4pz." maxlog=1
+        return nothing
     end
 
     subs = MF32ResolvedSubsection[]
