@@ -66,11 +66,10 @@ See `njoy-reference/src/*.f90` for **canonical truth**.
     1. `git status` — see what changed
     2. `git add <specific files>` — stage (never `-A`; avoids .env, /tmp leftovers)
     3. `git commit -m "..."` — descriptive, references T## and phase
-    4. `git push` — to remote
-    5. `bd dolt push` — beads to Dolt
-    6. Write `worklog/TNN_*.md` if a phase closed (mirrors `HANDOFF.md` entries)
-    7. Update `HANDOFF.md` "Current State" + "Immediate Next Steps" if status changed
-    8. `bd remember "<surprising insight>"` for cross-session lessons
+    4. `git push` — to remote (also carries beads state; see §"Issue tracking: Beads")
+    5. Write `worklog/TNN_*.md` if a phase closed (mirrors `HANDOFF.md` entries)
+    6. Update `HANDOFF.md` "Current State" + "Immediate Next Steps" if status changed
+    7. `bd remember "<surprising insight>"` for cross-session lessons
     Work is NOT complete until `git push` succeeds.
 
 16. **REREAD THIS FILE** at session start and after any context compression.
@@ -126,6 +125,8 @@ julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work
 
 ## Issue tracking: Beads
 
+Beads (`bd`, v1.0.4) runs in **embedded Dolt mode** — no external server (re-init'd 2026-05-28; the old external-server DB had broken on restart). Issue IDs look like `NJOY_jl-<hash>` (e.g. `NJOY_jl-a3f2dd`). Run `bd prime` for the full, current command reference + workflow context.
+
 ```bash
 bd ready                         # available work
 bd show <id>                     # details
@@ -134,16 +135,19 @@ bd close <id> --reason "..."     # complete
 bd create --title="..." --description="..." -t bug|feature|task -p 0-4
 bd dep add <issue> <depends-on>  # issue depends on depends-on
 bd blocked                       # dependency view
-bd remember "<insight>"          # cross-session memory (use for surprises only)
+bd remember "<insight>"          # beads cross-session memory (issue/work surprises only)
 bd memories <keyword>            # search
-bd dolt push                     # MANDATORY at session close
+bd prime                         # full workflow context + command reference
 ```
 
 Rules:
 - Every non-trivial change starts with a bead. File the bead BEFORE writing the failing test.
-- Do NOT use TodoWrite, TaskCreate, or markdown TODOs.
+- Do NOT use TodoWrite, TaskCreate, or markdown TODOs — use beads.
 - Respect dependencies. `bd blocked` before picking up work.
-- Session end: `bd dolt push` is part of the close protocol.
+
+**Sync (embedded mode):** no Dolt remote is configured, so there is no `bd dolt push` target. The durable, cross-machine source of truth is `.beads/issues.jsonl` (auto-exported on writes, git-tracked). Beads' git hooks (`core.hooksPath=.beads/hooks`) handle the Dolt commit + JSONL export on commit/push, so a normal `git push` carries beads state. Run `bd export` to force-refresh the JSONL before committing if needed.
+
+**Memory systems are separate — do NOT conflate them.** `bd remember` is beads' OWN store, for issue/work surprises. It does **not** replace the harness auto-memory system (`MEMORY.md` + typed memory files under `~/.claude/projects/.../memory/`), which persists user/feedback/project/reference context across sessions. Both coexist; `MEMORY.md` stays.
 
 ---
 
@@ -222,8 +226,7 @@ Before saying "done":
 [ ] git status                         # what changed?
 [ ] git add <specific files>           # stage (never -A)
 [ ] git commit -m "T## phase summary"  # descriptive, reference phase/test
-[ ] git push                           # to remote
-[ ] bd dolt push                       # beads to Dolt
+[ ] git push                           # to remote — carries beads state (.beads/issues.jsonl + core.hooksPath hooks)
 [ ] worklog/TNN_*.md written?          # if phase closed
 [ ] HANDOFF.md updated?                # Current State + Next Steps
 [ ] bd remember "<surprise>"?          # if a non-obvious lesson landed
@@ -231,51 +234,4 @@ Before saying "done":
 
 Work is NOT complete until `git push` succeeds. If push fails, resolve and retry. Never leave work stranded locally.
 
-
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
-
-## Session Completion
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
+> Note: `bd init`/`bd setup claude` injects a `<!-- BEGIN BEADS INTEGRATION -->` block here. It was removed on 2026-05-28 because it duplicated the "Issue tracking: Beads" and "Session Close Protocol" sections above and contained guidance ("do NOT use MEMORY.md files") that conflicts with this project's harness auto-memory. If a future `bd` run re-injects it, delete it again — the sections above are canonical.

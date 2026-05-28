@@ -61,33 +61,33 @@ Launch multiple **research** subagents in parallel for maximum efficiency:
 
 ---
 
-## Beads Status (2026-04-20) — **READ FIRST**
+## Beads Status (2026-05-28) — **RESTORED (fresh, empty)**
 
-**Beads database is broken** on this machine — the local Dolt server lost
-its `NJOY_jl` database during a server restart and **no git remote is
-configured**. `bd ready`, `bd show`, `bd remember`, etc. all return
-`database "NJOY_jl" not found`. `bd bootstrap` creates a fresh empty
-database that doesn't persist across restarts.
+**Beads was wiped and re-initialized on 2026-05-28.** The previously broken
+setup (external Dolt `sql-server` mode that lost its `NJOY_jl` database on a
+server restart) was deleted entirely — `.beads/` removed from git and disk —
+and `bd` was updated **v1.0.0 → v1.0.4**, then re-init'd with `bd init`.
 
-**Implication**: every `NJOY.jl-xxx` bead ID referenced in this HANDOFF
-or any `worklog/*.md` is an orphan — the bead text is gone from the DB.
-The work tracked by those IDs is re-captured in full in the "Open Work"
-section below so nothing is lost. Use that section as the authoritative
-work list until beads is restored.
+The new database runs in **embedded Dolt mode** (in-process engine, no
+external server — this removes the exact failure mode that broke the old DB).
+Issue prefix is now `NJOY_jl`; IDs look like `NJOY_jl-<hash>` (e.g.
+`NJOY_jl-a3f2dd`). The DB **starts empty**.
 
-**Recovery options** (not attempted yet; ask before trying):
-- `bd bootstrap` with a working `.beads/config.yaml` `sync.git-remote`
-  entry, then `bd dolt pull` — if the project ever had a Dolt remote.
-- Reinstall beads CLI fresh and re-init: destructive, loses any bead
-  history the current `.beads/dolt` directory might still hold.
-- Leave beads disabled and track work entirely in HANDOFF + worklogs.
+**Implication**: every historical `NJOY.jl-xxx` bead ID referenced in this
+HANDOFF or any `worklog/*.md` is gone for good — those IDs will never resolve.
+The work they tracked is re-captured in full in the "Open Work" section below,
+which remains the authoritative work list. Re-file open items as fresh beads
+(`bd create …`) as you pick them up.
 
-Session rules during the outage:
-- **Do not invent new `NJOY.jl-xxx` IDs** — beads won't allocate them.
-  Refer to open work by the descriptive names in the table below
-  (e.g. "covcal content drift", "groupr empty-MT skip").
-- `bd dolt push` / `bd remember` in the session-close protocol become
-  no-ops; still write the worklog and update HANDOFF.
+**Sync model**: no Dolt remote is configured. Durable cross-machine state is
+`.beads/issues.jsonl` (auto-exported, git-tracked); beads' git hooks
+(`core.hooksPath=.beads/hooks`) sync Dolt + JSONL on commit/push, so a normal
+`git push` carries beads state. There is no `bd dolt push` target.
+
+Session rules:
+- `bd ready` / `bd show` / `bd create` / `bd remember` all work again — use them.
+- `bd remember` (beads' store) is separate from the harness auto-memory
+  (`MEMORY.md`); both coexist (see CLAUDE.md §"Issue tracking: Beads").
 
 ---
 
