@@ -64,7 +64,7 @@ for NJOY's hunky (which mutates module-level arrays).
 """
 function h_all(a_old, f_old::NTuple{5}, a_new)
     f_new = f_all(a_new)
-    h = ntuple(5) do k
+    h = ntuple(Val(5)) do k
         diff = f_old[k] - f_new[k]; afa = abs(f_old[k])
         if afa > 0 && abs(diff) <= _H_SMALL_ABS*afa;  zero(diff)
         elseif afa > 0 && abs(diff) < _H_CANCEL_TOL*afa && a_old != a_new
