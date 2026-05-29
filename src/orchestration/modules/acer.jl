@@ -298,14 +298,41 @@ function _acer_iopt7(tapes::TapeManager, params::AcerParams)
         return nothing
     end
 
-    # nace slot: copy the input ACE verbatim. Fortran's iopt=7 re-formats
-    # through aceout — for ASCII Type-1 input the result is byte-identical
-    # modulo the date string in the header.
+    # Determine the data-class letter from the input ZAID's 10th column so we
+    # apply the right fix routine. ht='t' → thrfix (thermal), 'c'/'h'/'o'/'r'/
+    # 's'/'a' → acefix (neutron/charged), etc. Ref: acer.f90:504-533.
+    src_lines = readlines(src)
+    isempty(src_lines) && (touch_all(tapes, params); return nothing)
+    hz0   = rpad(src_lines[1], 80)[1:10]   # `read(npend,'(a10)') hz(1:10)`
+    ht    = length(strip(hz0)) >= 1 ? hz0[10] : ' '
+
+    # Apply the new ZAID suffix from card-2 `suff` (acer.f90:295 reads it as a
+    # real). thrfix/acefix call newsuff only when suff >= 0 (aceth.f90:618);
+    # suff < 0 (and our NaN "absent" sentinel) leaves the ZAID unchanged.
+    new_hz = hz0
+    if !isnan(params.suff) && params.suff >= 0.0
+        new_hz = _acer_newsuff(hz0, params.suff)
+    end
+
+    # nace slot: rewrite the input ACE with the new ZAID in line 1. Fortran's
+    # iopt=7 reads the ACE through thrfix/throut and re-emits it; for ASCII
+    # Type-1 input the body is byte-identical, only the header ZAID changes.
+    # Ref: aceth.f90:617-618 (newsuff) + 2314-2316 (throut header rewrite).
     if params.nace > 0
         dst = resolve(tapes, params.nace)
-        cp(src, dst; force=true)
+        out_lines = copy(src_lines)
+        # Header line 1: replace columns 1-10 (the a10 ZAID field) with new_hz,
+        # preserving the AWR/TEMP/date tail byte-for-byte.
+        tail = length(out_lines[1]) > 10 ? out_lines[1][11:end] : ""
+        out_lines[1] = new_hz * tail
+        open(dst, "w") do io
+            for ln in out_lines
+                println(io, ln)
+            end
+        end
         register!(tapes, params.nace, dst)
-        @info "acer iopt=7: copied ACE $(basename(src)) → $(basename(dst)) ($(countlines(dst)) lines)"
+        @info "acer iopt=7: rewrote ACE $(basename(src)) → $(basename(dst)) " *
+              "($(length(out_lines)) lines, zaid $(strip(hz0))→$(strip(new_hz)))"
     end
 
     # ngend slot: viewr-format plot tape. Stub empty — plot generation is a
@@ -317,36 +344,106 @@ function _acer_iopt7(tapes::TapeManager, params::AcerParams)
         register!(tapes, params.ngend, plot_path)
     end
 
-    # ndir slot: 1-line summary line (xsdir-style) for the ACE table.
-    # Fortran acer iopt=7 writes one "  ZAID  AWR filename route 1   1   LENGTH 0 0 0.000E+00"
-    # record for each ACE entry — same shape as the xsdir produced by iopt=1.
+    # ndir slot: 1-line xsdir directory record. The format differs by data
+    # class: thermal (thrfix→throut, ht='t') uses the i2,' 1 ',i9 form
+    # (aceth.f90:2422); neutron/fast (acefix→aceout) uses the i2,i4,1x,i8 form
+    # (acefc.f90:13013). Match whichever class the input ACE is.
     if params.ndir > 0
         dir_path = resolve(tapes, params.ndir)
-        _acer_write_ndir_from_ace(src, dir_path)
+        _acer_write_ndir_from_ace(src_lines, new_hz, ht, dir_path)
         register!(tapes, params.ndir, dir_path)
     end
 
     nothing
 end
 
-"""Write a 1-line xsdir-style summary record by reading the header + NXS[1]
-from an ASCII Type-1 ACE file. Matches Fortran acer iopt=7 `trail` output."""
-function _acer_write_ndir_from_ace(ace_path::AbstractString, out_path::AbstractString)
-    lines = readlines(ace_path)
-    if length(lines) < 7
+"""touch all output tapes (used on the degenerate empty-input early-out)."""
+function touch_all(tapes::TapeManager, params::AcerParams)
+    for unit in (params.ngend, params.nace, params.ndir)
+        unit <= 0 && continue
+        p = resolve(tapes, unit)
+        touch(p)
+        register!(tapes, unit, p)
+    end
+end
+
+"""
+    _acer_newsuff(hz::AbstractString, suff::Float64) -> String
+
+Port of Fortran `newsuff` (acecm.f90:619-684) for the MCNP (mcnpx=0) case:
+update the 2-digit cross-section suffix of a 10-char ZAID `hz`, right-shifting
+the class identifier into column 10. The new suffix digits are `nint(100*suff)`
+written `i2.2` (zero-padded) into the two columns after the last `.`.
+
+For `hz="  hh2o.99t"`, `suff=0.90` → `nint(90.0)=90` → `"  hh2o.90t"`.
+"""
+function _acer_newsuff(hz::AbstractString, suff::Float64)
+    chars = collect(rpad(hz, 13))          # legacy njoy uses a 13-char buffer
+    s10   = String(chars[1:13])
+    lenhz = length(rstrip(String(chars)))  # len_trim(hz)
+    # index(hz,".",.TRUE.) — last '.' (1-based)
+    indx = findlast(==('.'), String(chars))
+    if indx === nothing || indx < 1 || indx > 7
+        # newsuff: "zaid name is nonstandard, no change made" (acecm.f90:662)
+        return String(rpad(hz, 10)[1:10])
+    end
+    # write(hz(indx+1:indx+2),'(i2.2)') nint(100*suff)
+    digits = @sprintf("%02d", round(Int, 100 * suff))
+    chars[indx+1] = digits[1]
+    chars[indx+2] = digits[2]
+    # Right-shift so class id lands in column 10 (mcnpx=0 → indx=10).
+    target = 10
+    if lenhz < target
+        idiff = target - lenhz
+        for i in target:-1:(target - lenhz + 1)
+            chars[i] = chars[i-idiff]
+        end
+        for i in 1:idiff
+            chars[i] = ' '
+        end
+    end
+    String(chars[1:10])
+end
+
+"""Write a 1-line xsdir-style directory record from an ASCII Type-1 ACE file's
+header lines, using the new (suffix-applied) ZAID `new_hz`. Selects the thermal
+vs neutron directory-line format by the data-class letter `ht`.
+
+Thermal (ht='t', aceth.f90:2422):
+  '(a10,f12.6,'' filename route'',i2,'' 1 '',i9,2i6,1p,e10.3)'
+Neutron/fast (acefc.f90:13013):
+  '(a10,f12.6,'' filename route'',i2,i4,1x,i8,2i6,1p,e10.3)'  (i4 = irec1 = 1)
+
+For iopt=7 the ACE file is re-emitted unchanged, so lrec=nern=0 (throut sets
+both to 0 for itype=1; aceout likewise for a freshly written ASCII file)."""
+function _acer_write_ndir_from_ace(src_lines::Vector{String}, new_hz::AbstractString,
+                                    ht::AbstractChar, out_path::AbstractString)
+    if length(src_lines) < 7
         touch(out_path)
         return
     end
-    # Line 1: ZAID(a10) AWR(f12.6) TEMP_MEV(1pe12.4) date(a10)  — 45 chars ish
-    hdr1 = rpad(lines[1], 80)
-    zaid = strip(hdr1[1:10])
-    awr  = strip(hdr1[11:22])
-    temp = strip(hdr1[23:35])
-    # Line 7 begins the NXS row, whose first integer is XSS length (i9).
-    nxs1 = strip(rpad(lines[7], 80)[1:9])
+    # Header line 1: ZAID(a10) AWR(f12.6 / e12.0) TEMP(e12.0) date(a10).
+    # throut re-emits aw0 with f12.6 and tz with 1pe10.3 — both come straight
+    # from the input ACE header (read with e12.0 each; aceth.f90:580).
+    hdr1 = rpad(src_lines[1], 80)
+    aw0  = parse_endf_float(hdr1[11:22])
+    tz   = parse_endf_float(hdr1[23:34])
+    # Line 7 begins the NXS row; its first integer (i9) is len2 = XSS length.
+    len2 = parse(Int, strip(rpad(src_lines[7], 80)[1:9]))
+    itype = 1
+    lrec  = 0
+    nern  = 0
+    zaid10 = rpad(new_hz, 10)[1:10]
     open(out_path, "w") do io
-        @printf(io, "%-10s %s filename route 1   1 %8s     0     0 %s\n",
-                zaid, awr, nxs1, temp)
+        if ht == 't'
+            # aceth.f90:2422 — i2,' 1 ',i9,2i6,1p,e10.3
+            @printf(io, "%s%12.6f filename route%2d 1 %9d%6d%6d%10.3E\n",
+                    zaid10, aw0, itype, len2, lrec, nern, tz)
+        else
+            # acefc.f90:13013 — i2,i4,1x,i8,2i6,1p,e10.3  (i4 = irec1 = 1)
+            @printf(io, "%s%12.6f filename route%2d%4d %8d%6d%6d%10.3E\n",
+                    zaid10, aw0, itype, 1, len2, lrec, nern, tz)
+        end
     end
 end
 

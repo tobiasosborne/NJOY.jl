@@ -284,11 +284,18 @@ struct AcerParams
     mat::Int; iopt::Int; iprint::Int; itype::Int; suffix::String
     temp::Float64; title::String
     nplot::Int  # iopt=7: plot option (-1 = no plot)
+    # Raw card-2 position-4 `suff` real, exactly as Fortran acer.f90:295 reads it
+    # (`read(nsysi,*) iopt,iprint,itype,suff,...`). For iopt=7/8 the fix routines
+    # (thrfix/acefix/...) apply it via `newsuff` (acecm.f90:619): when suff>=0 the
+    # new 2-digit suffix is `nint(100*suff)`, e.g. 0.90 -> ".90"; suff<0 leaves the
+    # ZAID unchanged. Default 0 (-> ".00"). We sentinel `NaN` to mean "absent on the
+    # card" so iopt=7 can fall back to Fortran's suff=0 default explicitly.
+    suff::Float64
 end
 
 function parse_acer(mc::ModuleCall)::AcerParams
     cards = mc.raw_cards
-    isempty(cards) && return AcerParams(0,0,0,0,0, 0,1,0,1,"80c", 300.0, "", 0)
+    isempty(cards) && return AcerParams(0,0,0,0,0, 0,1,0,1,"80c", 300.0, "", 0, NaN)
 
     # Card 1: nendf npend ngend nace ndir
     c1 = cards[1]
@@ -305,6 +312,17 @@ function parse_acer(mc::ModuleCall)::AcerParams
     # Suffix appears in card 2 position 4 as a decimal like `.10` or `.80` — read as string
     # to preserve leading dot and trailing zeros, then build a suffix tag like `10c`, `80c`.
     # iopt=1 → suffix `<dd>c`; iopt=7 → output suffix preserved from the ACE header.
+    # Card-2 position 4 = `suff` (a real, acer.f90:295). Capture it raw so the
+    # iopt=7/8 fix path can apply Fortran's `newsuff` (nint(100*suff)) faithfully.
+    # NaN = not present on the card (Fortran would keep its suff=0 default).
+    suff = NaN
+    if length(cards) >= 2 && length(cards[2]) >= 4
+        tok4 = String(strip(cards[2][4]))
+        if !isempty(tok4)
+            suff = _parse_num(tok4)
+        end
+    end
+
     suffix = "80c"
     if length(cards) >= 2 && length(cards[2]) >= 4
         tok = String(strip(cards[2][4]))
@@ -339,7 +357,7 @@ function parse_acer(mc::ModuleCall)::AcerParams
     end
 
     AcerParams(nendf, npendf, ngend, nace, ndir, mat, iopt, iprint, itype, suffix,
-               temp, title, nplot)
+               temp, title, nplot, suff)
 end
 
 struct GasprParams
