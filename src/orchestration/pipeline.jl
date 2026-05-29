@@ -529,21 +529,40 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
             return nothing
         end
 
-        sab = read_mf7_mt4(sab_path, params.mat_thermal, temp)
+        sab = read_mf7_mt4(sab_path, params.mat_thermal, temp; natom=params.natom)
         esi, xsi, records = calcem(sab, temp, emax, nbin; tol=params.tol)
         ctx.mf6_records[mtref] = records
         ctx.mf6_xsi[mtref] = xsi
         ctx.mf6_emax[mtref] = emax
 
-        # Bragg stub — only when coherent elastic is requested AND lattice is known
+        # Bragg stub — only when coherent elastic is requested.
+        # Mirror thermr_module's lat=10 selection: prefer ENDF MF7/MT2 (LTHR=1),
+        # fall back to the hardcoded graphite/Be/BeO lattice (lat=1/2/3).
         if params.icoh > 0
-            try
-                bragg_params = lookup_bragg_params(params.mat_thermal)
-                bragg = build_bragg_data(
-                    a=bragg_params.a, c=bragg_params.c,
-                    sigma_coh=bragg_params.sigma_coh, A_mass=bragg_params.A_mass,
-                    natom=params.natom, debye_waller=2.1997,
-                    emax=emax, lat=round(Int, bragg_params.lat))
+            bragg = nothing
+            lthr, bragg_endf = try
+                read_mf7_mt2(sab_path, params.mat_thermal, temp)
+            catch err
+                @warn "thermr MF6 Bragg: MF7/MT2 read failed — $(sprint(showerror, err))"
+                (0, nothing)
+            end
+            if lthr == 1 && bragg_endf !== nothing
+                bragg = bragg_endf  # lat=10: coherent elastic from ENDF
+            else
+                bragg = try
+                    bragg_params = lookup_bragg_params(params.mat_thermal)
+                    build_bragg_data(
+                        a=bragg_params.a, c=bragg_params.c,
+                        sigma_coh=bragg_params.sigma_coh, A_mass=bragg_params.A_mass,
+                        natom=params.natom, debye_waller=2.1997,
+                        emax=emax, lat=round(Int, bragg_params.lat))
+                catch err
+                    @warn "thermr Bragg stub: $(sprint(showerror, err)) — skipping"
+                    nothing
+                end
+            end
+
+            if bragg !== nothing
                 ctx.mf6_stubs[mtref + 1] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
 
                 pendf_path = resolve(tapes, params.nout)
@@ -552,8 +571,6 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
                 if haskey(mf3, mtref)
                     ctx.thermr_coh_ne = length(mf3[mtref][1]) - 2
                 end
-            catch err
-                @warn "thermr Bragg stub: $(sprint(showerror, err)) — skipping"
             end
         end
     end

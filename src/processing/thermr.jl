@@ -78,7 +78,7 @@ Returns SABData with log(S) values.
 
 Matches Fortran thermr calcem (thermr.f90:1659-1779).
 """
-function read_mf7_mt4(filename::AbstractString, mat::Integer, T::Real)
+function read_mf7_mt4(filename::AbstractString, mat::Integer, T::Real; natom::Integer=1)
     open(filename) do io
         find_section(io, 7, 4; target_mat=mat) ||
             error("MF7/MT4 not found for MAT=$mat in $filename")
@@ -86,12 +86,17 @@ function read_mf7_mt4(filename::AbstractString, mat::Integer, T::Real)
         lasym = head.N1
         lat = head.L2
 
-        # B(n) constants (LIST record)
+        # B(n) constants (LIST record). Fortran calcem (thermr.f90:1670-1676):
+        #   smz = scr(7)/natom ; az = scr(9) ; sb = smz*((az+1)/az)**2
+        # scr(7)=B(1) (free atom XS), scr(9)=B(3) (principal-scatterer AWR).
+        # `natom` is the thermr INPUT-CARD parameter (card 2 field 8), NOT a
+        # B-list field — B(4)/scr(10) is unrelated (e.g. elastic emax for Al-27,
+        # = 2.277). Reading natom from B(4) caused a factor-of-`round(B(4))`
+        # error in the bound XS (e.g. ÷2 for Al-27 where B(4)=2.277).
         blist = read_list(io)
-        sigma_free = blist.data[1]  # free atom XS [barn]
-        dw_integral = blist.data[2]  # Debye-Waller integral
-        az = blist.data[3]           # atomic mass of principal scatterer
-        natom = max(1, round(Int, blist.data[4]))
+        sigma_free = blist.data[1]  # B(1): free atom XS [barn] (scr(7))
+        dw_integral = blist.data[2]  # B(2)
+        az = blist.data[3]           # B(3): AWR of principal scatterer (scr(9))
         smz = sigma_free / natom
         sigma_b = smz * ((az + 1) / az)^2  # bound atom XS
 
@@ -456,6 +461,94 @@ function build_bragg_data(; a::Real, c::Real, sigma_coh::Real,
         push!(ffl_sorted, ffl_sorted[end])
     end
     BraggData(tsl_sorted, ffl_sorted, econ, scon, length(tsl_sorted))
+end
+
+# ---- lat=10: coherent-elastic Bragg data read directly from ENDF MF7/MT2 ----
+
+"""
+    read_mf7_mt2(filename, mat, T) -> (lthr::Int, bragg::Union{BraggData,Nothing})
+
+Read coherent-elastic structure-factor data from ENDF MF7/MT2 (LTHR=1) and
+build a `BraggData` for the lat=10 path, picking the record matching `T` [K].
+
+Mirrors two Fortran routines:
+
+  * `rdelas` (thermr.f90:477-592). For lthr≠2 the base TAB1 holds (E_i, S_cum(E_i))
+    at temperature T0; each of LT extra-temperature LIST records holds the S_cum
+    values for one additional temperature (energies reused from the base TAB1).
+    The temperature match test is `abs(tnow-temp) < temp/1000+5` (line 545); the
+    matching record's S values overwrite the base table's y-values (lines 547-553).
+
+  * `sigcoh` lat=10 branch (thermr.f90:1150-1166, reached via `go to 200` at
+    line 1016). The (E_i, S_cum_i) table is transformed in place to (τ²_i, dS_i):
+        τ²_i = E_i · econ           (fl(l)   = fl(l+2*nr+6)*econ, line 1162)
+        dS_i = S_cum_i − S_cum_{i-1}(fl(l+1) = fl(l+2*nr+7)-blast, lines 1163-1164)
+    with `scon = 1` (line 1157, the ENDF S already absorbs Debye-Waller). No ulim
+    sentinel is appended for lat=10 (n_edges = NP), unlike the lat=1/2/3 path.
+
+`econ = ev·8·(amassn·amu/hbar)/hbar` matches sigcoh line 1012.
+
+Returns the LTHR value so the caller can distinguish coherent (1) from
+incoherent (2) / mixed (3) elastic. For LTHR≠1 returns `(lthr, nothing)` —
+incoherent (`iel`) wiring is a separate bead.
+
+ENDF-6 MF7/MT2 LTHR=1 layout (manual §7.2):
+  HEAD : ZA, AWR, LTHR=1, 0, 0, 0
+  TAB1 : C1=T0, C2=0, L1=LT, L2=0, N1=NR, N2=NP ; NR int pairs ; NP (E_i, S_cum) pairs
+  then LT LIST records: C1=T_j, C2=0, L1=LI, L2=0, N1=NP, N2=0 ; NP S_cum values
+"""
+function read_mf7_mt2(filename::AbstractString, mat::Integer, T::Real)
+    open(filename) do io
+        find_section(io, 7, 2; target_mat=mat) || return (0, nothing)
+        head = read_cont(io)
+        lthr = head.L1
+        # Only LTHR=1 (coherent elastic) is wired here. LTHR=2 (incoherent) and
+        # LTHR=3 (mixed) need the iel path — out of scope for this branch.
+        lthr == 1 || return (lthr, nothing)
+
+        # Base TAB1: (E_i, S_cum_i) at T0. (rdelas thermr.f90:505)
+        base = read_tab1(io)
+        nr = length(base.interp.nbt)
+        np = length(base.x)
+        lt = base.L1                 # number of extra-temperature LIST records
+        energies = copy(base.x)      # E_i [eV] — reused across all temperatures
+        scum = copy(base.y)          # S_cum at T0; overwritten if a later T matches
+
+        # Pick the temperature: T0 (base) or one of the LT LIST records.
+        # Fortran rdelas line 545: abs(tnow-temp) < temp/1000+5.
+        ttol = T / 1000 + 5
+        ifound = abs(base.C1 - T) < ttol
+        for _ in 1:lt
+            lst = read_list(io)      # rdelas thermr.f90:536
+            if !ifound && abs(lst.C1 - T) < ttol
+                ifound = true
+                # Overwrite S_cum with this temperature's values (NP entries).
+                # rdelas lines 547-553: energies stay, S values replaced.
+                length(lst.data) >= np ||
+                    error("MF7/MT2 LIST at T=$(lst.C1)K has $(length(lst.data)) " *
+                          "values, expected NP=$np (MAT=$mat in $filename)")
+                @inbounds for i in 1:np
+                    scum[i] = lst.data[i]
+                end
+            end
+        end
+        ifound || error("MF7/MT2 coherent elastic: temperature $(T)K not found " *
+                        "for MAT=$mat in $filename (base T0=$(base.C1)K, $lt extra temps)")
+
+        # sigcoh lat=10 transform (thermr.f90:1150-1166).
+        amne = PhysicsConstants.amassn * PhysicsConstants.amu
+        econ = PhysicsConstants.ev * 8 * amne / PhysicsConstants.hbar^2
+        tau_sq = Vector{Float64}(undef, np)
+        dS = Vector{Float64}(undef, np)
+        blast = 0.0
+        @inbounds for i in 1:np
+            tau_sq[i] = energies[i] * econ
+            dS[i] = scum[i] - blast
+            blast = scum[i]
+        end
+        # scon=1 (line 1157); no ulim sentinel for lat=10 (n_edges = NP).
+        (lthr, BraggData(tau_sq, dS, econ, 1.0, np))
+    end
 end
 
 # ---- Thermal output grid (matching Fortran coh adaptive merge) ----

@@ -142,28 +142,50 @@ end
 function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
                       thermr_mts, mf3_data, sab_path, mat_thermal,
                       A, temp, emax, tol, nbin, mtref, icoh, natom)
-    # Read S(α,β) data
-    sab = read_mf7_mt4(sab_path, mat_thermal, temp)
+    # Read S(α,β) data. natom is the thermr input-card parameter (Fortran
+    # calcem smz=scr(7)/natom, thermr.f90:1674), not a B-list field.
+    sab = read_mf7_mt4(sab_path, mat_thermal, temp; natom=natom)
     @info "thermr SAB: alpha=$(length(sab.alpha))×beta=$(length(sab.beta)), " *
           "T_eff=$(round(sab.T_eff, sigdigits=4))K"
 
     # Build Bragg data only when coherent elastic is requested.
-    # Fortran thermr.f90:428: Bragg edges are computed only when icoh > 0.
-    # For ENDF-6 (lthr=1), thermr overwrites icoh = 10*lthr; pre-overwrite
-    # input icoh=0 ⇒ no coherent elastic, no MT=mtref+1 section.
+    # Fortran thermr.f90:404-414,428: when MF7/MT2 is present thermr sets
+    # lthr=l1h and icoh=10*lthr; LTHR=1 ⇒ icoh=10 ⇒ the lat=10 ENDF read path
+    # (coh(10,...) at line 429). Otherwise the input icoh>0 selects a hardcoded
+    # graphite/Be/BeO lattice (lat=1/2/3).
     bragg = nothing
     if icoh > 0
-        bragg = try
-            bp = lookup_bragg_params(mat_thermal)
-            dw = _compute_debye_waller(sab, temp)
-            build_bragg_data(a=bp.a, c=bp.c,
-                             sigma_coh=bp.sigma_coh, A_mass=bp.A_mass,
-                             natom=natom, debye_waller=dw, emax=emax,
-                             lat=round(Int, bp.lat))
+        # lat=10 path: try reading the reciprocal-lattice / Bragg structure
+        # factors directly from ENDF MF7/MT2 (LTHR=1). thermr.f90:409-413 (coh
+        # dispatch) + rdelas + sigcoh lat=10 branch. This is the faithful path
+        # for materials without a hardcoded lattice (e.g. Al-27 TSL, T70).
+        lthr, bragg_endf = try
+            read_mf7_mt2(sab_path, mat_thermal, temp)
         catch err
-            @warn "thermr SAB: Bragg lattice unavailable for MAT=$mat_thermal — " *
-                  "skipping coherent elastic (MT=$(mtref+1)). $(sprint(showerror, err))"
-            nothing
+            @warn "thermr SAB: MF7/MT2 read failed for MAT=$mat_thermal — " *
+                  "$(sprint(showerror, err))"
+            (0, nothing)
+        end
+
+        if lthr == 1 && bragg_endf !== nothing
+            # Coherent elastic from ENDF (lat=10). Bypass the hardcoded lattice.
+            bragg = bragg_endf
+            @info "thermr SAB: coherent elastic from ENDF MF7/MT2 LTHR=1 " *
+                  "(lat=10), $(bragg.n_edges) Bragg edges"
+        else
+            # Fallback: hardcoded graphite/Be/BeO lattice (lat=1/2/3).
+            bragg = try
+                bp = lookup_bragg_params(mat_thermal)
+                dw = _compute_debye_waller(sab, temp)
+                build_bragg_data(a=bp.a, c=bp.c,
+                                 sigma_coh=bp.sigma_coh, A_mass=bp.A_mass,
+                                 natom=natom, debye_waller=dw, emax=emax,
+                                 lat=round(Int, bp.lat))
+            catch err
+                @warn "thermr SAB: Bragg lattice unavailable for MAT=$mat_thermal — " *
+                      "skipping coherent elastic (MT=$(mtref+1)). $(sprint(showerror, err))"
+                nothing
+            end
         end
     end
 
