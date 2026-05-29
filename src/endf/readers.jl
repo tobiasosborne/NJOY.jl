@@ -121,9 +121,12 @@ struct MF6Law5Subsection
     e::Float64       # incident energy [eV]
     ltp::Int
     lidp::Int
-    nl::Int          # number of (μ,p) pairs (or Legendre order, depending on LTP)
-    mu::Vector{Float64}    # length nl
-    prob::Vector{Float64}  # length nl
+    nl::Int          # number of (μ,p) pairs (LTP=12) or Legendre order NL (LTP<12)
+    mu::Vector{Float64}    # length nl — (μ,p) tabulation (LTP=12 only)
+    prob::Vector{Float64}  # length nl — (μ,p) tabulation (LTP=12 only)
+    coeffs::Vector{Float64}  # raw LIST data (NW reals); for LTP<12 these are
+                             # the Legendre amplitude/residual coefficients that
+                             # ptlegc/coul expand. Empty handling: always stored.
 end
 
 """
@@ -162,16 +165,25 @@ function read_mf6_law5(filename::AbstractString, mat::Integer, mt::Integer)
             rec = read_list(io)
             e   = Float64(rec.C2)
             ltp = Int(rec.L1)
-            # rec.N1 = NW, rec.N2 = NL. NL pairs of (μ,p) starting at data[1].
+            # rec.N1 = NW, rec.N2 = NL.
             nl  = Int(rec.N2)
-            mu   = Vector{Float64}(undef, nl)
-            prob = Vector{Float64}(undef, nl)
-            for k in 1:nl
-                mu[k]   = rec.data[2k-1]
-                prob[k] = rec.data[2k]
+            # Always keep the raw LIST data (NW reals). For LTP<12 these are the
+            # Legendre coefficients consumed by ptlegc/coul (acefc.f90:6542); the
+            # (μ,p) pair split below is only meaningful for LTP=12.
+            # Ref: njoy-reference/src/acefc.f90:6529-6545.
+            coeffs = collect(Float64, rec.data)
+            mu   = Float64[]
+            prob = Float64[]
+            if ltp >= 12
+                # LTP=12: NL pairs of (μ,p) starting at data[1].
+                resize!(mu, nl); resize!(prob, nl)
+                for k in 1:nl
+                    mu[k]   = rec.data[2k-1]
+                    prob[k] = rec.data[2k]
+                end
             end
             # spi and lidp inherited from the TAB2 (per Fortran acefc.f90:5830).
-            push!(subs, MF6Law5Subsection(spi, e, ltp, lidp, nl, mu, prob))
+            push!(subs, MF6Law5Subsection(spi, e, ltp, lidp, nl, mu, prob, coeffs))
         end
     end
     header, subs
