@@ -127,16 +127,46 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     end
 
     # Assemble XS matrix. For neutron PENDFs from reconr/broadr, all partials
-    # share the lunion grid — direct copy. For the charged-particle path
-    # master_e was extended by unionx (MF6 + step pads), so MT=2 must be
-    # linearly interpolated onto the new grid.
+    # share the lunion grid — direct copy.
+    #
+    # The charged-particle path is fundamentally different: master_e is the
+    # union of MT=2's grid with the MF6 incident-energy anchors (unionx), so
+    # it is FINER than each reaction's native MF3 grid, AND the charged-
+    # particle MF3 sections retain non-linear ENDF interpolation (INT=5
+    # log-log, INT=6 Coulomb penetrability) that reconr never linearised.
+    # Fortran acelod (acefc.f90:5494-5505) samples each reaction onto the ESZ
+    # grid via gety1 — i.e. terp1 with the panel's own law — then sigfig(s,7,0)
+    # BEFORE storing into the SIG block / accumulating the disappear+total
+    # columns. Linear interpolation here gave e.g. MT=600 at E=120 eV =
+    # 6.08e-83 instead of the INT=6 value 4.07e-107 (T62 SIG-block tail bug).
     xs_matrix = zeros(Float64, n_e, length(mt_sorted))
-    for (col, mt) in enumerate(mt_sorted)
-        e_mt, xs_mt = mf3[mt]
-        if length(e_mt) == n_e && e_mt == master_e
-            xs_matrix[:, col] = xs_mt
-        else
-            xs_matrix[:, col] = _acer_linear_interp(master_e, e_mt, xs_mt)
+    mf3_q = Dict{Int, Float64}()   # per-MT QI [eV] for the LQR column (charged path)
+    if !izai_neutron
+        mf3_tab = extract_mf3_tab1_all(pendf, mat)
+        for (col, mt) in enumerate(mt_sorted)
+            rec = get(mf3_tab, mt, nothing)
+            if rec === nothing
+                # Fallback: lin-lin on the bare (e,xs) (should not happen).
+                e_mt, xs_mt = mf3[mt]
+                xs_matrix[:, col] = _acer_linear_interp(master_e, e_mt, xs_mt)
+                continue
+            end
+            mf3_q[mt] = rec.qi
+            # gety1-faithful sample + sigfig(s,7,0). thr6=0 in the ACE path
+            # (njoy never sets thr6 in acefc; the endf module global stays 0).
+            for (i, e) in enumerate(master_e)
+                s = interpolate(rec.tab, e; coulomb_threshold=0.0)
+                xs_matrix[i, col] = round_sigfig(s, 7, 0)
+            end
+        end
+    else
+        for (col, mt) in enumerate(mt_sorted)
+            e_mt, xs_mt = mf3[mt]
+            if length(e_mt) == n_e && e_mt == master_e
+                xs_matrix[:, col] = xs_mt
+            else
+                xs_matrix[:, col] = _acer_linear_interp(master_e, e_mt, xs_mt)
+            end
         end
     end
 
@@ -205,7 +235,9 @@ function acer_module(tapes::TapeManager, params::AcerParams)
                                   za=mf1.za,
                                   awr=mf1.awr,
                                   date=_acer_today_date(),
-                                  charged_elastic=charged_elastic)
+                                  charged_elastic=charged_elastic,
+                                  incident_charged=!izai_neutron,
+                                  mf3_q=mf3_q)
 
     # Write outputs
     if params.nace > 0

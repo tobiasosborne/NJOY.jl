@@ -337,6 +337,104 @@ function _parse_mf3_lines(lines::Vector{String})
     (energies, xs)
 end
 
+"""
+    _parse_mf3_tab1(lines) -> NamedTuple(qm, qi, lr, energies, xs, nbt, law)
+
+Parse an MF3 section's TAB1 **with** its interpolation table and Q-values.
+Unlike `_parse_mf3_lines` (which discards the interpolation law and assumes
+lin-lin), this preserves the native ENDF interpolation regions (NBT/INT) and
+the QM/QI fields. Required for the charged-particle ACE path, where MF3
+reaction cross sections are stored on coarse grids with non-linear laws
+(INT=5 log-log, INT=6 Coulomb penetrability) and must be sampled onto the
+finer ESZ grid via `gety1`/`terp1` rather than linear interpolation.
+
+The reconr/broadr neutron PENDF linearizes everything to INT=2, so the
+neutron path can keep using `_parse_mf3_lines`; this is only consumed by
+the `izai != neutron` branch in acer_module.
+
+Returns empty vectors on a malformed/empty section.
+
+Ref: ENDF-6 §3.2 (MF3 TAB1 layout); njoy-reference/src/acefc.f90:5494-5505
+(acelod's per-reaction gety1 sampling + sigfig-7 store).
+"""
+function _parse_mf3_tab1(lines::Vector{String})
+    empty_nbt = Int32[]; empty_law = Int32[]
+    energies = Float64[]; xs = Float64[]
+    isempty(lines) && return (; qm=0.0, qi=0.0, lr=0, energies, xs,
+                                nbt=empty_nbt, law=empty_law)
+    length(lines) < 3 && return (; qm=0.0, qi=0.0, lr=0, energies, xs,
+                                   nbt=empty_nbt, law=empty_law)
+
+    # Line 2: TAB1 CONT (QM, QI, L1, LR, NR, NP).
+    p2 = rpad(lines[2], 80)
+    qm = parse_endf_float(p2[1:11])
+    qi = parse_endf_float(p2[12:22])
+    lr = _parse_int(p2[34:44])
+    nr = _parse_int(p2[45:55])
+    np = _parse_int(p2[56:66])
+    np <= 0 && return (; qm, qi, lr, energies, xs, nbt=empty_nbt, law=empty_law)
+
+    # Interpolation table: NR (NBT, INT) integer pairs, 3 pairs per line.
+    n_interp_lines = cld(2 * max(nr, 0), 6)
+    nbt = Int32[]; law = Int32[]
+    sizehint!(nbt, nr); sizehint!(law, nr)
+    interp_collected = 0
+    for li in 3:(2 + n_interp_lines)
+        li > length(lines) && break
+        p = rpad(lines[li], 80)
+        for col in 0:2
+            interp_collected >= nr && break
+            nbt_v = _parse_int(p[1 + col*22 : 11 + col*22])
+            int_v = _parse_int(p[12 + col*22 : 22 + col*22])
+            push!(nbt, nbt_v); push!(law, int_v)
+            interp_collected += 1
+        end
+    end
+
+    data_start = 3 + n_interp_lines
+    sizehint!(energies, np); sizehint!(xs, np)
+    for li in data_start:length(lines)
+        p = rpad(lines[li], 80)
+        _parse_int(p[73:75]) == 0 && break   # SEND
+        for col in 0:2
+            length(energies) >= np && break
+            push!(energies, parse_endf_float(p[1 + col*22 : 11 + col*22]))
+            push!(xs,       parse_endf_float(p[12 + col*22 : 22 + col*22]))
+        end
+    end
+
+    (; qm, qi, lr, energies, xs, nbt, law)
+end
+
+"""
+    extract_mf3_tab1_all(tape::PENDFTape, mat::Int)
+        -> Dict{Int, NamedTuple(qm, qi, lr, tab::TabulatedFunction)}
+
+Charged-particle counterpart to `extract_mf3_all`: returns every MF3 section
+for `mat` as a `TabulatedFunction` carrying its native interpolation table,
+plus the QM/QI Q-values. The charged ACE path samples these via
+`interpolate` (which honours INT=5/INT=6) to reproduce Fortran `gety1`.
+"""
+function extract_mf3_tab1_all(tape::PENDFTape, mat::Int)
+    result = Dict{Int, NamedTuple{(:qm, :qi, :lr, :tab),
+                  Tuple{Float64, Float64, Int, TabulatedFunction}}}()
+    for material in tape.materials
+        material.mat != mat && continue
+        for sec in material.sections
+            sec.mf != 3 && continue
+            rec = _parse_mf3_tab1(sec.lines)
+            isempty(rec.energies) && continue
+            # Fall back to a single lin-lin region if NR was unreadable.
+            nbt = isempty(rec.nbt) ? Int32[length(rec.energies)] : rec.nbt
+            law = isempty(rec.law) ? Int32[2] : rec.law
+            tab = TabulatedFunction(InterpolationTable(nbt, law),
+                                    rec.energies, rec.xs)
+            result[sec.mt] = (; qm=rec.qm, qi=rec.qi, lr=rec.lr, tab)
+        end
+    end
+    result
+end
+
 # =========================================================================
 # Copy With Modifications
 # =========================================================================

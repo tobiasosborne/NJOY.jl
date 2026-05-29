@@ -586,11 +586,22 @@ function acer_charged_elastic(subs::Vector{MF6Law5Subsection},
         new_elastic[j] = signow
         # total[j] - signi_orig + signow, with sigfig(., 9, 0) per acefc.f90:6659.
         new_total[j] = round_sigfig(esz_total_xs[j] - signi_orig + signow, 9, 0)
-        # Heating: linearly interpolate the per-E heating contribution.
-        # Suppressed for α + α (izai==za).
-        if izai != za && signow > 0
+        # Heating (acefc.f90:6661-6666):
+        #   call terpa(h,...); h = h / xss(esz+nes+j)   ! divisor is TOTAL
+        #   if (izai.le.2004) h=0                        ! recoil ≤ α from acelcp
+        #   xss(esz+4*nes+j) = sigfig(h,7,0)
+        # The divisor is the (Coulomb-corrected) total column, NOT signow; and
+        # the recoil heating for incident particles up through alphas (izai ≤
+        # 2004 = deuteron 1002, triton 1003, He-3 2003, α 2004) is reported as
+        # zero here (it is carried by acelcp instead). The earlier `izai != za`
+        # test happened to zero T50 (α+α, izai==za) but wrongly kept nonzero
+        # heating for T62 (d+He-3, izai=1002≠za=2003).
+        if izai <= 2004
+            heating[j] = 0.0
+        else
             h_at_e = _terpa(results, e)
-            heating[j] = round_sigfig(h_at_e / signow, 7, 0)
+            heating[j] = new_total[j] > 0 ?
+                         round_sigfig(h_at_e / new_total[j], 7, 0) : 0.0
         end
     end
 

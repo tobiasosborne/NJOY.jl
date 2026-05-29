@@ -159,7 +159,9 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
                                za::Integer = 0,
                                awr::Float64 = NaN,
                                date::AbstractString = "",
-                               charged_elastic::Union{Nothing, NamedTuple} = nothing)
+                               charged_elastic::Union{Nothing, NamedTuple} = nothing,
+                               incident_charged::Bool = false,
+                               mf3_q::Dict{Int, Float64} = Dict{Int, Float64}())
     # Prefer explicit ZA (from MF1/MT451) over pendf.mat (which is MAT, not ZA).
     # Same for AWR — pendf often has mass number A in place of real AWR.
     true_za = za > 0 ? Int(za) : Int(pendf.mat)
@@ -198,7 +200,28 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
         end
         s
     end
-    absorption_xs = max.(total_xs .- elastic_xs, 0.0)
+    # Disappear (absorption) column.
+    #   Neutron path: max(total - elastic, 0) (the long-standing behaviour).
+    #   Charged path: Fortran acelod accumulates the *sigfig-7-rounded*
+    #     reaction cross sections of every MT with (mth ≤ 200 or mth ≥ 600)
+    #     directly into xss(ic+j) (acefc.f90:5648-5652) — it is NOT
+    #     total − elastic. For a charged evaluation whose only absorptive
+    #     reaction sits on a coarse INT=6 grid, total≈elastic at the low-E
+    #     tail and max(.,0) clamps the tiny disappear values to 0, whereas
+    #     the reference reports the reaction xs itself (T62: MT=600 down to
+    #     1.155e-117). The xs_matrix is already sigfig-7 on this path, so
+    #     summing it reproduces the Fortran column exactly.
+    absorption_xs = if incident_charged
+        s = zeros(n)
+        for (col, mt) in enumerate(pendf.mt_list)
+            (mt <= 200 || mt >= 600) || continue
+            mt in (1, 2) && continue
+            s .+= pendf.cross_sections[:, col]
+        end
+        s
+    else
+        max.(total_xs .- elastic_xs, 0.0)
+    end
     heating = zeros(n)
 
     reactions = ReactionXS[]
@@ -207,8 +230,12 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
         xs_col = pendf.cross_sections[:, col]
         ie_start = findfirst(x -> x > 0.0, xs_col)
         ie_start === nothing && continue
+        # LQR: ACE Q-value in MeV. Fortran stores QI (MF3 second CONT field)
+        # converted to MeV. The neutron path leaves this 0 (filled elsewhere
+        # / not exercised by passing tests); the charged path uses the MF3 QI.
+        q_mev = get(mf3_q, mt, 0.0) / 1.0e6
         push!(reactions, ReactionXS(
-            Int32(mt), 0.0, Int32(0), Int32(ie_start),
+            Int32(mt), q_mev, Int32(0), Int32(ie_start),
             xs_col[ie_start:end]))
     end
 

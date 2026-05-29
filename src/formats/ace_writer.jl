@@ -11,8 +11,33 @@ using Printf
 """Format an integer for XSS data block: right-justified in 20 chars (i20)."""
 _ace_fmt_int(val::Integer) = lpad(string(Int(val)), 20)
 
-"""Format a real for XSS data block: scientific in 20 chars (1pe20.11)."""
-_ace_fmt_real(val::Real) = @sprintf("%20.11E", Float64(val))
+"""Format a real for XSS data block to match Fortran `write(hl,'(1p,e20.11)')`
+(acecm.f90:791, typen).
+
+Fortran's `e20.11` edit descriptor drops the exponent letter `E` when the
+exponent magnitude is ≥ 100 (3 digits), emitting just the sign and the three
+digits — e.g. `1.15510000000-117` rather than `1.15510000000E-117`. C's
+`%20.11E` (what `@sprintf` calls) always prints `E` and a ≥2-digit exponent,
+which both adds a character and shifts the right-justification, so the
+non-numeric residue of the line diverges from the reference even though the
+value parses equal (T62 MT=600 tail values 1.1551e-117, 4.07097e-107).
+
+We therefore reproduce the Fortran descriptor exactly: print with `%20.11E`,
+then if the exponent has 3 digits strip the `E` and re-pad to width 20."""
+function _ace_fmt_real(val::Real)
+    s = @sprintf("%20.11E", Float64(val))
+    # Locate the exponent: the last 'E' (or 'e') in the field.
+    ei = findlast(c -> c == 'E' || c == 'e', s)
+    ei === nothing && return s
+    # Exponent digits after the sign (s[ei+1] is '+' or '-').
+    exp_digits = length(s) - (ei + 1)   # chars after the sign char
+    if exp_digits >= 3
+        # Drop the 'E', keep the sign + digits, then re-justify to 20.
+        compact = s[1:ei-1] * s[ei+1:end]
+        return lpad(strip(compact), 20)
+    end
+    s
+end
 
 # Also keep Proposer-A naming for compatibility
 _format_xss_value(x::Float64) = _ace_fmt_real(x)
