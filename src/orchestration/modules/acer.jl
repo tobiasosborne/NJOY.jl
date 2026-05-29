@@ -81,19 +81,26 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     endf_for_mf6 = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
     if !izai_neutron
         # Charged-particle ACE: run the Fortran unionx pipeline —
-        # MF3 union → MF6/MT2 anchor merge (with the c-buffer overwrite
-        # quirk that drops one MF3 point per anchor and creates duplicates)
-        # → step-1.2 ratio enforcement (off-by-one drops second-to-last) →
-        # gety1-style dedup at aceout. Ref: njoy-reference/src/acefc.f90
-        # :1538-1693 (unionx ICP path) and :5341-5355 (aceout ESZ readback).
+        # MF3 union (ALL MF3 sections in tape order) → MF6/MT2 anchor merge
+        # (with the c-buffer overwrite quirk that drops one MF3 point per
+        # anchor and creates duplicates) → step-1.2 densification (off-by-one
+        # drops second-to-last) → gety1-style dedup at aceout. Ref:
+        # njoy-reference/src/acefc.f90:1541-1693 (unionx ICP path) and
+        # :5341-5355 (aceout ESZ readback).
+        #
+        # CRITICAL: the base grid is the union of *every* MF3 reaction grid,
+        # not just the longest single MT. T54 (proton+H-3) has no MT=1 and
+        # three MF3 sections (MT2/50/650) whose union (plus the MF6/MT2
+        # anchors) gives the 140-point ESZ grid; using only MT50's grid (the
+        # longest) yields 125 points and a structurally wrong tape.
         mf6_e = try
             read_mf6_incident_energies(endf_for_mf6, mat, 2)
         catch
             Float64[]
         end
-        if !isempty(mf6_e)
-            master_e = _acer_unionx_charged(master_e, sort(mf6_e))
-        end
+        # mf3 grids in ascending-MT (= tape) order, as Fortran processes them.
+        mf3_grids = [mf3[mt][1] for mt in sort(collect(keys(mf3)))]
+        master_e = _acer_unionx_charged(mf3_grids, sort(mf6_e))
     else
         # Neutron incident: union MF6 incident energies for ALL non-total
         # MTs into the master grid. This is the simpler (izai==1) path that
@@ -141,8 +148,16 @@ function acer_module(tapes::TapeManager, params::AcerParams)
     # 6.08e-83 instead of the INT=6 value 4.07e-107 (T62 SIG-block tail bug).
     xs_matrix = zeros(Float64, n_e, length(mt_sorted))
     mf3_q = Dict{Int, Float64}()   # per-MT QI [eV] for the LQR column (charged path)
+    mf3_tab_all = Dict()           # per-MT MF3 TAB1 (charged path; for production scan)
+    # per-MT MF3 threshold (first tabulated energy, eV) — used to place the
+    # SIG-block ie_start the Fortran way (acelod walks DOWN from nes to the
+    # first grid point ≥ threshold, so the threshold zero is INCLUDED). This
+    # is what makes T54's MT=650 start at grid index 118 (E=5.383 MeV, xs=0)
+    # rather than 119 (first nonzero). Ref: acefc.f90:5594-5610.
+    mf3_thresh = Dict{Int, Float64}()
     if !izai_neutron
         mf3_tab = extract_mf3_tab1_all(pendf, mat)
+        mf3_tab_all = mf3_tab
         for (col, mt) in enumerate(mt_sorted)
             rec = get(mf3_tab, mt, nothing)
             if rec === nothing
@@ -152,11 +167,31 @@ function acer_module(tapes::TapeManager, params::AcerParams)
                 continue
             end
             mf3_q[mt] = rec.qi
+            mf3_thresh[mt] = rec.tab.x[1]
             # gety1-faithful sample + sigfig(s,7,0). thr6=0 in the ACE path
             # (njoy never sets thr6 in acefc; the endf module global stays 0).
             for (i, e) in enumerate(master_e)
                 s = interpolate(rec.tab, e; coulomb_threshold=0.0)
                 xs_matrix[i, col] = round_sigfig(s, 7, 0)
+            end
+            # Force the first stored (threshold) point to zero — Fortran
+            # acelod acefc.f90:5627-5628: `test=100; if (j>1 .and. n==0 .and.
+            # enext>test) s=0`. The first SIG point of a threshold reaction
+            # (threshold > 100 eV, and not the absolute first grid point) is
+            # zeroed before it feeds the SIG block, the disappear/total
+            # accumulation, AND the acelcp production xs. Without this, T54's
+            # MT=50 stored xs[1] at grid[61]=1.02 MeV reads the interpolated
+            # 0.023438 instead of the reference 0.0 (and the same value leaks
+            # into absorption[61], total[61], and the neutron HPD).
+            thr = rec.tab.x[1]
+            eps = 1.0e-10
+            ie0 = n_e
+            while ie0 >= 1 && thr <= (1 + eps) * master_e[ie0]
+                ie0 -= 1
+            end
+            ie0 += 1
+            if ie0 > 1 && ie0 <= n_e && thr > 100.0
+                xs_matrix[ie0, col] = 0.0
             end
         end
     else
@@ -216,6 +251,28 @@ function acer_module(tapes::TapeManager, params::AcerParams)
         end
     end
 
+    # Particle-production scan (acelcp). For charged incident, scan MF6 for
+    # light-particle productions and build the nprod/iprod/... table + the
+    # t201..t207 thresholds. NTYPE=0 (no production found) → no blocks appended
+    # and the basic tape is byte-identical to the pre-acelcp output.
+    particle_production = nothing
+    if !izai_neutron
+        izai_p = mf1.nsub ÷ 10
+        ce_endf = params.nendf > 0 ? resolve(tapes, params.nendf) : pendf_path
+        particle_production = try
+            scan_particle_production(ce_endf, mat, Int(izai_p),
+                                     Float64(mf1.awi), Float64(mf1.awr),
+                                     Int(mf1.za), mf3_tab_all)
+        catch err
+            @warn "acer: particle-production scan failed: $err — no particle blocks"
+            nothing
+        end
+        # If the scan found no productions, leave it nothing (gate stays closed).
+        if particle_production !== nothing && isempty(particle_production.mprod)
+            particle_production = nothing
+        end
+    end
+
     # Derive suffix letter from NSUB. The parser gave a provisional letter
     # (default 'c'); replace it with the NSUB-driven one.
     letter = acer_incident_letter(mf1.nsub)
@@ -237,7 +294,9 @@ function acer_module(tapes::TapeManager, params::AcerParams)
                                   date=_acer_today_date(),
                                   charged_elastic=charged_elastic,
                                   incident_charged=!izai_neutron,
-                                  mf3_q=mf3_q)
+                                  mf3_q=mf3_q,
+                                  mf3_thresh=mf3_thresh,
+                                  particle_production=particle_production)
 
     # Write outputs
     if params.nace > 0
@@ -507,103 +566,143 @@ function _acer_linear_interp(query_e::Vector{Float64},
 end
 
 """
-    _acer_unionx_charged(mf3_grid, mf6_anchors) -> Vector{Float64}
+    _acer_unionx_charged(mf3_grids, mf6_anchors) -> Vector{Float64}
 
 Build the ESZ energy grid for charged-particle ACE faithfully reproducing
-Fortran `unionx` (acefc.f90:1538-1693) plus `aceout` ESZ readback
+Fortran `unionx` (acefc.f90:1541-1693) plus `aceout` ESZ readback
 (acefc.f90:5341-5355).
 
-The Fortran pipeline has three stages, each with subtle bugs/quirks that
-affect the final point count and must be replicated for bit-identity:
+`mf3_grids` is the list of per-reaction MF3 energy grids in tape (ascending-
+MT) order; `mf6_anchors` is the sorted MF6/MT2 incident-energy list.
 
-1. **MF6/MT2 anchor merge** with c-buffer overwrite quirk (lines 1608-1656).
+The Fortran pipeline has four stages, each with subtle quirks that affect
+the final point count and must be replicated for bit-identity:
+
+0. **MF3 union merge** (lines 1542-1606). Each MF3 reaction grid is merged,
+   in tape order, into a running union via a two-cursor walk. The terminator
+   `if (enext>test .and. k==nold) jt=-jt` fires only when BOTH cursors are
+   exhausted, so the union spans the full energy range of all sections.
+
+1. **MF6/MT2 anchor merge** with c-buffer overwrite quirk (lines 1620-1656).
    The `c` array is overwritten by the explicit `c(1)=ee` write before the
-   next inner-while iteration runs. Effect: the MF3 point that was just
-   read into `c` (the one strictly greater than the anchor) is silently
-   dropped, AND the next inner-while iteration writes `c` (now holding
-   the anchor) again, creating a duplicate.
+   next inner-while iteration runs. Effect: the next inner-while iteration's
+   first `loada(j,c)` writes `c` (now holding the previous anchor `ee`)
+   again, creating a duplicate that the stage-3 dedup later collapses. On
+   the LAST anchor `jt=-jt` terminates the grid — trailing MF3 points above
+   the last anchor are dropped (this is what caps T54 at 1.2e7 = the proton
+   LAW=5 top energy, even though MT50's MF3 runs to 2e7).
 
-2. **Step-1.2 pass** (lines 1658-1686). The outer `do while (k.lt.nold)`
-   has an off-by-one that drops the second-to-last point: panels are
-   processed for k=2..nold-1, then a final `loada` writes old[nold] —
-   old[nold-1] is never written.
+2. **Step-1.2 densification** (lines 1659-1686). The outer `do while
+   (k.lt.nold)` has an off-by-one that drops the second-to-last point:
+   panels are processed for k=2..nold-1, then a final `loada` writes
+   old[nold] — old[nold-1] is never written.
 
-3. **gety1 dedup at aceout** (line 5346-5354). When aceout reads MT=1
-   back from the scratch tape via `gety1`, duplicate energies (which
-   represent step discontinuities in TAB1 form) collapse to single
-   entries.
+3. **gety1 dedup at aceout** (lines 5346-5354). When aceout reads MT=1 back
+   from the scratch tape via `gety1`, adjacent duplicate energies collapse
+   to single entries.
 
-For T50 (α+He-4): MF3=29 → after stage 1 = 32 (drops 4.4416, 13.578,
-17.906; dups at 4.0, 12.9, 16.6) → after stage 2 = 39 (8 step pads
-inserted; one 16.6 dup dropped) → after stage 3 = 37.
+For T54 (proton+H-3): MF3 union (MT2∪MT50∪MT650) = 92 pts → +MF6/MT2 anchors
+= 107 (capped at 1.2e7) → step-1.2 = 141 → dedup = 140.
+For T62 (d+He-3): MF3 union (MT2∪MT600) = 226 → ... → 238.
 """
-function _acer_unionx_charged(mf3_grid::Vector{Float64},
+function _acer_unionx_charged(mf3_grids::Vector{Vector{Float64}},
                                 mf6_anchors::Vector{Float64})
-    isempty(mf6_anchors) && return copy(mf3_grid)
-    isempty(mf3_grid)   && return copy(mf6_anchors)
+    etop = 1.0e10
 
-    # ---- Stage 1: MF6 anchor merge with c-buffer overwrite quirk ------
+    # ---- Stage 0: MF3 union merge (acefc.f90:1542-1606) ---------------
+    # Merge a new section grid `ergrid` (its successive gety1 energies) into
+    # the running union `old`. Two cursors (old via k/eg, new via ip/er),
+    # writing the min each step; terminate when both exhausted.
+    function merge_one(old::Vector{Float64}, ergrid::Vector{Float64})
+        nold = length(old)
+        out  = Float64[]
+        k = 0; eg = etop
+        if nold > 0; k = 1; eg = old[k]; end
+        ne = length(ergrid); ip = 1
+        er = ip <= ne ? ergrid[ip] : etop
+        enext = er; jt = 1
+        test = etop - etop / 100
+        while jt > 0
+            if er > eg
+                if enext > test && k == nold; jt = -1; end
+                push!(out, eg)
+                if k < nold; k += 1; eg = old[k]; else; eg = etop; end
+            else
+                ip += 1
+                enext = ip <= ne ? ergrid[ip] : etop
+                if enext > test && k == nold; jt = -1; end
+                push!(out, er)
+                if er == eg && k < nold; k += 1; eg = old[k]; end
+                er = enext
+            end
+        end
+        out
+    end
+
     grid = Float64[]
-    n_old = length(mf3_grid)
-    k = 1               # 1-indexed cursor into mf3_grid (Fortran finda(k))
-    eg = mf3_grid[k]    # current "next" old-grid value
-    c_stale = mf3_grid[k]  # mirrors Fortran's `c` array — clobbered by ee writes
-    n_anc = length(mf6_anchors)
-    for (i, ee) in enumerate(mf6_anchors)
-        # Inner while: advance through old grid until eg >= ee.
-        while eg < ee && k <= n_old
-            push!(grid, c_stale)        # write previous finda's value
-            k += 1
-            if k > n_old; break; end
-            c_stale = mf3_grid[k]
-            eg = c_stale
-        end
-        # Write the MF6 anchor (this overwrites c_stale!).
-        push!(grid, ee)
-        c_stale = ee
-        # If eg == ee, advance k once (Fortran lines 1647-1651).
-        if eg == ee && k <= n_old
-            k += 1
-            if k <= n_old
-                c_stale = mf3_grid[k]
-                eg = c_stale
+    for g in mf3_grids
+        isempty(g) && continue
+        grid = isempty(grid) ? copy(g) : merge_one(grid, g)
+    end
+    isempty(grid) && return copy(mf6_anchors)
+
+    # ---- Stage 1: MF6/MT2 anchor merge with c-buffer overwrite --------
+    if !isempty(mf6_anchors)
+        n_old = length(grid)
+        merged = Float64[]
+        j = 0; k = 1
+        c_stale = grid[k]   # mirrors Fortran `c` — clobbered by `c(1)=ee`
+        eg = c_stale
+        n_anc = length(mf6_anchors)
+        for (iee, ee) in enumerate(mf6_anchors)
+            while eg < ee
+                j += 1; push!(merged, c_stale)       # loada(j,c)
+                k += 1
+                if k <= n_old; c_stale = grid[k]; eg = c_stale; else; eg = etop; end
             end
+            j += 1
+            jt = iee == n_anc ? -j : j
+            c_stale = ee                              # c(1)=ee  ← clobbers c
+            push!(merged, ee)                          # loada(jt,c)
+            if eg == ee && jt > 0
+                k += 1
+                if k <= n_old; c_stale = grid[k]; eg = c_stale; else; eg = etop; end
+            end
+            # On the last anchor jt<0 → Fortran loop ends; trailing old
+            # points (above the last anchor) are dropped.
         end
-        # On the LAST anchor, Fortran's loada(jt=-j,...) flushes; nothing
-        # else gets written. Trailing MF3 points beyond the last anchor
-        # are silently dropped — same behaviour we replicate here.
+        grid = merged
     end
 
-    # ---- Stage 2: step-1.2 pass with off-by-one second-to-last drop ----
-    n_pre = length(grid)
-    if n_pre < 2
-        post_step = copy(grid)
-    else
-        post_step = Float64[]
-        # Process panels [grid[i], grid[i+1]] for i=1..n_pre-2.
-        # (Fortran outer loop k=2..nold-1; the k=nold case is skipped.)
-        for i in 1:(n_pre-2)
-            eg_i = grid[i]
-            er_i = grid[i+1]
-            push!(post_step, eg_i)
-            egrid_i = round_sigfig(1.2 * eg_i, 2, 0)
-            while egrid_i < er_i
-                push!(post_step, egrid_i)
-                eg_i = egrid_i
-                egrid_i = round_sigfig(1.2 * eg_i, 2, 0)
+    # ---- Stage 2: step-1.2 densification with off-by-one drop ---------
+    n_old = length(grid)
+    if n_old >= 2
+        out = Float64[]
+        k = 1; eg = grid[k]
+        while k < n_old
+            k += 1
+            cval = grid[k]
+            if k < n_old
+                er = cval
+                egrid = 0.0
+                while egrid < er
+                    push!(out, eg)
+                    egrid = round_sigfig(1.2 * eg, 2, 0)
+                    if egrid < er; eg = egrid; end
+                end
+                eg = er
             end
         end
-        # Final point (grid[n_pre-1] is dropped — Fortran off-by-one).
-        push!(post_step, grid[n_pre])
+        # Final loada(jt=-j,...) writes grid[nold]; grid[nold-1] dropped.
+        push!(out, grid[n_old])
+        grid = out
     end
 
-    # ---- Stage 3: gety1-style adjacent-duplicate dedup -----------------
-    # gety1 in aceout collapses adjacent equal energies to a single entry.
-    out = Float64[post_step[1]]
-    for i in 2:length(post_step)
-        if post_step[i] != post_step[i-1]
-            push!(out, post_step[i])
-        end
+    # ---- Stage 3: gety1-style adjacent-duplicate dedup ----------------
+    isempty(grid) && return grid
+    dedup = Float64[grid[1]]
+    for i in 2:length(grid)
+        grid[i] != grid[i-1] && push!(dedup, grid[i])
     end
-    out
+    dedup
 end

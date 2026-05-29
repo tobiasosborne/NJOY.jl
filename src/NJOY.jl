@@ -100,6 +100,7 @@ include("formats/ace_types.jl")
 include("formats/ace_neutron.jl")
 include("formats/ace_builder.jl")
 include("formats/ace_charged.jl")
+include("formats/ace_lcp.jl")
 include("formats/ace_writer.jl")
 
 # Output formats (CCCCR -- CCCC standard interface files)

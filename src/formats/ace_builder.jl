@@ -133,7 +133,8 @@ function build_xss(table::ACENeutronTable)
     # aceout assigns `end=next-1` after filling XSS (acefc.f90:5893).
     jxs[JXS_END] = length(xss)
 
-    # Fill NXS
+    # Fill NXS (NES/NTR/NR/IZ/IA + provisional LEN2). LEN2/NTYPE are revised
+    # below if particle-production blocks are appended.
     za, _ = parse_zaid(strip(table.header.hz))
     nxs[NXS_LEN2]  = length(xss)
     nxs[NXS_IZAID] = za
@@ -142,6 +143,16 @@ function build_xss(table::ACENeutronTable)
     nxs[NXS_NR]    = nr_count
     nxs[NXS_IZ]    = za ÷ 1000
     nxs[NXS_IA]    = za % 1000
+
+    # Particle-production blocks (acelcp). Appended after the AND block and
+    # before LEN2/NTYPE are finalized; sets JXS[PTYPE/NTRO/PLOCT], NXS[NTYPE],
+    # and revises NXS[LEN2] = next-1. NTYPE=0 (no production) leaves the basic
+    # tape byte-identical — the gate that keeps T62/T50/T52 unchanged.
+    if table.particle_production !== nothing
+        append_particle_blocks!(xss, is_int, nxs, jxs,
+                                table.particle_production, n_es,
+                                table.mf3_thresh)
+    end
 
     (nxs, jxs, xss, is_int)
 end
@@ -161,7 +172,9 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
                                date::AbstractString = "",
                                charged_elastic::Union{Nothing, NamedTuple} = nothing,
                                incident_charged::Bool = false,
-                               mf3_q::Dict{Int, Float64} = Dict{Int, Float64}())
+                               mf3_q::Dict{Int, Float64} = Dict{Int, Float64}(),
+                               mf3_thresh::Dict{Int, Float64} = Dict{Int, Float64}(),
+                               particle_production = nothing)
     # Prefer explicit ZA (from MF1/MT451) over pendf.mat (which is MAT, not ZA).
     # Same for AWR — pendf often has mass number A in place of real AWR.
     true_za = za > 0 ? Int(za) : Int(pendf.mat)
@@ -225,10 +238,30 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
     heating = zeros(n)
 
     reactions = ReactionXS[]
+    egrid_ev = pendf.energies   # eV grid (= master_e)
     for (col, mt) in enumerate(pendf.mt_list)
         mt in (1, 2) && continue
         xs_col = pendf.cross_sections[:, col]
-        ie_start = findfirst(x -> x > 0.0, xs_col)
+        # ie_start: on the charged path, mirror Fortran acelod's threshold
+        # walk (acefc.f90:5594-5610). Starting from nes, decrement while
+        # threshold ≤ (1+eps)*esz[j], then j=j+1. Result = first grid index
+        # whose energy is ≥ the reaction's MF3 first energy — so the SIG block
+        # INCLUDES the threshold point (whose xs is the threshold zero).
+        # The neutron path keeps the old "first nonzero" behaviour (unchanged
+        # for the passing neutron tests).
+        ie_start = nothing
+        if incident_charged && haskey(mf3_thresh, mt)
+            thr = mf3_thresh[mt]
+            eps = 1.0e-10
+            j = n
+            while j >= 1 && thr <= (1 + eps) * egrid_ev[j]
+                j -= 1
+            end
+            j += 1
+            ie_start = j <= n ? j : nothing
+        else
+            ie_start = findfirst(x -> x > 0.0, xs_col)
+        end
         ie_start === nothing && continue
         # LQR: ACE Q-value in MeV. Fortran stores QI (MF3 second CONT field)
         # converted to MeV. The neutron path leaves this 0 (filled elsewhere
@@ -260,7 +293,9 @@ function build_ace_from_pendf(pendf::PointwiseMaterial;
                     energy_grid=energy_mev, total_xs=total_xs,
                     absorption_xs=absorption_xs, elastic_xs=elastic_xs,
                     heating_numbers=heating, reactions=reactions,
-                    angular_elastic=angular_elastic)
+                    angular_elastic=angular_elastic,
+                    particle_production=particle_production,
+                    mf3_thresh=mf3_thresh)
 end
 
 """

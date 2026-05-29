@@ -100,6 +100,12 @@ struct ACENeutronTable
     angular::Dict{Int, AngularBlock}   # MT -> angular block
     iz::Vector{Int32}    # (IZ,AW) pairs: iz values (16 entries)
     aw::Vector{Float64}  # (IZ,AW) pairs: aw values (16 entries)
+    # Charged-particle production data (acelcp). `nothing` for neutron /
+    # elastic-only tables (NTYPE=0); a ParticleProduction otherwise.
+    particle_production::Any
+    # per-MT MF3 first energy (eV) for the Fortran SIG-block threshold walk;
+    # empty for the neutron path.
+    mf3_thresh::Dict{Int, Float64}
 end
 
 """
@@ -120,7 +126,9 @@ function ACENeutronTable(; header::ACEHeader,
                            angular_elastic::Union{AngularBlock, Nothing} = nothing,
                            angular::Dict{Int, AngularBlock} = Dict{Int, AngularBlock}(),
                            iz::AbstractVector{<:Integer} = zeros(Int32, 16),
-                           aw::AbstractVector{<:Real} = zeros(Float64, 16))
+                           aw::AbstractVector{<:Real} = zeros(Float64, 16),
+                           particle_production = nothing,
+                           mf3_thresh::Dict{Int, Float64} = Dict{Int, Float64}())
     nes = length(energy_grid)
     for (nm, a) in [("total_xs", total_xs), ("absorption_xs", absorption_xs),
                     ("elastic_xs", elastic_xs), ("heating_numbers", heating_numbers)]
@@ -134,7 +142,8 @@ function ACENeutronTable(; header::ACEHeader,
                     Float64.(energy_grid), Float64.(total_xs),
                     Float64.(absorption_xs), Float64.(elastic_xs),
                     Float64.(heating_numbers), reactions,
-                    angular_elastic, angular, iz16, aw16)
+                    angular_elastic, angular, iz16, aw16,
+                    particle_production, mf3_thresh)
 end
 
 # =========================================================================
