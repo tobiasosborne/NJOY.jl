@@ -102,6 +102,8 @@ include("formats/ace_builder.jl")
 include("formats/ace_charged.jl")
 include("formats/ace_lcp.jl")
 include("formats/ace_writer.jl")
+include("formats/ace_reader.jl")
+include("formats/ace_aplots.jl")
 
 # Output formats (CCCCR -- CCCC standard interface files)
 include("formats/ccccr.jl")

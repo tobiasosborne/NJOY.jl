@@ -394,12 +394,34 @@ function _acer_iopt7(tapes::TapeManager, params::AcerParams)
               "($(length(out_lines)) lines, zaid $(strip(hz0))→$(strip(new_hz)))"
     end
 
-    # ngend slot: viewr-format plot tape. Stub empty — plot generation is a
-    # separate grind (Fortran acer.f90 `aplots`). Downstream viewr reading
-    # this file will no-op on empty input.
+    # ngend slot: viewr-format plot tape. Fortran acefix calls aplots only for
+    # continuous/charged data classes (ht in {c,h,o,r,s,a}); thermal ('t') and
+    # other classes never plot. Ref: acefc.f90:14198-14206 + 14205 (aplots).
     if params.ngend > 0
         plot_path = resolve(tapes, params.ngend)
-        touch(plot_path)
+        if ht in ('c', 'h', 'o', 'r', 's', 'a')
+            # hk title = ACE header line 2, cols 1-70 (Fortran hko, a70).
+            hk = length(src_lines) >= 2 ? rpad(src_lines[2], 70)[1:70] : ""
+            table = read_ace_ascii(src_lines)
+            # Render into a buffer first so a not-yet-ported aplots block leaves
+            # the on-disk plot tape as the (intentionally deferred) empty stub
+            # rather than a truncated partial — and never blocks tape35 below.
+            try
+                buf = IOBuffer()
+                _acer_aplots(buf, table, hk, ht)
+                write(plot_path, take!(buf))
+                @info "acer iopt=7: wrote viewr plot tape $(basename(plot_path)) " *
+                      "(class '$ht', nes=$(Int(table.nxs[NXS_NES])))"
+            catch err
+                err isa AplotsNotPortedError || rethrow()
+                touch(plot_path)
+                @warn "acer iopt=7: viewr plot tape $(basename(plot_path)) left as " *
+                      "empty stub — $(err.msg)"
+            end
+        else
+            # Non-plottable class: Fortran writes nothing to the plot unit.
+            touch(plot_path)
+        end
         register!(tapes, params.ngend, plot_path)
     end
 
