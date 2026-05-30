@@ -69,3 +69,4 @@ by their current names).
 | 2026-05-19 | Phase 75 | [phase75_urr_rescon.md](phase75_urr_rescon.md) | URR rescon (ggunr1/rpxunr) ported; T15 tape26 gap −6→**0** (5958=ref); all MF=33 row layouts match. |
 | 2026-05-28 | Phase 77 | [phase77_broadr_acer_sweep.md](phase77_broadr_acer_sweep.md) | broadr O(n²)→O(n) (~26× speedup, BI); T50 BI 143→163/163; T20 CRASH→DIFFS; fresh sweep 3 BI, 0 CRASH. |
 | 2026-05-29 | Phase 78 | [phase78_acer_charged_arc.md](phase78_acer_charged_arc.md) | **4 NEW BIT_IDENTICAL: T52, T62, T61, T53**; ptlegc/coul, charged NTR>0, iopt=7 xsdir, acelcp particle-type blocks. |
+| 2026-05-30 | Phase 79 | [phase79_acer_aplots.md](phase79_acer_aplots.md) | **T50 + T52 tape33 BIT_IDENTICAL (ALL PASS @1e-9)**; aplots/aplotr/aplopf/aplof4/ascll/ascle ported; class-letter gate; AplotsNotPortedError graceful-fallback preserves T53/T62 tape34/35 BI. |
