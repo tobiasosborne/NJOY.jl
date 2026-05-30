@@ -9,3 +9,7 @@ test/validation/oracle_cache/
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+
+# Transient sweep console logs (reports/REFERENCE_SWEEP.md is the canonical report)
+reports/sweep_run.log
+reports/sweep_logs/

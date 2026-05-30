@@ -7,9 +7,9 @@
 
 ## What is this project
 
-NJOY.jl is a Julia port of NJOY2016 — the standard nuclear data processing system used worldwide for reactor physics, criticality safety, and radiation transport. The original is ~100 k lines of Fortran 90 code (`njoy-reference/src/`, 39 files, cloc code-only; 119 613 including comments and blanks). Our Julia version is ~24 k lines of code (`src/`, 87 files, cloc code-only).
+NJOY.jl is a Julia port of NJOY2016 — the standard nuclear data processing system used worldwide for reactor physics, criticality safety, and radiation transport. The original is ~120 k lines of Fortran 90 code (`njoy-reference/src/`, 39 files; ~100 k code-only). Our Julia version is ~33 k lines of code (`src/`, 105 files, cloc code-only).
 
-The goal: produce **bit-identical** PENDF/ACE output matching all 85 of NJOY's own reference test problems. The port must be idiomatic Julia — composable, differentiable, no global state — not a transliteration.
+The goal: produce **bit-identical** PENDF/ACE output matching NJOY's own reference test problems (86 test directories in the cloned `develop` tree). The port must be idiomatic Julia — composable, differentiable, no global state — not a transliteration.
 
 **Repo:** https://github.com/tobiasosborne/NJOY.jl (GPL-3.0)
 
