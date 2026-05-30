@@ -1,221 +1,168 @@
 # NJOY.jl
 
-A Julia port of [NJOY2016](https://github.com/njoy/NJOY2016) — the standard
-nuclear data processing system used worldwide for reactor physics, criticality
-safety, and radiation transport. The Fortran reference is ~100 k lines of
-Fortran 90 in `njoy-reference/src/`; this port is ~24 k lines of idiomatic
-Julia in `src/` (cloc, code-only, as of Phase 51).
+A Julia reimplementation of [NJOY2016](https://github.com/njoy/NJOY2016) — the
+standard nuclear data processing system used worldwide for reactor physics,
+criticality safety, and radiation transport (ENDF → PENDF / ACE / GENDF /
+covariance). The Fortran reference is ~120 k lines of Fortran 90 in
+`njoy-reference/src/` (39 files, ~100 k code-only); this port is ~33 k lines of
+idiomatic Julia in `src/` (105 files, code-only per `cloc`).
 
-**Goal**: bit-identical output on all 84 of NJOY's own reference tests. Same
-ENDF input, same `tapeNN` output, byte-for-byte (or within published
-cross-compiler tolerance; see `reports/ACCEPTANCE_CRITERIA.md`).
+## Project goal (north star)
+
+A full Julia reimplementation of NJOY that is **bit-identical** with the Fortran
+reference, and that is also **maintainable, extensible, faster, and more
+pleasant to work with** than the original.
+
+We get there in two phases, in this order:
+
+1. **Mini north star — bit-identical first.** Reproduce NJOY2016's output
+   byte-for-byte (or within the published cross-compiler tolerance) on NJOY's
+   own reference test suite. This is the trust we build everything else on.
+2. **North star — then make it better.** Once an area is bit-identical and we
+   have confidence in it, pursue the maintainability / extensibility / speed /
+   ergonomics gains that a modern Julia design allows — *without* losing the
+   bit-identical guarantee.
+
+The Fortran is canonical truth. Where NJOY rounds to 8 sigfigs before adding
+potential scattering, or accumulates in a particular IEEE-754 order, or carries
+a quirk, we reproduce it exactly — expressed idiomatically (multiple dispatch,
+parametric types, no globals), never transliterated. See `CLAUDE.md` for the
+working agreement and `HANDOFF.md` for the living state.
 
 ## Status at a glance
 
-- **RECONR** is the most mature module — **19 reference tests are
-  bit-identical** on the RECONR-produced PENDF, covering all resonance
-  formalisms (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR modes 11+12).
-  See HANDOFF.md §"Current State" for the test list.
-- **Full pipelines** run end-to-end on most reference decks. T01 (C-nat,
-  reconr+broadr+heatr+thermr) passes at 1e-5 tolerance (32 962 lines,
-  41/41 sections structurally match). T04 (U-235) errorr MF31 tape23 is
-  at NUMERIC_PASS 81/82 lines.
-- **Active front**: `errorr` covariance. T15/T17 (U-238 JENDL) MF33
-  matrix values now match Fortran covcal exactly for LB=5 blocks after
-  Phase 51's σ·flx-weighted union-grid collapse fix.
-- **Unwired algorithms**: `leapr` (S(α, β) phonon expansion), `purr`
-  (probability tables via Monte-Carlo ladders), `covr` (correlation
-  matrix + boxer output), `gaspr` (MT203-207 gas-production), and the
-  CCCC ISOTXS/BRKOXS/DLAYXS writers each have a working implementation
-  in `src/processing/` or `src/formats/` (~200-280 LOC of real physics
-  per module), but the orchestration wrappers in
-  `src/orchestration/modules/` just copy/touch tapes — the connecting
-  plumbing (input-deck parsing, tape splicing, ENDF/CCCC emit) has not
-  been wired up.
-- **Other gaps**: `plotr` (plot-command tape emission) has no backing
-  implementation yet. `thermr` supports free-gas and S(α, β) but
-  hard-codes the Debye-Waller integral to graphite. `acer` covers
-  `iopt=1` fast-neutron ACE; thermal/photo/dosimetry ACE paths are
-  stubs.
+*Verified against a fresh clone of NJOY2016 `develop @ ac5adf5` (2026-04-06) via
+the full 86-test sweep (`reports/REFERENCE_SWEEP.md`); 0 crashes, 0 timeouts.*
 
-See [HANDOFF.md](HANDOFF.md) for the living project state (current phase,
-open work, traps, per-test status) and `worklog/T*.md` for per-session
-debug journals.
+Bit-identical (`rtol = 1e-9`) on the **substantive output tape**:
 
-## Installation
+| Test | Chain | Tape | Result | Note |
+|------|-------|------|--------|------|
+| T03 | moder → reconr | tape37 | 9274 / 9274 | photoatomic — full test bit-identical |
+| T61 | acer (iopt=7 thermal) | tape71/72 | 49211 / 49211 | full test bit-identical |
+| T50 | acer (α + He-4) | tape34/35 | 163 / 163 | only `tape33` aplots stub blocks full pass |
+| T52 | acer (p + H-1) | tape34/35 | 3986 / 3986 | only `tape33` aplots stub blocks full pass |
+| T53 | acer (d + H-2) | tape34/35 | 12030 / 12030 | only `tape33` aplots stub blocks full pass |
+| T62 | acer (d + He-3) | tape34/35 | 7221 / 7221 | only `tape33` aplots stub blocks full pass |
 
-Requires Julia **1.10+** (`Project.toml` line 17). Not registered; install
-from source:
+Numeric pass (`rtol = 1e-5`, the cross-compiler floor):
 
-```julia
-using Pkg
-Pkg.develop(path="/path/to/NJOY.jl")
+| Test | Chain | Tape | Result |
+|------|-------|------|--------|
+| T01 | reconr → broadr → heatr → thermr → groupr | tape25 | 32812 / 32962 |
+| T80 | leapr (S(α,β)) | tape24 | 91405 / 91453 |
+
+Additional ground covered:
+
+- **RECONR is the most mature module** — ~19 reference materials are
+  bit-identical on the RECONR-produced PENDF across every resonance formalism
+  (LRU=0, SLBW, MLBW, Reich-Moore, SAMMY/RML, URR). The *full pipelines* built
+  on top of those then diverge in the downstream module being worked on; see the
+  per-test table in `reports/REFERENCE_SWEEP.md`.
+- The remaining tests run end-to-end and land in `DIFFS` (last-digit / FP grind,
+  or a not-yet-ported sub-path) — these are the active grind, not breakage.
+
+> **Note on the sweep summary line.** The sweep classifier marks a *test*
+> bit-identical only when *every* one of its reference tapes passes. Four ACER
+> tests (T50/T52/T53/T62) are byte-perfect on their ACE tape (`tape34`) and
+> xsdir (`tape35`) but carry an unimplemented aplots plot tape (`tape33`), so
+> they report as `DIFFS` despite the real output being bit-identical. Read the
+> per-tape detail, not just the headline count.
+
+> **Reference drift.** This port is validated against a specific NJOY2016
+> baseline. The upstream `develop` branch moves; e.g. T22 (leapr) is currently
+> 4635/4636 — a single MF1/MT451 header field the newer reference emits
+> differently. When resuming on a new machine, expect to pin or reconcile the
+> `njoy-reference` checkout. See the open issues.
+
+## Module maturity
+
+The 23 NJOY modules, as the **code** stands today (not aspirations):
+
+| Maturity | Modules |
+|----------|---------|
+| **Full** (real port, no stub paths in the common case) | `reconr`, `broadr`, `unresr`, `heatr`¹, `gaspr`, `covr`, `mixr`, `resxsr`, `matxsr`, `dtfr`, `viewr` |
+| **Partial** (core paths work; some options `@warn`/stubbed) | `thermr`², `leapr`³, `groupr`⁴, `errorr`⁵, `gaminr`, `acer`⁶, `powr`⁷, `moder`⁸ |
+| **Stub** (structure only / not yet wired) | `purr`⁹, `wimsr`¹⁰, `ccccr`¹¹, `plotr`¹² |
+
+¹ heatr KERMA/damage full; photon plot tape stubbed.
+² thermr free-gas + S(α,β) + coherent-elastic; incoherent-elastic (LTHR=2) not
+  yet wired; Debye-Waller defaults to graphite.
+³ leapr phonon/translational/cold-H/Sköld full; coherent-elastic (iel>0) and
+  secondary scatterer (nss>0) stubbed.
+⁴ groupr MF3 + nubar + multi-T/multi-σ₀; MF6/8/10/16+ transfer matrices and
+  MT=251/252 derivation incomplete.
+⁵ errorr MF31/33 covariance + LB=0/1/2/5/6 + NC + rescon (LCOMP=1); LTY=1/2/3
+  standards, MF34 multi-section, LCOMP=0/2 still open.
+⁶ acer iopt=1 fast-neutron + full charged-particle path + iopt=7; iopt=2/3/4/5
+  (thermal/dosimetry/photoatomic/photonuclear) are stubs; aplots tape is a stub.
+⁷ powr lib=1 (GAMTAP) full; lib=2 (EPRI-CPM) / lib=3 error out.
+⁸ moder tape copy/convert; material-filter extraction + multi-tape merge missing.
+⁹ purr emits correct tape *structure* with placeholder (zero) probability tables.
+¹⁰ wimsr parses decks + writes a structurally-valid but zero-content WIMS tape.
+¹¹ ccccr writes ISOTXS/BRKOXS/DLAYXS marker files only — no binary content.
+¹² plotr touches an empty output tape.
+
+## Repository layout
+
 ```
-
-The Fortran NJOY2016 reference binary is bundled for oracle generation
-and gdb diagnostics. Rebuild with:
-
-```bash
-cd njoy-reference/build && cmake --build . --target njoy
+src/
+  endf/           ENDF-6 tape reader/writer, record types, MF/MT registry
+  resonances/     SLBW, MLBW, Reich-Moore, SAMMY/RML, URR reconstruction
+  processing/     reconr, broadr, heatr, thermr, unresr, errorr, ... physics
+  formats/        ACE, GENDF, MATXS, CCCC, WIMS, DTF, POWR writers
+  orchestration/  run_njoy, input-deck parser, module wrappers, tape manager
+  viewr/          viewr PostScript engine (graph.f90 port)
+  visualization/  plotr/visualization backends
+  NJOY.jl         top-level module
+test/
+  validation/     reference_test.jl (execute.py port), sweep, diagnose harness
+docs/             design.md, architecture.md, api.md, tutorial.md
+njoy-reference/   NJOY2016 Fortran source + tests (git-ignored; clone yourself)
+reports/          acceptance criteria, sweep results, review waves
+worklog/          per-session debug journals (T*.md, phase*.md)
 ```
 
 ## Quick start
 
-Drop-in replacement for the Fortran CLI — parses an NJOY input deck and
-runs the whole pipeline:
-
-```julia
-using NJOY
-run_njoy("njoy-reference/tests/01/input"; work_dir="/tmp/t01")
-```
-
-Modules communicate exclusively via tape files on disk (no shared mutable
-state), matching Fortran's `tape{N}` plumbing exactly. Tape paths are
-managed by a `TapeManager`.
-
-## Running tests
-
-Before every run (**non-negotiable** — concurrent Julia corrupts the
-precompile cache):
+The Fortran reference tree is **git-ignored** and must be cloned locally — it
+provides both the canonical Fortran source and the reference test tapes the
+sweep compares against.
 
 ```bash
+# 1. Clone the NJOY2016 reference (Fortran source + reference tapes)
+git clone https://github.com/njoy/NJOY2016.git njoy-reference
+# (to reproduce the validated baseline exactly, pin to the commit the port
+#  was last verified against — see the open issues / HANDOFF.md)
+
+# 2. Build the Fortran oracle (optional — only to regenerate reference tapes)
+cd njoy-reference && cmake -S . -B build && cmake --build build --target njoy
+cd ..
+
+# 3. Run the Julia tests against the reference tapes.
+#    ALWAYS clear the precompile cache first (concurrent Julia corrupts it):
 rm -rf ~/.julia/compiled/v1.12/NJOY*
+julia --project=. test/validation/reference_test.jl 1        # single test
+julia --project=. test/validation/sweep_reference_tests.jl   # full sweep (~50 min)
 ```
 
-### Single reference test
+Issue tracking uses **beads** (`bd`); the durable state lives in
+`.beads/issues.jsonl` and is loaded with `bd import` on a fresh clone. Run
+`bd ready` to see available work.
 
-Drives a specific NJOY reference input deck through `run_njoy` and diffs
-every produced `tapeNN` against the Fortran `referenceTapeNN` at four
-tolerances (1e-9, 1e-7, 1e-5, 1e-3):
+## Acceptance tolerances
 
-```bash
-julia --project=. test/validation/reference_test.jl 7       # T07
-julia --project=. test/validation/reference_test.jl 15 17   # T15 and T17
-```
+See `reports/ACCEPTANCE_CRITERIA.md` for the full hierarchy with maintainer
+quotes. In brief:
 
-### Full 84-test sweep
+| Tolerance | Meaning |
+|-----------|---------|
+| **1e-9** (bit-identical) | byte-for-byte after date wildcarding — the stretch goal |
+| **1e-7** (numeric pass) | ±1 in the 7th sigfig — the cross-compiler floor (even Fortran↔Fortran fails 1e-9 across architectures) |
+| **structural** | same line counts, same sections, same grid sizes — non-negotiable at any tolerance |
 
-Runs everything and writes a Markdown report to
-`reports/REFERENCE_SWEEP.md`. ~90–150 minutes depending on broadr
-performance on heavy isotopes:
+## Contributing
 
-```bash
-julia --project=. test/validation/sweep_reference_tests.jl
-```
-
-### Unit tests
-
-```bash
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
-
-## Architecture
-
-### Tape-based orchestration
-
-`run_njoy(input_path)` tokenises a Fortran-style input deck, parses each
-module's card block, and dispatches sequentially. All state flows through
-`tape{N}` files — no shared data structures between modules. The dispatch
-table lives in `src/orchestration/pipeline.jl`.
-
-### Module status
-
-Classification refers to the **orchestration wrapper** in
-`src/orchestration/modules/`, which is what `run_njoy` actually invokes:
-- **Real** — wrapper dispatches to substantial processing code; output
-  matches Fortran to a documented tolerance.
-- **Partial** — wrapper dispatches real code, but key features or
-  reaction classes are missing; may degrade gracefully on unsupported
-  inputs.
-- **Unwired** — algorithm is implemented in `src/processing/` or
-  `src/formats/`, but the orchestration wrapper is a tape copy / empty
-  touch / marker file; the connecting plumbing (input-deck parsing,
-  tape splicing, ENDF emit) has not been wired up.
-
-| Module | Class | Backing files | Notes |
-|--------|-------|---------------|-------|
-| `reconr` | Real | `src/processing/reconr*.jl` | 19 RECONR-level bit-identical tests |
-| `broadr` | Real | `src/processing/broadr.jl`, `sigma1.jl` | Multi-temperature sequential broadening |
-| `unresr` | Real | `src/processing/unresr.jl` | LFW=0/1, LRF=2 Bondarenko |
-| `heatr` | Real | `src/processing/heatr.jl` | KERMA + damage; plot-tape stubbed |
-| `errorr` | Real | `src/processing/errorr.jl`, `src/orchestration/modules/errorr.jl` | MF31/33 NI + NC LTY=0/v2 + GENDF readback; LTY=1/2/3 standards/ratio return `nothing` |
-| `moder` | Partial | `src/processing/moder.jl` | Tape copy; multi-material merge not wired |
-| `thermr` | Partial | `src/processing/thermr.jl` | Free-gas + S(α, β); Debye-Waller hardcoded to graphite 2.1997 |
-| `groupr` | Partial | `src/processing/groupr.jl` | MF=3 and MF=1 nubar only; transfer matrices (MF=6/8/10/16-36) not ported |
-| `acer` | Partial | `src/formats/ace_*.jl` | `iopt=1` fast neutron real; thermal/photoatomic/dosimetry stubs |
-| `gaminr` | Partial | `src/processing/gaminr.jl` | MF=23 Gauss-Lobatto group averaging |
-| `dtfr` | Partial | `src/formats/dtfr.jl` | DTF table + 3D photon-scatter plot tape; accuracy unverified |
-| `matxsr` | Partial | `src/formats/matxsr*.jl` | MATXS record layout; scatter matrices P0-only |
-| `viewr` | Partial | `src/viewr/*.jl` | Renders real tapes when upstream plot module populated |
-| `purr` | Unwired | `src/processing/purr.jl` (255 LOC) | `generate_ptable` (MC ladders + chi²/Wigner sampling + Doppler + Bondarenko self-shielding) ported; wrapper copies PENDF, MT152 emission not wired |
-| `leapr` | Unwired | `src/processing/leapr.jl` (264 LOC) | `generate_sab` (phonon expansion, convolution, discrete oscillators, SCT fallback) ported; wrapper touches empty file, MF7 emission not wired |
-| `covr` | Unwired | `src/processing/covr.jl` (283 LOC) | Correlation conversion + relative std dev + boxer format ported; wrapper touches empty file, plotr-format emission not wired |
-| `gaspr` | Unwired | `src/processing/gaspr.jl` (252 LOC) | `gas_production` + `gas_multiplicity` (MT203-207) ported; wrapper copies PENDF, MT20x splicing not wired |
-| `ccccr` | Unwired | `src/formats/ccccr*.jl` (399 LOC) | `write_isotxs` / `write_brkoxs` / `write_dlayxs` (CCCC-IV binary record format) ported; wrapper writes marker files, GENDF parsing not wired |
-| `plotr` | Stub | — | No backing implementation yet; wrapper touches empty file |
-
-### Resonance formalisms (RECONR)
-
-| Formalism | Reader | Evaluator | Status |
-|-----------|--------|-----------|--------|
-| LRU=0 (no resonances) | — | — | Bit-identical (T01, T84) |
-| SLBW (LRF=1) | `_read_bw_params` | `cross_section_slbw` | Bit-identical (T02) |
-| MLBW (LRF=2) | `_read_bw_params` | `cross_section_mlbw` | Runs; T49 near-perfect (44/46 MTs) |
-| Reich-Moore (LRF=3) | `_read_rm_params` | `cross_section_rm` (Frobenius-Schur) | Bit-identical (T08, T27, T47) |
-| SAMMY/RML (LRF=7) | `_read_sammy_params` | `build_rml_evaluator` | Runs |
-| URR mode 11 (LFW=1) | `_read_urr_lfw1` | `_csunr1`, `_gnrl` | Bit-identical (T02, T18) |
-| URR mode 12 (LRF=2) | `_read_urr_lrf2` | `_csunr2`, `_gnrl` | Runs; ±1 ULP at URR boundary (T07) |
-
-See HANDOFF §"Current State" for detailed per-test results.
-
-## Key files
-
-| File | Purpose |
-|------|---------|
-| [CLAUDE.md](CLAUDE.md) | Non-negotiable rules: oracle-driven TDD, Fortran-before-Julia, grind method |
-| [HANDOFF.md](HANDOFF.md) | Living state: current phase, open work, traps, per-test status |
-| `worklog/T*.md` | Per-session debug journals (most recent: Phase 51 LB=5 covcal fix) |
-| `reports/ACCEPTANCE_CRITERIA.md` | Tolerance hierarchy (1e-9 stretch, 1e-7 first-round, structural match non-negotiable) |
-| `src/orchestration/pipeline.jl` | `run_njoy` entry point + module dispatch |
-| `src/processing/reconr.jl` | RECONR top-level pipeline |
-| `src/processing/broadr.jl` | Doppler broadening (broadn_grid + sigma1) |
-| `src/processing/heatr.jl` | KERMA and damage energy |
-| `src/processing/thermr.jl` | Thermal scattering (calcem + sigl + Bragg) |
-| `src/processing/errorr.jl`, `src/orchestration/modules/errorr.jl` | Covariance processing (MF31/33, covcal-style σ·flx-weighted collapse) |
-| `src/processing/pendf_writer.jl` | PENDF output |
-| `test/validation/reference_test.jl` | Single-test Fortran-faithful runner |
-| `test/validation/sweep_reference_tests.jl` | Full 84-test sweep writer |
-| `njoy-reference/src/*.f90` | **Ground truth** — the canonical Fortran source |
-
-## Development philosophy
-
-1. **Fortran is ground truth.** Every formula, constant, rounding step,
-   and IEEE-754 accumulation order matters. Read the specific subroutine
-   in `njoy-reference/src/*.f90` before implementing or fixing Julia
-   code. Cite line ranges in docstrings.
-2. **Oracle-driven TDD.** Every non-trivial change starts with a failing
-   reference-tape diff, then a fix, then a passing test. "Obvious" fixes
-   are where oracles find surprises — every FP precision floor claimed in
-   this project has turned out to be a real bug.
-3. **Idiomatic Julia, Fortran semantic.** Multiple dispatch, parametric
-   types, broadcasting — yes. Transliterated `do k=1,n` loops over
-   workspace arrays — no. But sigfig bias, scratch-tape data paths,
-   sentinel values, and non-associative accumulation order all ship
-   verbatim.
-4. **Tape-based architecture.** Modules communicate via tapes, never
-   shared state. If module B needs data from module A, it reads A's
-   output tape.
-
-Full ruleset in [CLAUDE.md](CLAUDE.md). If you're a human or agent
-picking this up, start there and then HANDOFF.md.
-
-## License
-
-GPL-3.0. See [LICENSE](LICENSE).
-
-## References
-
-1. R.E. MacFarlane et al., *The NJOY Nuclear Data Processing System,
-   Version 2016*, LA-UR-17-20093, Los Alamos National Laboratory (2016).
-2. A. Trkov et al. (Eds.), *ENDF-6 Formats Manual*, BNL-90365-2009 Rev. 2,
-   Brookhaven National Laboratory (2018).
+Read **`CLAUDE.md`** (the working agreement — the two laws: oracle-driven TDD,
+and Fortran-before-Julia) and **`HANDOFF.md`** (the living state: current phase,
+open work, traps) before touching code. License: GPL-3.0.

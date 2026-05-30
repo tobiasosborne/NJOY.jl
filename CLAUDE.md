@@ -1,7 +1,12 @@
 # CLAUDE.md — NJOY.jl
 
+> `CLAUDE.md` and `AGENTS.md` have identical bodies (BennettVM pattern); only
+> the title line differs. Edit both in the same commit; never let them drift.
+> Two filenames so every harness sees the same rules — Claude Code reads
+> `CLAUDE.md`, other agents read `AGENTS.md`.
+
 ## What is this?
-NJOY.jl is a **100% faithful drop-in Julia replacement** for NJOY2016 — the standard nuclear data processing system (ENDF → PENDF / ACE / GENDF / covariance). 23 Fortran modules, 84 reference tests, ~24k lines of Julia (cloc code-only, `src/`) replacing ~100k lines of Fortran 90 (`njoy-reference/src/`). No GUI. No new features. No reinterpretation. Only bit-for-bit reproduction of the canonical output, expressed in idiomatic Julia.
+NJOY.jl is a **100% faithful drop-in Julia replacement** for NJOY2016 — the standard nuclear data processing system (ENDF → PENDF / ACE / GENDF / covariance). 23 Fortran modules, 86 reference tests, ~33k lines of Julia (cloc code-only, 105 files in `src/`) replacing ~100k lines of Fortran 90 (39 files in `njoy-reference/src/`). No GUI. No new features. No reinterpretation. Only bit-for-bit reproduction of the canonical output, expressed in idiomatic Julia.
 
 See `HANDOFF.md` for the living state (current phase, sweep results, per-test status).
 See `worklog/T*.md` for per-session debug journals.
@@ -42,7 +47,7 @@ See `njoy-reference/src/*.f90` for **canonical truth**.
    rm -rf ~/.julia/compiled/v1.12/NJOY*   # non-negotiable before every run
    julia --project=. test/validation/reference_test.jl <N>
    ```
-   Full 84-test sweep only in background or at session end (~90 min).
+   Full 86-test sweep only in background or at session end (~50 min).
 
 6. **FAIL FAST, FAIL LOUD.** `error("MF7/MT4 not found for MAT=$mat at offset $pos")`, not `return nothing`. Silent fallbacks corrupt downstream tapes. When the Fortran would abort (`call error`), Julia must abort too — and with enough context (MAT, MF, MT, file offset, numeric values) to diagnose without a rerun. Assertions over defensive defaults.
 
@@ -95,7 +100,7 @@ rm -rf ~/.julia/compiled/v1.12/NJOY*
 # Single reference test (fast, preferred during dev)
 julia --project=. test/validation/reference_test.jl 7
 
-# Full 84-test sweep (~90 min on this machine, write reports/REFERENCE_SWEEP.md)
+# Full 86-test sweep (~50 min on this machine, writes reports/REFERENCE_SWEEP.md)
 julia --project=. test/validation/sweep_reference_tests.jl
 
 # Unit tests + reference sweep via Pkg.test
@@ -106,6 +111,8 @@ julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work
 ```
 
 **Never** launch multiple `julia` processes concurrently. Subagents that run Julia are serial; readers are parallel (see Rule 9).
+
+**Non-interactive shell.** `cp`/`mv`/`rm` may be aliased to `-i` on some systems and hang an agent waiting for y/n. Use `cp -f` / `mv -f` / `rm -f` (`rm -rf` for dirs), `apt-get -y`, `ssh -o BatchMode=yes`.
 
 ---
 
@@ -120,6 +127,17 @@ julia --project=. -e 'using NJOY; run_njoy("njoy-reference/tests/02/input"; work
 7. **Fix, rerun, repeat until PERFECT**. Then rerun T01/T02/T08/T27/T34/T45/T46 to check for regression.
 
 3+1 agent pattern for the hard diffs: 3 parallel read-only agents (Fortran reader / ENDF inspector / Julia grid comparator) + 1 Julia runner.
+
+---
+
+## Document hygiene (HANDOFF + worklogs)
+
+`HANDOFF.md` and the worklogs are this project's institutional memory; keep them navigable, not monolithic.
+
+- **HANDOFF.md stays thin** (target < 900 lines, readable in one pass). It holds only the *live* state: project intro, the two laws, Beads status, the Recent Phases table, Open Work, Architecture, Traps, current Next Steps, the T01/gdb/key-files howtos, and a single current "Current State". Historical detail — session history, old sweep dumps, superseded "Current State" snapshots, dated session logs — lives in `handoff_archive/` (see `handoff_archive/INDEX.md`). When the live file grows past ~900 lines, move the oldest historical sections into `handoff_archive/` (cap each archive file ~1800 lines).
+- **Worklogs are append-only, one file per phase/session**, indexed chronologically in `worklog/INDEX.md`. Closing a phase = add a `worklog/<phase>.md` entry + a one-line row in `worklog/INDEX.md`. (Filenames are historically inconsistent — `phaseNN_*.md` vs `TNN_*.md`; don't mass-rename, HANDOFF references them by name.)
+- **MOVE, never rewrite.** Archiving relocates content verbatim — never summarize, "improve", or drop history. **Never run a one-shot re-sharding script that wipes existing files** (a sibling repo's `shard_worklog.py` wiped all chunks — do splits by hand or with a non-destructive tool).
+- **Don't let the docs drift from the Fortran or the code** (Rule 2): the HANDOFF has been wrong before; when it disagrees with the source, fix the HANDOFF.
 
 ---
 
@@ -234,4 +252,4 @@ Before saying "done":
 
 Work is NOT complete until `git push` succeeds. If push fails, resolve and retry. Never leave work stranded locally.
 
-> Note: `bd init`/`bd setup claude` injects a `<!-- BEGIN BEADS INTEGRATION -->` block here. It was removed on 2026-05-28 because it duplicated the "Issue tracking: Beads" and "Session Close Protocol" sections above and contained guidance ("do NOT use MEMORY.md files") that conflicts with this project's harness auto-memory. If a future `bd` run re-injects it, delete it again — the sections above are canonical.
+> Note: `bd init`/`bd setup claude` injects a `<!-- BEGIN BEADS INTEGRATION -->` block into `CLAUDE.md` and `AGENTS.md`. It was removed on 2026-05-28 (and the two files re-synced on 2026-05-30) because it duplicated the "Issue tracking: Beads" and "Session Close Protocol" sections above and contained guidance that contradicts this repo: it says "do NOT use MEMORY.md files" (this project's harness auto-memory *uses* `MEMORY.md`), tells agents to "bd dolt push" (there is no Dolt remote here), and claims "no manual export needed" (`bd export -o .beads/issues.jsonl` is required to land beads in the git-tracked JSONL). If a future `bd` run re-injects it into either file, delete it again — the sections above are canonical.
