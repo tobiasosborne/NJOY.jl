@@ -34,16 +34,16 @@ working agreement and `HANDOFF.md` for the living state.
 *Verified against a fresh clone of NJOY2016 `develop @ ac5adf5` (2026-04-06) via
 the full 86-test sweep (`reports/REFERENCE_SWEEP.md`); 0 crashes, 0 timeouts.*
 
-Bit-identical (`rtol = 1e-9`) on the **substantive output tape**:
+Full test bit-identical (`rtol = 1e-9`, **every produced tape**):
 
-| Test | Chain | Tape | Result | Note |
-|------|-------|------|--------|------|
-| T03 | moder → reconr | tape37 | 9274 / 9274 | photoatomic — full test bit-identical |
-| T61 | acer (iopt=7 thermal) | tape71/72 | 49211 / 49211 | full test bit-identical |
-| T50 | acer (α + He-4) | tape34/35 | 163 / 163 | only `tape33` aplots stub blocks full pass |
-| T52 | acer (p + H-1) | tape34/35 | 3986 / 3986 | only `tape33` aplots stub blocks full pass |
-| T53 | acer (d + H-2) | tape34/35 | 12030 / 12030 | only `tape33` aplots stub blocks full pass |
-| T62 | acer (d + He-3) | tape34/35 | 7221 / 7221 | only `tape33` aplots stub blocks full pass |
+| Test | Chain | Tapes | Result | Note |
+|------|-------|-------|--------|------|
+| T03 | moder → reconr | tape37 | 9274 / 9274 | photoatomic |
+| T61 | acer (iopt=7 thermal) | tape71/72 | 49211 / 49211 | thermal ACE passthrough |
+| T50 | acer (α + He-4) | tape33/34/35 | 432 + 163 / all | aplots plot tape ported (Phase 79) |
+| T52 | acer (p + H-1) | tape33/34/35 | 6042 + 3986 / all | aplots ported (Phase 79) |
+| T53 | acer (d + H-2) | tape33/34/35 | 17236 + 12030 / all | aplots heating + aploxp ported (Phase 80) |
+| T62 | acer (d + He-3) | tape33/34/35 | 5460 + 7221 / all | aplots aplotr threshold ported (Phase 80) |
 
 Numeric pass (`rtol = 1e-5`, the cross-compiler floor):
 
@@ -62,12 +62,13 @@ Additional ground covered:
 - The remaining tests run end-to-end and land in `DIFFS` (last-digit / FP grind,
   or a not-yet-ported sub-path) — these are the active grind, not breakage.
 
-> **Note on the sweep summary line.** The sweep classifier marks a *test*
-> bit-identical only when *every* one of its reference tapes passes. Four ACER
-> tests (T50/T52/T53/T62) are byte-perfect on their ACE tape (`tape34`) and
-> xsdir (`tape35`) but carry an unimplemented aplots plot tape (`tape33`), so
-> they report as `DIFFS` despite the real output being bit-identical. Read the
-> per-tape detail, not just the headline count.
+> **Note: the committed sweep is stale.** `reports/REFERENCE_SWEEP.md` predates
+> Phases 78–80 and still shows only 2 `BIT_IDENTICAL` and the four ACER tests as
+> `DIFFS`. The aplots plot tape (`tape33`) has since been ported — T50/T52
+> (Phase 79) and T53/T62 (Phase 80) are now byte-perfect on **all** their tapes
+> (verified via targeted cache-nuked runs). The classifier marks a *test*
+> bit-identical only when *every* reference tape passes, so always read the
+> per-tape detail; a fresh full sweep will refresh the headline count.
 
 > **Reference drift.** This port is validated against a specific NJOY2016
 > baseline. The upstream `develop` branch moves; e.g. T22 (leapr) is currently
