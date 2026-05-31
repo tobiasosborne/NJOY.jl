@@ -40,8 +40,27 @@ _aplots_unported(msg) = throw(AplotsNotPortedError(msg))
 # Fortran float-format helpers
 # =========================================================================
 
-"""`1p,e14.6` data field: C `%14.6E` reproduces it exactly (e.g. `  2.950000E-01`)."""
-_e14_6(v::Real) = @sprintf("%14.6E", Float64(v))
+"""
+`1p,e14.6` data field. For 2-digit exponents C `%14.6E` reproduces Fortran
+exactly (e.g. `  2.950000E-01`, `  8.927518E+08`). For 3-digit exponents Fortran
+runs out of field width and *drops the `E`* — `1p,e14.6` of `1.155100e-117`
+prints `  1.155100-117` (mantissa, sign of exponent, three digits, no `E`), still
+right-justified in 14 columns. C `%14.6E` keeps the `E` (` 1.155100E-117`, only
+one leading space), so we strip the `E` and re-pad to width 14.
+
+Ref: gfortran `1p,e14.6` edit descriptor (Ew.d with the exponent overflowing the
+default 2-digit `Eee` field: the `E` is omitted, leaving `±eee`).
+"""
+function _e14_6(v::Real)
+    s = @sprintf("%14.6E", Float64(v))
+    # 2-digit exponent fits with the `E`; only 3+ digit exponents drop it.
+    ei = findlast('E', s)
+    ei === nothing && return s
+    # exponent digits after the sign character (s[ei+1] is '+' or '-')
+    ndig = length(s) - (ei + 1)
+    ndig <= 2 && return s
+    return lpad(string(s[1:ei-1], s[ei+1:end]), 14)
+end
 
 """`1p,e12.3` axis field: C `%12.3E` reproduces it exactly (e.g. `   2.000E-01`)."""
 _e12_3(v::Real) = @sprintf("%12.3E", Float64(v))
@@ -403,7 +422,34 @@ function _acer_aplots(io::IO, table::ACETable, hk::AbstractString, ht::Char)
         heat < ymin && (ymin = heat); heat > ymax && (ymax = heat)
     end
     if ymax > ymin
-        _aplots_unported("log-log heating plot not yet ported (heating non-trivial)")
+        # Ref: acefc.f90:16191-16226.  Both axes log (ascll); `4 0 2 1/` (no xtag);
+        # log thinning thin=10**(log10(xmax/xmin)/nden); data 1p,2e14.6.
+        xmin, xmax = _ascll(xmin, xmax)
+        ymin < ymax/scale && (ymin = ymax/scale)
+        ymin, ymax = _ascll(ymin, ymax)
+        pr(@sprintf("1%3d/", iwcol))
+        pr("$(qu)<$(title)>$(qu)/")
+        pr("$(qu)<h>eating$(qu)/")
+        pr("4 0 2 1/")
+        pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(1.0))/")
+        pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+        pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(1.0))/")
+        pr("$(qu)<h>eating (<m>e<v>/reaction)$(qu)/")
+        pr("/"); pr("/")
+        pr("$(qu)heating$(qu)/"); pr("0/")
+        thin = ten^(log10(xmax/xmin)/nden)
+        xlast = small
+        for i in 1:nes
+            e = e_i(i)
+            if nes <= nden || e >= thin*xlast
+                heat = heat_i(i)
+                heat < hmin && (heat = hmin)
+                heat < ymin && (heat = ymin)
+                pr("$(_e14_6(e))$(_e14_6(heat))/")
+                xlast = e
+            end
+        end
+        pr("/")
     end
 
     # log-log damage (MT=444).  Ref: 16228-16288.
@@ -530,7 +576,36 @@ function _acer_aplots(io::IO, table::ACETable, hk::AbstractString, ht::Char)
         (heat > ymax && e > 1.0) && (ymax = heat)
     end
     if ymin != 0.0 || ymax != 0.0
-        _aplots_unported("lin-lin heating plot not yet ported (heating non-trivial)")
+        # Ref: acefc.f90:16557-16595.  ascle(4,...) both axes; `1 0 2 1/` (no xtag);
+        # energy threshold e>=0.2 (test=1/5); linear thinning; always write last
+        # point (i==nes); NO hmin floor.
+        xmin, xmax, major, _ = _ascle(4, xmin, xmax)
+        xstep = (xmax - xmin)/major
+        ymin, ymax, major, _ = _ascle(4, ymin, ymax)
+        ystep = (ymax - ymin)/major
+        pr(@sprintf("1%3d/", iwcol))
+        pr("$(qu)<$(title)>$(qu)/")
+        pr("$(qu)<h>eating$(qu)/")
+        pr("1 0 2 1/")
+        pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+        pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+        pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+        pr("$(qu)<h>eating (<m>e<v>/reaction)$(qu)/")
+        pr("/"); pr("/")
+        pr("$(qu)heating$(qu)/"); pr("0/")
+        thin = (xmax - xmin)/nden
+        xlast = small
+        for i in 1:nes
+            e = e_i(i)
+            test = 1.0/5
+            if e >= test
+                if nes <= nden || e >= xlast + thin || i == nes
+                    pr("$(_e14_6(e))$(_e14_6(heat_i(i)))/")
+                    xlast = e
+                end
+            end
+        end
+        pr("/")
     end
     _find_mt444() != 0 && _aplots_unported("MT=444 lin-lin damage plot not yet ported")
     # lin-log non-threshold reactions (ntr=0 -> nothing).  Ref: 16670-16793.
@@ -547,7 +622,13 @@ function _acer_aplots(io::IO, table::ACETable, hk::AbstractString, ht::Char)
     # photon data, ntype>0 — none present for a bare charged-particle elastic
     # file.  Implemented below only where a test exercises them.
     Int(jxs[JXS_NU]) > 0 && _aplots_unported("aplonu (nubar) not yet ported")
-    Int(nxs[NXS_NTYPE]) > 0 && _aplots_unported("aploxp (particle production) not yet ported")
+    # aploxp — particle-production plots (heating, recoil, production XS, 3D
+    # angular).  Ref: acefc.f90:16818 `if (ntype.gt.0) call aploxp(...)`.
+    ntype = Int(nxs[NXS_NTYPE])
+    if ntype > 0
+        ptype = Int(jxs[JXS_PTYPE]); ntro = Int(jxs[JXS_NTRO]); ploct = Int(jxs[JXS_PLOCT])
+        _aploxp(io, xss, nes, esz, ntype, ptype, ntro, ploct, izai, qu, hk70, iwcol)
+    end
     # aplodd needs nr!=0 (reactions with secondary neutrons); aplof4 already
     # handled the angular pages.  aplopp (detailed photon) emits nothing when
     # there are no photon-production reactions (ntrp=0).
@@ -736,6 +817,21 @@ function _aplots_nonthreshold_linlog!(io, xss, nes, ntr, mtr, lsig, sig, izai,
 end
 
 # =========================================================================
+# Caller-side incident-particle name swap.  After `mtname`, the aplots/aplotr
+# call sites overwrite the second character of a `(...)` reaction name with the
+# incident-particle letter (e.g. `(n,p*0)` -> `(d,p*0)` for a deuteron file).
+# This is distinct from mtname's own izai>1 substitution (acecm.f90:209-221).
+# Ref: acefc.f90:17056-17071 (identical block at 16365-16378, 16754-16767,
+# 16933-16946).
+# =========================================================================
+function _aplots_name_izai(name::String, izai::Int)
+    (isempty(name) || name[1] != '(') && return name
+    c = izai == 1    ? 'n' : izai == 1001 ? 'p' : izai == 1002 ? 'd' :
+        izai == 1003 ? 't' : izai == 2003 ? 's' : izai == 2004 ? 'a' : name[2]
+    return string(name[1], c, name[3:end])
+end
+
+# =========================================================================
 # aplotr — inelastic levels + threshold reactions.  Ref: 16832-17094.
 # For ntr=0 both loops never iterate -> emits nothing.
 # =========================================================================
@@ -811,7 +907,63 @@ function _aplotr(io, xss, ntr, mtr, lsig, sig, izai, qu, hk70, iwcol)
         if nlev == 0 || ymax == 0.0
             idone = 1
         else
-            _aplots_unported("aplotr threshold-reaction plotting not yet ported")
+            # --- emit the threshold-reaction page.  Ref: acefc.f90:17012-17090.
+            xmin, xmax, major, _ = _ascle(4, xmin, xmax)   # 17012
+            xstep = (xmax - xmin) / major
+            ymin, ymax, major, _ = _ascle(4, ymin, ymax)   # 17014
+            ystep = (ymax - ymin) / major
+            thin = (xmax - xmin) / nden                    # 17016
+            # page header records (17017-17029)
+            pr(@sprintf("1%3d/", iwcol))
+            pr("$(qu)<$(title)>$(qu)/")
+            pr("$(qu)<t>hreshold reactions$(qu)/")
+            pr("1 0 2 1/")
+            pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+            pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+            pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+            pr("$(qu)<c>ross section (barns)$(qu)/")
+            pr("/")
+            # per-curve loop, same iflag filter as the scan (17030-17089)
+            nlev = 0; mtl = 0
+            for i in 1:ntr
+                mt = Int(round(xss[mtr + i - 1]))
+                k = Int(round(xss[lsig + i - 1] + sig - 1))
+                n = Int(round(xss[k + 1])); iaa = Int(round(xss[k]))
+                iflag = 0
+                nlev == 5 && (iflag = 1)
+                mt < 5 && (iflag = 1)
+                (mt >= 18 && mt <= 21) && (iflag = 1)
+                mt == 38 && (iflag = 1)
+                (mt >= 50 && mt < 91 && izai == 1) && (iflag = 1)
+                (mt > 207 && mt < 600) && (iflag = 1)
+                mt <= mtlast && (iflag = 1)
+                xss[iaa] < xsmin && (iflag = 1)
+                if iflag == 0
+                    mtl = mt; nlev += 1
+                    nlev > 1 && pr(@sprintf("%2d/", nlev))   # 17048-17049
+                    nlev > 1 && pr("/")
+                    icurv = (nlev - 1) % 5                    # 17050
+                    pr(@sprintf("0 0 0%2d/", icurv))         # iwcol=3 color mode (17054)
+                    name = _aplots_name_izai(_aplots_mtname(mt, izai), izai)  # 17056-17071
+                    pr("$(qu)$(name)$(qu)/")                  # 17072
+                    pr("0/")                                  # 17073
+                    xlast = small
+                    for j in 1:n
+                        x = xss[iaa + j - 1]
+                        if n <= nden || x >= xlast + thin || j == 1 || j == n  # 17078-17079
+                            y = xss[k + 2 + j - 1]
+                            pr("$(_e14_6(x))$(_e14_6(y))/")  # 17081
+                            xlast = x
+                        end
+                    end
+                    pr("/")                                   # 17085 end-curve
+                    if mt < 203 && Int(round(xss[mtr + i])) >= 203 &&
+                       Int(round(xss[mtr + i])) <= 207        # 17086-17087
+                        nlev = 5
+                    end
+                end
+            end
+            mtlast = mtl                                      # 17090
         end
     end
 end
@@ -874,98 +1026,346 @@ function _aplof4(io, xss, nr, mtr, land, andb, izai, qu, hk70, iwcol)
             # equiprobable-contours path — not exercised by current tests
             _aplots_unported("aplof4 equiprobable-contour angular plot (k>=0) not yet ported")
         else
-            # perspective view of tabulated distribution
-            xmin = -1.0; xmax = 1.0; xstep = 1.0/2
-            ymin = xss[na + 1]; ymax = xss[na + ne]
-            itwo = 0
-            if ne > 4
-                test = 3.0
-                ymax > test*xss[na + ne - 1] && (ymax = xss[na + ne - 1])
-                test = 50.0
-                if ymax >= test
-                    break_ = 20.0
-                    (ymin < dn*break_ && ymax > up*break_) && (itwo = 1)
+            # perspective view of tabulated distribution.  The aplof4 elastic
+            # subtitle keeps the 10-char name verbatim (trailing blanks).
+            _aplof4_perspective!(io, xss, na, ne, nb, andb,
+                                 "angular distribution for $(name)", hk70, iwcol, qu)
+        end
+    end
+end
+
+# =========================================================================
+# _aplof4_perspective! — the perspective view of a tabulated angular
+# distribution (the `k<0` body of aplof4, acefc.f90:17268-17428).  Factored
+# out so aploxp's particle-production angular pages (acefc.f90:19347-19455,
+# byte-identical apart from the subtitle and the andb→andh locator) reuse it.
+# `subtitle` is the full text between the quotes on the third card.
+# =========================================================================
+function _aplof4_perspective!(io, xss, na, ne, nb, andb, subtitle::AbstractString,
+                              hk70, iwcol, qu)
+    eps = 1.0e-5; big = 1.0e10; dn = 0.99; up = 1.01; one = 1.0
+    pr(s) = print(io, s, '\n')
+    _it(s) = (j = 1; for i in 1:min(70, length(s)); s[i] != ' ' && (j = i); end; j)
+
+    xmin = -1.0; xmax = 1.0; xstep = 1.0/2
+    ymin = xss[na + 1]; ymax = xss[na + ne]
+    itwo = 0
+    if ne > 4
+        test = 3.0
+        ymax > test*xss[na + ne - 1] && (ymax = xss[na + ne - 1])
+        test = 50.0
+        if ymax >= test
+            break_ = 20.0
+            (ymin < dn*break_ && ymax > up*break_) && (itwo = 1)
+        end
+    end
+    break_ = 20.0
+    while itwo >= 0 && itwo <= 2
+        if itwo == 1
+            ymax = break_
+        elseif itwo == 2
+            ymin = break_; ymax = xss[na + ne]
+        end
+        ymin, ymax, major, _ = _ascle(4, ymin, ymax)
+        ystep = (ymax - ymin)/major
+        zmin = big; zmax = 0.0
+        for i in 1:ne
+            e = xss[na + i]
+            if e <= (1 + eps)*ymax && e >= ymin
+                kk = Int(round(abs(xss[nb + i]))) + andb - 1
+                np = Int(round(xss[kk + 1]))
+                kk += 1
+                for j in 1:np
+                    pp = xss[kk + np + j]
+                    pp < zmin && (zmin = pp)
+                    pp > zmax && (zmax = pp)
                 end
             end
-            break_ = 20.0
-            while itwo >= 0 && itwo <= 2
-                if itwo == 1
-                    ymax = break_
-                elseif itwo == 2
-                    ymin = break_; ymax = xss[na + ne]
-                end
-                ymin, ymax, major, _ = _ascle(4, ymin, ymax)
-                ystep = (ymax - ymin)/major
-                zmin = big; zmax = 0.0
-                for i in 1:ne
-                    e = xss[na + i]
-                    if e <= (1 + eps)*ymax && e >= ymin
-                        kk = Int(round(abs(xss[nb + i]))) + andb - 1
-                        np = Int(round(xss[kk + 1]))
-                        kk += 1
-                        for j in 1:np
-                            pp = xss[kk + np + j]
-                            pp < zmin && (zmin = pp)
-                            pp > zmax && (zmax = pp)
-                        end
-                    end
-                end
-                rat = 100000.0
-                zmin <= 0.0 && (zmin = zmax/rat)
-                zmax/zmin > rat && (zmin = zmax/rat)
-                zmin, zmax = _ascll(zmin, zmax)
-                if zmin == zmax
-                    zmax = 2*zmax; zmin = zmax/10
-                end
-                it = _it(hk70)
-                title = hk70[1:it]
-                pr(@sprintf("1%3d/", iwcol))
-                pr("$(qu)<$(title)>$(qu)/")
-                pr("$(qu)angular distribution for $(name)$(qu)/")
-                pr("-1 2/")
-                pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
-                pr("$(qu)<c>osine$(qu)/")
-                pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
-                pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
-                pr("$(_e12_3(zmin))$(_e12_3(zmax))$(_e12_3(one))/")
-                pr("$(qu)<p>rob/<C>os$(qu)/")
-                pr("/")
-                pr(" 15. -15. 15. -2.5 6.5 2.5/")
-                pr("1/")
-                stepm = (ymax - ymin)/150
-                elast = 0.0
-                for i in 1:ne
-                    e = xss[na + i]
-                    iflag = 0
-                    e > (1 + eps)*ymax && (iflag = 1)
-                    e < ymin && (iflag = 1)
-                    (i > 1 && i < ne && ne > 150 && e - elast < stepm) && (iflag = 1)
-                    if iflag == 0
-                        pr("$(_e14_6(e))/")
-                        kk = Int(round(abs(xss[nb + i]))) + andb - 1
-                        intt = Int(round(xss[kk]))
-                        np = Int(round(xss[kk + 1]))
-                        kk += 1
-                        ylast = zmin
-                        for j in 1:np
-                            cc = xss[kk + j]
-                            pp = xss[kk + np + j]
-                            pp < zmin && (pp = zmin)
-                            intt == 1 && pr("$(_e14_6(cc))$(_e14_6(ylast))/")
-                            pr("$(_e14_6(cc))$(_e14_6(pp))/")
-                            ylast = pp
-                        end
-                        pr("/")
-                        elast = e
-                    end
+        end
+        rat = 100000.0
+        zmin <= 0.0 && (zmin = zmax/rat)
+        zmax/zmin > rat && (zmin = zmax/rat)
+        zmin, zmax = _ascll(zmin, zmax)
+        if zmin == zmax
+            zmax = 2*zmax; zmin = zmax/10
+        end
+        it = _it(hk70)
+        title = hk70[1:it]
+        pr(@sprintf("1%3d/", iwcol))
+        pr("$(qu)<$(title)>$(qu)/")
+        pr("$(qu)$(subtitle)$(qu)/")
+        pr("-1 2/")
+        pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+        pr("$(qu)<c>osine$(qu)/")
+        pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+        pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+        pr("$(_e12_3(zmin))$(_e12_3(zmax))$(_e12_3(one))/")
+        pr("$(qu)<p>rob/<C>os$(qu)/")
+        pr("/")
+        pr(" 15. -15. 15. -2.5 6.5 2.5/")
+        pr("1/")
+        stepm = (ymax - ymin)/150
+        elast = 0.0
+        for i in 1:ne
+            e = xss[na + i]
+            iflag = 0
+            e > (1 + eps)*ymax && (iflag = 1)
+            e < ymin && (iflag = 1)
+            (i > 1 && i < ne && ne > 150 && e - elast < stepm) && (iflag = 1)
+            if iflag == 0
+                pr("$(_e14_6(e))/")
+                kk = Int(round(abs(xss[nb + i]))) + andb - 1
+                intt = Int(round(xss[kk]))
+                np = Int(round(xss[kk + 1]))
+                kk += 1
+                ylast = zmin
+                for j in 1:np
+                    cc = xss[kk + j]
+                    pp = xss[kk + np + j]
+                    pp < zmin && (pp = zmin)
+                    intt == 1 && pr("$(_e14_6(cc))$(_e14_6(ylast))/")
+                    pr("$(_e14_6(cc))$(_e14_6(pp))/")
+                    ylast = pp
                 end
                 pr("/")
-                itwo == 0 && (itwo = 3)
-                itwo == 2 && (itwo = 3)
-                itwo == 1 && (itwo = 2)
+                elast = e
+            end
+        end
+        pr("/")
+        itwo == 0 && (itwo = 3)
+        itwo == 2 && (itwo = 3)
+        itwo == 1 && (itwo = 2)
+    end
+end
+
+# =========================================================================
+# aploxp — particle-production plots.  Ref: acefc.f90:18787-19460.
+# Emits, in order: (C1) lin-lin particle heating contributions, one curve per
+# production type; (C2) lin-lin recoil heating = total heating − Σ particle
+# heating; (C3) lin-lin particle production cross sections; then per-type/per-MT
+# 3D angular-distribution pages (C5).  Locators come from the production arrays
+# ptype/ntro/ploct (jxs(30..32)); per type i the 10-word locator block lives at
+# ploct+10*(i-1)+k.  Energy column is the ESZ grid, indexed via iaa=xss(hpd),
+# naa=xss(hpd+1): e = xss(esz+iaa-2+i).
+# =========================================================================
+function _aploxp(io, xss, nes, esz, ntype, ptype, ntro, ploct, izai, qu, hk70, iwcol)
+    big = 1.0e10; small = 1.0e-12; nden = 4000
+    pr(s) = print(io, s, '\n')
+    _it(s) = (j = 1; for i in 1:min(70, length(s)); s[i] != ' ' && (j = i); end; j)
+    title = hk70[1:_it(hk70)]
+
+    # ipt -> single-word label (C1 heating / C3 production).  Ref: 18866-18872.
+    plabel(ipt) = ipt == 1 ? "neutrons" : ipt == 2 ? "photons" : ipt == 9 ? "protons" :
+        ipt == 31 ? "deuterons" : ipt == 32 ? "tritons" : ipt == 33 ? "he-3" :
+        ipt == 34 ? "alphas" : error("aploxp: unknown ipt=$ipt")
+    # ipt -> production-XS label (photons divided by 5).  Ref: 19058-19064.
+    plabel_xs(ipt) = ipt == 2 ? "photons/5" : plabel(ipt)
+    # ipt -> singular particle word for the angular subtitle.  Ref: 19387-19410.
+    pword(ipt) = ipt == 1 ? "neutron" : ipt == 9 ? "proton" : ipt == 31 ? "deuteron" :
+        ipt == 32 ? "triton" : ipt == 33 ? "3he" : ipt == 34 ? "alpha" :
+        error("aploxp: unknown ipt=$ipt for angular subtitle")
+
+    # locator accessors for production type i (1-based).  Ref: 19124-19133.
+    hpd_i(i)   = Int(round(xss[ploct + 10*(i-1)]))
+    mtrh_i(i)  = Int(round(xss[ploct + 10*(i-1) + 1]))
+    nmtr_i(i)  = Int(round(xss[ntro + i - 1]))
+    lsigh_i(i) = Int(round(xss[ploct + 10*(i-1) + 3]))
+    sigh_i(i)  = Int(round(xss[ploct + 10*(i-1) + 4]))
+    landh_i(i) = Int(round(xss[ploct + 10*(i-1) + 5]))
+    andh_i(i)  = Int(round(xss[ploct + 10*(i-1) + 6]))
+    ldlwh_i(i) = Int(round(xss[ploct + 10*(i-1) + 7]))
+    dlwh_i(i)  = Int(round(xss[ploct + 10*(i-1) + 8]))
+    ipt_i(i)   = Int(round(xss[ptype + i - 1]))
+
+    # ===== C1: lin-lin particle heating contributions.  Ref: 18816-18934. =====
+    xmin = big; xmax = 0.0; ymin = big; ymax = -big
+    for i in 1:ntype
+        hpd = hpd_i(i); iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+        test = 1.0/5
+        for ie in 1:naa
+            e = xss[esz + iaa + ie - 2]
+            if e > test
+                xs = xss[hpd + 1 + naa + ie]
+                e < xmin && (xmin = e); e > xmax && (xmax = e)
+                xs < ymin && (ymin = xs); xs > ymax && (ymax = xs)
             end
         end
     end
+    if ymax != 0.0
+        xmin, xmax, major, _ = _ascle(4, xmin, xmax); xstep = (xmax-xmin)/major
+        ymin, ymax, major, _ = _ascle(4, ymin, ymax); ystep = (ymax-ymin)/major
+        pr(@sprintf("1%3d/", iwcol))
+        pr("$(qu)<$(title)>$(qu)/")
+        pr("$(qu)<p>article heating contributions$(qu)/")
+        xtag = 95*xmin/100 + 5*xmax/100
+        ytag = ymin/10 + 9*ymax/10
+        pr("1 0 2 1$(_e12_4_no1p(xtag))$(_e12_4_no1p(ytag))/")
+        pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+        pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+        pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+        pr("$(qu)<m>e<v>/collision$(qu)/")
+        pr("/")
+        thin = (xmax - xmin)/nden
+        for ii in 1:ntype
+            ipt = ipt_i(ii); hpd = hpd_i(ii)
+            iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+            if ii > 1
+                pr("2/"); pr("/")
+            end
+            pr(@sprintf("0 0 0%2d/", ii-1))
+            pr("$(qu)$(plabel(ipt))$(qu)/")
+            pr("0/")
+            xlast = small; test = 1.0/5
+            for i in 1:naa
+                e = xss[esz + iaa - 2 + i]
+                if e > test
+                    xs = xss[hpd + 1 + naa + i]
+                    if naa <= nden || e >= xlast + thin || i == naa
+                        pr("$(_e14_6(e))$(_e14_6(xs))/")
+                        xlast = e
+                    end
+                end
+            end
+            pr("/")
+        end
+    end
+
+    # ===== C2: lin-lin recoil heating = esz heating − Σ particle heating. =====
+    # Ref: 18936-19004.
+    xmin = big; xmax = 0.0; ymin = big; ymax = -big
+    for i in 1:nes
+        e = xss[esz - 1 + i]
+        heat = xss[esz + 4*nes - 1 + i]
+        for j in 1:ntype
+            hpd = hpd_i(j); iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+            ie = i - iaa - 1
+            (ie >= 1 && ie <= naa) && (heat -= xss[hpd + 1 + naa + ie])
+        end
+        e < xmin && (xmin = e); e > xmax && (xmax = e)
+        heat < ymin && (ymin = heat); heat > ymax && (ymax = heat)
+    end
+    if ymin != 0.0 || ymax != 0.0
+        (ymin < 0.0 && ymax < -ymin/2) && (ymax = -ymin/2)
+        xmin, xmax, major, _ = _ascle(4, xmin, xmax); xstep = (xmax-xmin)/major
+        ymin, ymax, major, _ = _ascle(4, ymin, ymax); ystep = (ymax-ymin)/major
+        pr(@sprintf("1%3d/", iwcol))
+        pr("$(qu)<$(title)>$(qu)/")
+        pr("$(qu)<r>ecoil <h>eating$(qu)/")
+        pr("1 0 2 1/")
+        pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+        pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+        pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+        pr("$(qu)<h>eating (<m>e<v>/reaction)$(qu)/")
+        pr("/"); pr("/")
+        pr("$(qu)recoil heating$(qu)/"); pr("0/")
+        thin = (xmax - xmin)/nden
+        xlast = small
+        for i in 1:nes
+            e = xss[esz - 1 + i]; test = 1.0/5
+            if e >= test
+                if nes <= nden || e >= xlast + thin || i == nes
+                    heat = xss[esz + 4*nes - 1 + i]
+                    for k in 1:ntype
+                        hpd = hpd_i(k); iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+                        ie = i - iaa - 1
+                        (ie >= 1 && ie <= naa) && (heat -= xss[hpd + 1 + naa + ie])
+                    end
+                    pr("$(_e14_6(e))$(_e14_6(heat))/")
+                    xlast = e
+                end
+            end
+        end
+        pr("/")
+    end
+
+    # ===== C3: lin-lin particle production cross sections (always fires). =====
+    # Ref: 19006-19119.  xs = xss(hpd+1+i); photons (ipt==2) divided by 5.
+    xmin = big; xmax = 0.0; ymin = big; ymax = -big
+    for i in 1:ntype
+        ipt = ipt_i(i); hpd = hpd_i(i)
+        iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+        test = 1.0/5
+        for ie in 1:naa
+            e = xss[esz + iaa + ie - 2]
+            if e > test
+                xs = xss[hpd + 1 + ie]
+                ipt == 2 && (xs /= 5)
+                e < xmin && (xmin = e); e > xmax && (xmax = e)
+                xs < ymin && (ymin = xs); xs > ymax && (ymax = xs)
+            end
+        end
+    end
+    xmin, xmax, major, _ = _ascle(4, xmin, xmax); xstep = (xmax-xmin)/major
+    ymin, ymax, major, _ = _ascle(4, ymin, ymax); ystep = (ymax-ymin)/major
+    pr(@sprintf("1%3d/", iwcol))
+    pr("$(qu)<$(title)>$(qu)/")
+    pr("$(qu)<p>article production cross sections$(qu)/")
+    xtag = 95*xmin/100 + 5*xmax/100
+    xmax > 30.0 && (xtag = 35*xmin/100 + 65*xmax/100)
+    ytag = ymin/10 + 9*ymax/10
+    pr("1 0 2 1$(_e12_4_no1p(xtag))$(_e12_4_no1p(ytag))/")
+    pr("$(_e12_3(xmin))$(_e12_3(xmax))$(_e12_3(xstep))/")
+    pr("$(qu)<e>nergy (<m>e<v>)$(qu)/")
+    pr("$(_e12_3(ymin))$(_e12_3(ymax))$(_e12_3(ystep))/")
+    pr("$(qu)<c>ross section (barns)$(qu)/")
+    pr("/")
+    thin = (xmax - xmin)/nden
+    for ii in 1:ntype
+        ipt = ipt_i(ii); hpd = hpd_i(ii)
+        iaa = Int(round(xss[hpd])); naa = Int(round(xss[hpd+1]))
+        if ii > 1
+            pr("2/"); pr("/")
+        end
+        pr(@sprintf("0 0 0%2d/", ii-1))
+        pr("$(qu)$(plabel_xs(ipt))$(qu)/")
+        pr("0/")
+        xlast = small; test = 1.0/5
+        for i in 1:naa
+            e = xss[esz + iaa - 2 + i]
+            if e > test
+                xs = xss[hpd + 1 + i]
+                ipt == 2 && (xs /= 5)
+                if naa <= nden || e >= xlast + thin || i == naa
+                    pr("$(_e14_6(e))$(_e14_6(xs))/")
+                    xlast = e
+                end
+            end
+        end
+        pr("/")
+    end
+
+    # ===== C5: per-type per-MT 3D plots.  Ref: 19121-19458. =====
+    for i in 1:ntype
+        ipt = ipt_i(i)
+        nmtr = nmtr_i(i)
+        landh = landh_i(i); andh = andh_i(i)
+        ldlwh = ldlwh_i(i); dlwh = dlwh_i(i)
+        for imt in 1:nmtr
+            # law of this reaction.  Ref: 19141-19143.
+            l1 = Int(round(xss[ldlwh + imt - 1]))
+            l2 = dlwh + l1 - 1
+            law = Int(round(xss[l2 + 1]))
+            if law == 4 || law == 44 || law == 61
+                # 3D emission-spectrum page — no T53 reaction has these laws.
+                _aplots_unported("aploxp law=$law emission-spectrum 3D plot not yet ported")
+            end
+            # angular distribution.  Ref: 19307-19456 (== aplof4 perspective body).
+            na0 = Int(round(xss[landh + imt - 1]))
+            if na0 > 0
+                mt = abs(Int(round(xss[mtrh_i(i) + imt - 1])))
+                name = _aplots_name_izai(_aplots_mtname(mt, izai), izai)
+                na = na0 + andh - 1
+                ne = Int(round(xss[na]))
+                nb = na + ne
+                # len_trim'd name + ' ' + particle word.  Ref: 19386-19410.
+                nm = rstrip(name)
+                subtitle = "angular distribution for $(nm) $(pword(ipt))"
+                _aplof4_perspective!(io, xss, na, ne, nb, andh, subtitle,
+                                     hk70, iwcol, qu)
+            end
+        end
+    end
+    nothing
 end
 
 # =========================================================================
@@ -973,6 +1373,7 @@ end
 # alternate names.  Returns the 10-char Fortran name verbatim (trailing blanks
 # preserved, as the Fortran write emits `a` = the full character(10)).
 # =========================================================================
+# Full 500-entry `hndf` table, transcribed verbatim from acecm.f90:31-138.
 const _APLOTS_MT_HNDF = String[
      "total     ","elastic   ","nonelastic","inelastic ","(n,x)     ",
      "(n,1/2*1) ","(n,1/2*2) ","(n,1/2*3) ","(n,1/2*4) ","(n,x)     ",
@@ -983,7 +1384,104 @@ const _APLOTS_MT_HNDF = String[
      "(n,x)     ","(n,n*)d   ","(n,n*)t   ","(n,n*)he3 ","(n,n*)d2a ",
      "(n,n*)t2a ","(n,4n)    ","(n,3nf)   ","(n,x)     ","(n,x)     ",
      "(n,2np)   ","(n,3np)   ","(n,x)     ","(n,n2p)   ","(n,npa)   ",
-     "(n,2/2*1) ","(n,2/2*2) ","(n,2/2*3) ","(n,2/2*4) ","(n,n*0)   "]
+     "(n,2/2*1) ","(n,2/2*2) ","(n,2/2*3) ","(n,2/2*4) ","(n,n*0)   ",   # 50
+     "(n,n*1)   ","(n,n*2)   ","(n,n*3)   ","(n,n*4)   ","(n,n*5)   ",
+     "(n,n*6)   ","(n,n*7)   ","(n,n*8)   ","(n,n*9)   ","(n,n*10)  ",
+     "(n,n*11)  ","(n,n*12)  ","(n,n*13)  ","(n,n*14)  ","(n,n*15)  ",
+     "(n,n*16)  ","(n,n*17)  ","(n,n*18)  ","(n,n*19)  ","(n,n*20)  ",
+     "(n,n*21)  ","(n,n*22)  ","(n,n*23)  ","(n,n*24)  ","(n,n*25)  ",
+     "(n,n*26)  ","(n,n*27)  ","(n,n*28)  ","(n,n*29)  ","(n,n*30)  ",
+     "(n,n*31)  ","(n,n*32)  ","(n,n*33)  ","(n,n*34)  ","(n,n*35)  ",
+     "(n,n*36)  ","(n,n*37)  ","(n,n*38)  ","(n,n*39)  ","(n,n*40)  ",
+     "(n,n*c)   ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,n*)gma ","(n,x)     ",   # 100
+     "(n,parab) ","(n,gma)   ","(n,p)     ","(n,d)     ","(n,t)     ",
+     "(n,he3)   ","(n,a)     ","(n,2a)    ","(n,3a)    ","(n,x)     ",
+     "(n,2p)    ","(n,pa)    ","(n,t2a)   ","(n,d2a)   ","(n,pd)    ",
+     "(n,pt)    ","(n,da)    ","(n,x)     ","(n,x)     ","(n,dest)  ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",   # 150
+     "(n,x)     ","(n,5n)    ","(n,6n)    ","(n,2nt)   ","(n,ta)    ",
+     "(n,4np)   ","(n,3nd)   ","(n,nda)   ","(n,2npa)  ","(n,7n)    ",
+     "(n,8n)    ","(n,5np)   ","(n,6np)   ","(n,7np)   ","(n,4na)   ",
+     "(n,5na)   ","(n,6na)   ","(n,7na)   ","(n,4nd)   ","(n,5nd)   ",
+     "(n,6nd)   ","(n,3nt)   ","(n,4nt)   ","(n,5nt)   ","(n,6nt)   ",
+     "(n,2nhe3) ","(n,3nhe3) ","(n,4nhe3) ","(n,3n2p)  ","(n,3n2a)  ",
+     "(n,3npa)  ","(n,dt)    ","(n,npd)   ","(n,npt)   ","(n,ndt)   ",
+     "(n,nphe3) ","(n,ndhe3) ","(n,nthe3) ","(n,nta)   ","(n,2n2p)  ",
+     "(n,phe3)  ","(n,dhe3)  ","(n,he3a)  ","(n,4n2p)  ","(n,4n2a)  ",
+     "(n,4npa)  ","(n,3p)    ","(n,n3p)   ","(n,3n2pa) ","(n,5n2p)  ",   # 200
+     "(n,p*0)   ",
+     "(n,p*1)   ","(n,p*2)   ","(n,p*3)   ","(n,p*4)   ","(n,p*5)   ",
+     "(n,p*6)   ","(n,p*7)   ","(n,p*8)   ","(n,p*9)   ","(n,p*10)  ",
+     "(n,p*11)  ","(n,p*12)  ","(n,p*13)  ","(n,p*14)  ","(n,p*15)  ",
+     "(n,p*16)  ","(n,p*17)  ","(n,p*18)  ","(n,p*19)  ","(n,p*20)  ",
+     "(n,p*21)  ","(n,p*22)  ","(n,p*23)  ","(n,p*24)  ","(n,p*25)  ",
+     "(n,p*26)  ","(n,p*27)  ","(n,p*28)  ","(n,p*29)  ","(n,p*30)  ",
+     "(n,p*31)  ","(n,p*32)  ","(n,p*33)  ","(n,p*34)  ","(n,p*35)  ",
+     "(n,p*36)  ","(n,p*37)  ","(n,p*38)  ","(n,p*39)  ","(n,p*40)  ",
+     "(n,p*41)  ","(n,p*42)  ","(n,p*43)  ","(n,p*44)  ","(n,p*45)  ",
+     "(n,p*46)  ","(n,p*47)  ","(n,p*48)  ","(n,p*c)   ",                # 250
+     "(n,d*0)   ",
+     "(n,d*1)   ","(n,d*2)   ","(n,d*3)   ","(n,d*4)   ","(n,d*5)   ",
+     "(n,d*6)   ","(n,d*7)   ","(n,d*8)   ","(n,d*9)   ","(n,d*10)  ",
+     "(n,d*11)  ","(n,d*12)  ","(n,d*13)  ","(n,d*14)  ","(n,d*15)  ",
+     "(n,d*16)  ","(n,d*17)  ","(n,d*18)  ","(n,d*19)  ","(n,d*20)  ",
+     "(n,d*21)  ","(n,d*22)  ","(n,d*23)  ","(n,d*24)  ","(n,d*25)  ",
+     "(n,d*26)  ","(n,d*27)  ","(n,d*28)  ","(n,d*29)  ","(n,d*30)  ",
+     "(n,d*31)  ","(n,d*32)  ","(n,d*33)  ","(n,d*34)  ","(n,d*35)  ",
+     "(n,d*36)  ","(n,d*37)  ","(n,d*38)  ","(n,d*39)  ","(n,d*40)  ",
+     "(n,d*41)  ","(n,d*42)  ","(n,d*43)  ","(n,d*44)  ","(n,d*45)  ",
+     "(n,d*46)  ","(n,d*47)  ","(n,d*48)  ","(n,d*c)   ",                # 300
+     "(n,t*0)   ",
+     "(n,t*1)   ","(n,t*2)   ","(n,t*3)   ","(n,t*4)   ","(n,t*5)   ",
+     "(n,t*6)   ","(n,t*7)   ","(n,t*8)   ","(n,t*9)   ","(n,t*10)  ",
+     "(n,t*11)  ","(n,t*12)  ","(n,t*13)  ","(n,t*14)  ","(n,t*15)  ",
+     "(n,t*16)  ","(n,t*17)  ","(n,t*18)  ","(n,t*19)  ","(n,t*20)  ",
+     "(n,t*21)  ","(n,t*22)  ","(n,t*23)  ","(n,t*24)  ","(n,t*25)  ",
+     "(n,t*26)  ","(n,t*27)  ","(n,t*28)  ","(n,t*29)  ","(n,t*30)  ",
+     "(n,t*31)  ","(n,t*32)  ","(n,t*33)  ","(n,t*34)  ","(n,t*35)  ",
+     "(n,t*36)  ","(n,t*37)  ","(n,t*38)  ","(n,t*39)  ","(n,t*40)  ",
+     "(n,t*41)  ","(n,t*42)  ","(n,t*43)  ","(n,t*44)  ","(n,t*45)  ",
+     "(n,t*46)  ","(n,t*47)  ","(n,t*48)  ","(n,t*c)   ",                # 350
+     "(n,he3*0) ",
+     "(n,he3*1) ","(n,he3*2) ","(n,he3*3) ","(n,he3*4) ","(n,he3*5) ",
+     "(n,he3*6) ","(n,he3*7) ","(n,he3*8) ","(n,he3*9) ","(n,he3*10)",
+     "(n,he3*11)","(n,he3*12)","(n,he3*13)","(n,he3*14)","(n,he3*15)",
+     "(n,he3*16)","(n,he3*17)","(n,he3*18)","(n,he3*19)","(n,he3*20)",
+     "(n,he3*21)","(n,he3*22)","(n,he3*23)","(n,he3*24)","(n,he3*25)",
+     "(n,he3*26)","(n,he3*27)","(n,he3*28)","(n,he3*29)","(n,he3*30)",
+     "(n,he3*31)","(n,he3*32)","(n,he3*33)","(n,he3*34)","(n,he3*35)",
+     "(n,he3*36)","(n,he3*37)","(n,he3*38)","(n,he3*39)","(n,he3*40)",
+     "(n,he3*41)","(n,he3*42)","(n,he3*43)","(n,he3*44)","(n,he3*45)",
+     "(n,he3*46)","(n,he3*47)","(n,he3*48)","(n,he3*c) ",                # 400
+     "(n,a*0)   ",
+     "(n,a*1)   ","(n,a*2)   ","(n,a*3)   ","(n,a*4)   ","(n,a*5)   ",
+     "(n,a*6)   ","(n,a*7)   ","(n,a*8)   ","(n,a*9)   ","(n,a*10)  ",
+     "(n,a*11)  ","(n,a*12)  ","(n,a*13)  ","(n,a*14)  ","(n,a*15)  ",
+     "(n,a*16)  ","(n,a*17)  ","(n,a*18)  ","(n,a*19)  ","(n,a*20)  ",
+     "(n,a*21)  ","(n,a*22)  ","(n,a*23)  ","(n,a*24)  ","(n,a*25)  ",
+     "(n,a*26)  ","(n,a*27)  ","(n,a*28)  ","(n,a*29)  ","(n,a*30)  ",
+     "(n,a*31)  ","(n,a*32)  ","(n,a*33)  ","(n,a*34)  ","(n,a*35)  ",
+     "(n,a*36)  ","(n,a*37)  ","(n,a*38)  ","(n,a*39)  ","(n,a*40)  ",
+     "(n,a*41)  ","(n,a*42)  ","(n,a*43)  ","(n,a*44)  ","(n,a*45)  ",
+     "(n,a*46)  ","(n,a*47)  ","(n,a*48)  ","(n,a*c)   ",                # 450
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",   # 475
+     "(n,2n*0)  ",
+     "(n,2n*1)  ","(n,2n*2)  ","(n,2n*3)  ","(n,2n*4)  ","(n,2n*5)  ",
+     "(n,2n*6)  ","(n,2n*7)  ","(n,2n*8)  ","(n,2n*9)  ","(n,2n*10) ",
+     "(n,2n*11) ","(n,2n*12) ","(n,2n*13) ","(n,2n*14) ","(n,2n*15) ",
+     "(n,2n*c)  ",
+     "(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ","(n,x)     ",
+     "(n,x)     ","(n,x)     ","(n,x)     "]                             # 500
 
 """
     _aplots_mtname(mt::Int, izai::Int) -> String
