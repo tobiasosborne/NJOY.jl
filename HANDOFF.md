@@ -934,7 +934,7 @@ Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; t
 - T22 (leapr S(α,β)) — tape20 4636/4636 — **MF1/MT451 EMAX fixed (bead NJOY_jl-ixb, oracle-pin follow-up)**
 
 **aplots generalizes but blocked elsewhere** (Phase 80):
-- T54 (acer p+H-3) — tape33 structurally complete (11236... 11340/11340 lines) but DIFFS 1-ULP downstream of its tape34 ACE FP residual (bead NJOY_jl-53h, triton recoil-heating word); flips to FULL BI once that lands.
+- T54 (acer p+H-3) — tape33 structurally complete (11236... 11340/11340 lines) but DIFFS 1-ULP downstream of its tape34 ACE FP residual (bead NJOY_jl-53h, triton recoil-heating word); flips to FULL BI once that lands. **Root cause diagnosed 2026-06-01** (not yet applied/verified): the >1e-5 word (triton MT=2 recoil heating[1]=6.008e-6, ref=0) is `_terpa_scr2` (`src/formats/ace_lcp_build.jl:601`) extrapolating below-range to `Vi(1)` instead of returning 0 like Fortran `terpa` (endf.f90:1812-1816 label 170). Proposed fix `e < Ei(1) && return 0.0`; reproduce-first per Law 1, then verify T54→NUMERIC_PASS + regression T53. See `worklog/T54_recoil_heating_terpa_diagnosis.md`.
 - T51 (acer d+H-2 .10h) / T71 (acer 78184.10o) — aplots no longer crashes, but tape33 is wrong-content because their ACE (tape34) is itself STRUCTURAL_FAIL (T51 unported MF6 LAW=6; T71 over-produces). ACE-level work, separate from aplots.
 
 **Numeric pass** (rtol 1e-5):
