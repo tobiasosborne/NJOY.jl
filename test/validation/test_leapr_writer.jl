@@ -42,6 +42,14 @@ const T22_INPUT = read(joinpath(@__DIR__, "..", "..", "njoy-reference", "tests",
     @test occursin("1.001000+3", lines[2])
     @test occursin(" 2 1451", lines[2])
 
+    # MF1/MT451 HEAD3 on line 4: EMAX = sigfig(.0253 * beta_max, 7, 0).
+    # Ref: leapr.f90:3083 — scr(2)=sigfig(therm*beta(nbeta),7,0), therm=.0253,
+    # beta(nbeta) the RAW max beta. T22 beta grid ends at 300.0 → 7.590000+0.
+    emax_expected = NJOY.round_sigfig(0.0253 * p.beta[end], 7, 0)
+    @test occursin("7.590000+0", lines[4])              # T22-specific literal
+    @test occursin(NJOY.format_endf_float(emax_expected; extended=false), lines[4])
+    @test !occursin("0.000000+0", lines[4][12:22])      # field-2 not the old hardcoded 0
+
     # MF7/MT4 section present (MF at cols 71-72, MT at 73-75)
     mf7_lines = [l for l in lines
                  if length(l) >= 75 && strip(l[71:72]) == "7" && strip(l[73:75]) == "4"]

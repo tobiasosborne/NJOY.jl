@@ -176,8 +176,12 @@ function write_leapr_tape(path::AbstractString, p::LeaprParams,
         ns = _leapr_write_cont(io, p.za, p.awr, -1, 0, 0, 0, mat, 1, 451, ns)
         # HEAD2: 0, 0, 0, 0, 0, 6
         ns = _leapr_write_cont(io, 0.0, 0.0, 0, 0, 0, 6, mat, 1, 451, ns)
-        # HEAD3: 1.0, 0.0, 0, 0, 12, 6  (AWI=1, EMAX=0, LREL=0, 0, NSUB=12, NVER=6)
-        ns = _leapr_write_cont(io, 1.0, 0.0, 0, 0, 12, 6, mat, 1, 451, ns)
+        # HEAD3: 1.0, EMAX, 0, 0, 12, 6  (AWI=1, LREL=0, 0, NSUB=12, NVER=6)
+        # Ref: leapr.f90:3083 — scr(2)=sigfig(therm*beta(nbeta),7,0), therm=.0253,
+        # beta(nbeta) the RAW max beta (module-level grid; the lat=1 sc=therm/tev
+        # rescaling only touches local `betan` copies, never `beta` itself).
+        emax_mf1 = round_sigfig(0.0253 * p.beta[end], 7, 0)
+        ns = _leapr_write_cont(io, 1.0, emax_mf1, 0, 0, 12, 6, mat, 1, 451, ns)
 
         # HEAD4: (0, 0, 0, 0, NWD, NXC) — emit after NWD+NXC known.
         nwd = length(p.comments)

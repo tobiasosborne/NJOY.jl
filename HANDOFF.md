@@ -931,6 +931,7 @@ Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; t
 - T52 (acer p+H-1) — tape33 6042/6042 + tape34 3986/3986 + tape35 — **aplots ported (Phase 79)**
 - T53 (acer d+H-2) — tape33 17236/17236 + tape34 12030/12030 + tape35 — **aplots heating + aploxp ported (Phase 80)**
 - T62 (acer d+He-3) — tape33 5460/5460 + tape34 7221/7221 + tape35 — **aplots aplotr threshold ported (Phase 80)**
+- T22 (leapr S(α,β)) — tape20 4636/4636 — **MF1/MT451 EMAX fixed (bead NJOY_jl-ixb, oracle-pin follow-up)**
 
 **aplots generalizes but blocked elsewhere** (Phase 80):
 - T54 (acer p+H-3) — tape33 structurally complete (11236... 11340/11340 lines) but DIFFS 1-ULP downstream of its tape34 ACE FP residual (bead NJOY_jl-53h, triton recoil-heating word); flips to FULL BI once that lands.
@@ -942,7 +943,7 @@ Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; t
 
 Notes:
 - `reports/REFERENCE_SWEEP.md` predates Phase 79 and shows T50/T52 as DIFFS — they are now **full BIT_IDENTICAL** (tape33 aplots ported + verified via targeted cache-nuked `reference_test.jl` runs); the next full sweep will reflect this. A test counts bit-identical only if EVERY produced tape passes, so always read the per-tape detail (T53/T62 still carry a deferred `tape33`, bead NJOY_jl-zsh).
-- T22 (leapr) is 4635/4636 — one MF1/MT451 header field the newer upstream reference emits differently (bead NJOY_jl-ixb); decide fix-vs-pin under the baseline-pin task (bead NJOY_jl-grp).
+- T22 (leapr) is now **BIT_IDENTICAL 4636/4636** — the MF1/MT451 record-3 EMAX was hardcoded 0; fixed to `round_sigfig(.0253·β_max, 7, 0)` per `leapr.f90:3083` (upstream PR #372). Bead NJOY_jl-ixb closed. The same one-line fix corrects the EMAX line in T09/T23/T33/T80, which carry separate value diffs (T80 FP-order → sc5; T09 MF7/MT4 S(α,β) → NJOY_jl-lho).
 - RECONR is the most mature module (~19 materials bit-identical on the produced PENDF across all resonance formalisms).
 - `reports/REFERENCE_SWEEP.md` is the fresh sweep; README.md was rewritten this session to reflect this baseline.
 
