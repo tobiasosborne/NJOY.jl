@@ -19,6 +19,10 @@ using Printf
 const NJOY_REF_ROOT = normpath(joinpath(@__DIR__, "..", "..", "njoy-reference"))
 const TESTS_ROOT    = joinpath(NJOY_REF_ROOT, "tests")
 
+# Preflight: warn (never abort) if the Fortran oracle has drifted off the pin.
+include(joinpath(@__DIR__, "reference_pin.jl"))
+check_reference_pin()
+
 # =========================================================================
 # execute.py::lineEquivalence port
 # =========================================================================

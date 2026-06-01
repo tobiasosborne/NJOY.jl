@@ -12,6 +12,13 @@
 using NJOY
 using Printf
 
+# Preflight: warn (never abort) if the Fortran oracle has drifted off the pin.
+# Run before the long sweep so drift is visible up front. (reference_test.jl,
+# included below, also defines/calls check_reference_pin; the redefinition and
+# second advisory call are harmless.)
+include(joinpath(@__DIR__, "reference_pin.jl"))
+check_reference_pin()
+
 include(joinpath(@__DIR__, "reference_test.jl"))
 
 const REPORT_DIR  = normpath(joinpath(@__DIR__, "..", "..", "reports"))

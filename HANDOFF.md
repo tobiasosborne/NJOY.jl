@@ -908,9 +908,21 @@ This 3+1 pattern (3 read-only researchers + 1 Julia runner) was how the MF=12 br
 
 ---
 
+## Reference Oracle Pin
+
+The Fortran oracle (`njoy-reference/`, a per-machine git clone of NJOY2016) is **pinned** so "bit-identical" validation is measured against a frozen commit instead of upstream `develop` (which rebases). The pin lives in `REFERENCE_PIN` (repo root):
+
+- **Pinned SHA:** `2c64dfb3d7cd57bea9fa8e36b995eee4a9d88d58` (upstream `develop` tip at pin time, commit dated 2026-03-18, "updating release notes"). Pinned 2026-06-01.
+- **Align your local oracle:** `bash scripts/setup_reference.sh` (idempotent — clones if absent, else fetch + checkout the pin, then verifies HEAD).
+- **Preflight:** `test/validation/reference_pin.jl::check_reference_pin()` runs at the top of both `reference_test.jl` and `sweep_reference_tests.jl`. It only `@warn`s on drift/missing oracle (never aborts) and points at the setup script.
+- **ac5adf5 is a ghost:** the prior recorded baseline short-SHA `ac5adf5` is **not reachable** in current upstream history (rebased away) and is unreproducible — it is superseded by the pin above.
+- **Drift from the old laptop oracle** (`3c9873d`, Dec 2025) to this pin: only 5 existing reference tapes changed, each a single MF1/MT451 record-3 field-2 (EMAX) header going `0.000000+0` → a real value (tests 09, 22, 23, 33, 80); plus two brand-new tests **86, 87** were added.
+
+---
+
 ## Current State (2026-05-30, verified sweep)
 
-Validated against a fresh clone of NJOY2016 `develop @ ac5adf5` (2026-04-06) via the full 86-test sweep (`reports/REFERENCE_SWEEP.md`); 52 min, 0 crashes, 0 timeouts.
+Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; the previously-cited `develop @ ac5adf5` / 2026-04-06 is unreproducible and superseded) via the full 86-test sweep (`reports/REFERENCE_SWEEP.md`); 52 min, 0 crashes, 0 timeouts.
 
 **Full test bit-identical** (rtol 1e-9, every produced tape):
 - T03 (moder→reconr, photoatomic) — tape37 9274/9274

@@ -1,0 +1,23 @@
+# NJOY.jl — Fortran reference oracle pin
+#
+# This file PINS the njoy-reference/ checkout (a git clone of NJOY2016) to a
+# fixed upstream commit so that "bit-identical" validation is measured against
+# a frozen oracle rather than a moving `develop` branch (which rebases).
+#
+# Align your local oracle to this pin with:
+#     bash scripts/setup_reference.sh
+#
+# The SHA below is parsed by both scripts/setup_reference.sh (shell) and
+# test/validation/reference_pin.jl (Julia). Keep it on its own line.
+
+SHA=2c64dfb3d7cd57bea9fa8e36b995eee4a9d88d58
+
+URL=https://github.com/njoy/NJOY2016.git
+BRANCH=develop
+PIN_DATE=2026-06-01
+COMMIT_DATE=2026-03-18
+COMMIT_SUBJECT=updating release notes
+
+# NOTE: the prior recorded baseline short-SHA "ac5adf5" is NOT reachable in
+# current upstream history (it was rebased away on `develop`) and is therefore
+# unreproducible. It is SUPERSEDED by the pin above.
