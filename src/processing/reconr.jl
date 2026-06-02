@@ -490,12 +490,98 @@ function reconr(endf_file::AbstractString;
             reaction_xs[rmt] = [get(res_xs[i].reactions, rmt, 0.0) for i in 1:n_pts]
         end
 
+        # Reconstruct MF10 (radioactive nuclide production) sub-sections onto
+        # the unionized grid so reconr can write them to the PENDF. Fortran
+        # emerge processes each MF10 final-state sub-section (`nss=n1h`,
+        # reconr.f90:4734) exactly like a smooth MF3 reaction: interpolate onto
+        # the union grid, sigfig(7,0), skip below the sub-section's first energy
+        # (gety1 thresh), trim to one point before the first nonzero (ith-1).
+        # Gated on MF10 presence: TENDL Hf-177 (MAT=7234) has MF10; almost all
+        # other evaluations do not, so this is a no-op for them.
+        mf10_subsections = _reconstruct_mf10(io, actual_mat, all_energies)
+
         return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                 fission=fission_arr, capture=capture_arr,
                 mf2=mf2, mf3_sections=mf3_sections,
                 reaction_xs=reaction_xs,
-                urr_table=urr_table, urr_lssf=urr_lssf)
+                urr_table=urr_table, urr_lssf=urr_lssf,
+                mf10_subsections=mf10_subsections)
     end
+end
+
+# ==========================================================================
+# MF10 (radioactive nuclide production) reconstruction
+# ==========================================================================
+
+"""
+    _reconstruct_mf10(io, mat, union_grid) -> Vector{NamedTuple}
+
+Reconstruct every MF10 sub-section of material `mat` onto `union_grid`,
+mirroring Fortran emerge (reconr.f90:4731-4964). Each returned entry is
+`(mt, izap, lfs, qm, qi, energies, xs)`.
+
+For each sub-section the cross section is the linear interpolation of the
+original MF10 TAB1 (TENDL MF10 is INT=2) onto the union grid, `sigfig(·,7,0)`,
+with points below the sub-section's first tabulated energy dropped (Fortran
+gety1 `thresh`, line 4792) and the output trimmed to begin one point before
+the first nonzero value (Fortran `ith` tracking, lines 4834/4918).
+
+Returns an empty vector when the material has no MF10 (the common case),
+making the whole MF10 PENDF-write path a no-op for non-activation evaluations.
+"""
+function _reconstruct_mf10(io::IO, mat::Integer, union_grid::Vector{Float64})
+    out = NamedTuple{(:mt, :izap, :lfs, :qm, :qi, :energies, :xs),
+                     Tuple{Int, Int, Int, Float64, Float64,
+                           Vector{Float64}, Vector{Float64}}}[]
+
+    # Discover which MF10 MTs are present (without disturbing other readers).
+    mf10_mts = Int[]
+    seekstart(io)
+    while !eof(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        _parse_int(p[67:70]) == mat || continue
+        mf = _parse_int(p[71:72]); mt = _parse_int(p[73:75])
+        mf == 10 && mt > 0 && !(mt in mf10_mts) && push!(mf10_mts, mt)
+    end
+    isempty(mf10_mts) && return out
+    sort!(mf10_mts)
+
+    for mt in mf10_mts
+        subs = read_mf10_subsections(io, mat, mt)
+        for sub in subs
+            tab = sub.tab
+            # Fortran emerge thresh = sigfig(first tabulated energy, 7, 0)
+            # (gety1 init at e=0, reconr.f90:4752-4753).
+            thresh = round_sigfig(tab.x[1], 7, 0)
+            sec_e = Float64[]
+            sec_xs = Float64[]
+            for e in union_grid
+                # Below threshold → no grid point for this sub-section
+                # (Fortran line 4792). thresh tiny for the lfs=0 sub-section.
+                if thresh > 0.0 && (thresh - e) > 1.0e-10 * thresh
+                    continue
+                end
+                bg = round_sigfig(interpolate(tab, e), 7, 0)
+                push!(sec_e, e)
+                push!(sec_xs, bg)
+            end
+            isempty(sec_e) && continue
+            # Pseudo-threshold trim: start one point before the first nonzero
+            # (Fortran emerge `ith` at line 4834, then `ith=ith-1` at 4918).
+            ith = findfirst(x -> x > 0.0, sec_xs)
+            if ith === nothing
+                # All-zero sub-section: Fortran still emits it (ith stays 0,
+                # in-ith+1 = full grid). Keep the full reconstructed grid.
+            elseif ith > 1
+                sec_e = sec_e[ith-1:end]
+                sec_xs = sec_xs[ith-1:end]
+            end
+            push!(out, (mt=Int(sub.mt), izap=Int(sub.izap), lfs=Int(sub.lfs),
+                        qm=sub.qm, qi=sub.qi, energies=sec_e, xs=sec_xs))
+        end
+    end
+    out
 end
 
 # ==========================================================================

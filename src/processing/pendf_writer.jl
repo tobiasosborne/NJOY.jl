@@ -100,9 +100,15 @@ function write_pendf(io::IO, result::NamedTuple;
     urr_tab = hasproperty(result, :urr_table) ? result.urr_table : nothing
     urr_lssf_val = hasproperty(result, :urr_lssf) ? Int(result.urr_lssf) : 0
 
-    # MF1/MT451
+    # MF10 reconstructed sub-sections (radioactive nuclide production), if any.
+    # Gated: empty for all non-activation evaluations (Hf-177 MAT=7234 only).
+    mf10_subs = hasproperty(result, :mf10_subsections) ? result.mf10_subsections :
+                NamedTuple[]
+
+    # MF1/MT451 — directory must include the MF10 sections when present.
     _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
-                      mt_to_mf=mt_mf, descriptions=descriptions, urr_table=urr_tab)
+                      mt_to_mf=mt_mf, descriptions=descriptions, urr_table=urr_tab,
+                      mf10_subs=mf10_subs)
 
     # MF2/MT151 + MT152 (if URR data exists)
     _write_legacy_mf2(io, mf2, actual_mat, ns;
@@ -110,6 +116,9 @@ function write_pendf(io::IO, result::NamedTuple;
 
     # MF3/MF23 sections
     _write_legacy_mf3(io, result, actual_mat, reactions, ns)
+
+    # MF10/MT sections (radioactive nuclide production), gated on presence.
+    _write_legacy_mf10(io, actual_mat, mf2, mf10_subs)
 
     # MEND and TEND (NS=0 matching Fortran)
     _write_fend_zero(io, 0)   # MEND: MAT=0, MF=0, MT=0, NS=0
@@ -774,11 +783,15 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                             n_pts, reactions, ns::Ref{Int};
                             mt_to_mf::Dict{Int,Int}=Dict{Int,Int}(),
                             descriptions::Vector{String}=String[],
-                            urr_table=nothing)
+                            urr_table=nothing,
+                            mf10_subs=NamedTuple[])
     ns[] = 1
-    # NXC = number of directory entries: self-ref + MT151 [+ MT152] + MF3 sections
     has_mt152 = urr_table !== nothing
-    nxc = 2 + length(reactions) + (has_mt152 ? 1 : 0)
+    # Per-MT MF10 directory entries: one entry per MT (NC counts all of its
+    # sub-sections together, Fortran emerge ncs accumulation reconr.f90:4919-4923).
+    mf10_nc = _mf10_dir_nc(mf10_subs)   # MT => NC line count
+    # NXC = self-ref + MT151 [+ MT152] + MF3 sections + MF10 sections
+    nxc = 2 + length(reactions) + (has_mt152 ? 1 : 0) + length(mf10_nc)
     nwd = length(descriptions)
 
     _write_cont_line(io, mf2.ZA, mf2.AWR, 2, 0, 0, 0,
@@ -806,9 +819,32 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
         _write_cont_line(io, 0.0, 0.0, dir_mf, Int(mt), nc_per, 0,
                          Int(mat), 1, 451, ns)
     end
+    # MF10 directory entries (sorted by MT), after all MF3 entries.
+    for mt in sort(collect(keys(mf10_nc)))
+        _write_cont_line(io, 0.0, 0.0, 10, mt, mf10_nc[mt], 0, Int(mat), 1, 451, ns)
+    end
 
     _write_send(io, Int(mat), 1)
     _write_fend_zero(io, Int(mat))
+end
+
+"""
+    _mf10_dir_nc(mf10_subs) -> Dict{Int,Int}
+
+Per-MT MF10 directory NC counts. Fortran emerge accumulates `ncs` over the
+sub-sections of one MF10 section (reconr.f90:4919-4923): one shared HEAD line
+plus, per sub-section, `2 + (np+2)÷3` lines (TAB1 CONT + interp + data).
+"""
+function _mf10_dir_nc(mf10_subs)
+    nc = Dict{Int,Int}()
+    for sub in mf10_subs
+        mt = Int(sub.mt)
+        np = length(sub.energies)
+        # First sub-section of an MT seeds the shared HEAD line (ncs=1).
+        haskey(nc, mt) || (nc[mt] = 1)
+        nc[mt] += 2 + div(np + 2, 3)
+    end
+    nc
 end
 
 function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
@@ -953,6 +989,56 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
     if cur_mf != 0
         _write_fend_zero(io, Int(mat))
     end
+end
+
+"""
+    _write_legacy_mf10(io, mat, mf2, mf10_subs)
+
+Write the MF10 (radioactive nuclide production) sections of the PENDF.
+Sub-sections are grouped by MT; each MT gets one HEAD (ZA, AWR, 0, 0, NS, 0)
+followed by NS sub-section TAB1s. Each TAB1 CONT carries
+C1=QM, C2=QI, L1=IZAP, L2=LFS, NR=1, NP (ENDF-6 §10.2). A no-op when
+`mf10_subs` is empty (non-activation evaluations).
+
+Ref: njoy-reference/src/reconr.f90:4731-4964 (emerge MF10 path) +
+recout's `tomend` copy of the scratch MF10 sections to the output PENDF
+(reconr.f90:5433).
+"""
+function _write_legacy_mf10(io::IO, mat::Int32, mf2::MF2Data, mf10_subs)
+    isempty(mf10_subs) && return
+    za = mf2.ZA; awr = mf2.AWR
+
+    # Group sub-sections by MT, preserving deck order within an MT.
+    mts = Int[]
+    for sub in mf10_subs
+        Int(sub.mt) in mts || push!(mts, Int(sub.mt))
+    end
+    sort!(mts)
+
+    for mt in mts
+        subs = [s for s in mf10_subs if Int(s.mt) == mt]
+        ns = Ref(1)
+        # HEAD: ZA, AWR, L1=0, L2=0, N1=NS (sub-section count), N2=0.
+        _write_cont_line(io, za, awr, 0, 0, length(subs), 0, Int(mat), 10, mt, ns)
+        for sub in subs
+            np = length(sub.energies)
+            # TAB1 CONT: QM, QI, IZAP, LFS, NR=1, NP.
+            _write_cont_line(io, sub.qm, sub.qi, Int(sub.izap), Int(sub.lfs),
+                             1, np, Int(mat), 10, mt, ns)
+            # Interpolation: NBT=NP, INT=2 (lin-lin; reconr linearizes MF10).
+            @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n", np, 2, "", Int(mat), 10, mt, ns[])
+            ns[] += 1
+            # Data pairs (energy uses extended 9-sigfig a11, XS uses 7-sigfig).
+            data = Float64[]
+            sizehint!(data, 2 * np)
+            for i in 1:np
+                push!(data, sub.energies[i]); push!(data, sub.xs[i])
+            end
+            _write_data_values(io, data, Int(mat), 10, mt, ns; pair_data=true)
+        end
+        _write_send(io, Int(mat), 10)
+    end
+    _write_fend_zero(io, Int(mat))
 end
 
 """Get energies, XS, QM, QI for a given MT, handling thresholds."""

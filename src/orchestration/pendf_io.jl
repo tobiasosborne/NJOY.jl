@@ -297,6 +297,63 @@ function extract_mf3_at_temperature(tape::PENDFTape, mat::Int, target_temp::Floa
     result
 end
 
+"""
+    extract_mf10_subsections(tape, mat, mt) -> Vector{NamedTuple}
+
+Parse the MF10/MT=`mt` section of `mat` into its final-state sub-sections,
+each `(izap, lfs, qm, qi, energies, xs)`. The MF10 HEAD's N1 is the
+sub-section count; each sub-section is a TAB1 carrying
+C1=QM, C2=QI, L1=IZAP, L2=LFS (ENDF-6 §10.2). Returns an empty vector when no
+MF10/MT=`mt` section is present.
+
+Used by groupr's nuclide-production averaging to fetch the reconstructed MF10
+cross sections written to the PENDF by reconr.
+"""
+function extract_mf10_subsections(tape::PENDFTape, mat::Int, mt::Int)
+    out = NamedTuple{(:izap, :lfs, :qm, :qi, :energies, :xs),
+                     Tuple{Int, Int, Float64, Float64,
+                           Vector{Float64}, Vector{Float64}}}[]
+    for material in tape.materials
+        material.mat != mat && continue
+        for sec in material.sections
+            (sec.mf != 10 || sec.mt != mt) && continue
+            lines = sec.lines
+            isempty(lines) && continue
+            # Line 1: HEAD (ZA, AWR, 0, 0, NS, 0)
+            p1 = rpad(lines[1], 80)
+            ns = _parse_int(p1[45:55])
+            ns = max(ns, 1)
+            li = 2
+            n = length(lines)
+            for _ in 1:ns
+                li > n && break
+                p = rpad(lines[li], 80)
+                qm = parse_endf_float(p[1:11]); qi = parse_endf_float(p[12:22])
+                izap = _parse_int(p[23:33]);    lfs = _parse_int(p[34:44])
+                nr = _parse_int(p[45:55]);      np = _parse_int(p[56:66])
+                li += 1
+                # Interpolation lines: ceil(2*NR/6).
+                li += cld(2 * max(nr, 0), 6)
+                energies = Float64[]; xs = Float64[]
+                sizehint!(energies, np); sizehint!(xs, np)
+                while length(energies) < np && li <= n
+                    pd = rpad(lines[li], 80)
+                    for col in 0:2
+                        length(energies) >= np && break
+                        push!(energies, parse_endf_float(pd[1 + col*22 : 11 + col*22]))
+                        push!(xs,       parse_endf_float(pd[12 + col*22 : 22 + col*22]))
+                    end
+                    li += 1
+                end
+                push!(out, (izap=izap, lfs=lfs, qm=qm, qi=qi,
+                            energies=energies, xs=xs))
+            end
+            return out
+        end
+    end
+    out
+end
+
 """Parse MF3 TAB1 data from raw ENDF lines into (energies, xs) vectors."""
 function _parse_mf3_lines(lines::Vector{String})
     energies = Float64[]

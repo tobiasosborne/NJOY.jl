@@ -42,8 +42,10 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
     tape = read_pendf(pendf_path)
 
     # Per-temperature mt_results buffer; outer index = temperature index.
-    MTRes = NamedTuple{(:mfd,:mt,:name,:records),
-                       Tuple{Int,Int,String,Vector{NTuple{3,Float64}}}}
+    # `c2` is the HEAD C2 value to emit (0.0 for plain MF3; the activation
+    # `fzam`/`izam` for MF10-derived nuclide-production sections).
+    MTRes = NamedTuple{(:mfd,:mt,:name,:records,:c2),
+                       Tuple{Int,Int,String,Vector{NTuple{3,Float64}},Float64}}
     per_temp_results = Vector{Vector{MTRes}}()
 
     for ti in 1:length(temps)
@@ -67,7 +69,7 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
                         fis_mt = haskey(mf3, 18) ? 18 : (haskey(mf3, 19) ? 19 : 0)
                         records = _groupr_nubar_records(nubar_data, mf3, fis_mt,
                                                         egn, wfn)
-                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
+                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records, c2=0.0))
                     end
                 else
                     if haskey(mf3, mtd)
@@ -79,11 +81,42 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
                                    params.nsigz == 1 && params.lord == 0) ?
                             _groupr_panel_xs(energies, xs, egn, params.iwt) :
                             _groupr_xs_records(mf3[mtd], egn, wfn)
-                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
+                        push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records, c2=0.0))
                     end
                 end
             end
         end
+
+        # MF10 nuclide-production (activation) sections. Fortran groupr's
+        # mfd≥1e7 path (groupr.f90:383,659-674,872-878): each card9a/direct
+        # compound entry group-averages an MF10/MT sub-section and emits an
+        # MF3/MTd GENDF section whose HEAD C2 carries izam (or fzam in the
+        # extended ZZZAAA.SSS format). We reuse the EXACT iwt=3 panel quadrature
+        # (`_groupr_panel_xs`) on the sub-section's own reconstructed grid.
+        for ent in params.activation_entries
+            # file index = mfd÷1e7 (1=MF3·MF6 prod, 4=MF10). Only MF10 (4) is
+            # ported; izar/lfs identify the sub-section.
+            file = ent.mfd ÷ 10000000
+            file == 4 || continue   # only MF10 nuclide production supported
+            subs = extract_mf10_subsections(tape, params.mat, ent.mtd)
+            isempty(subs) && continue
+            # Match by target ZA (izar) and final state (lfs). Fortran getmf10
+            # selects the sub-section with matching izap/lfs.
+            sub = nothing
+            for s in subs
+                if s.izap == ent.izar && s.lfs == ent.lfs
+                    sub = s; break
+                end
+            end
+            sub === nothing && continue
+            records = _groupr_panel_xs(sub.energies, sub.xs, egn, params.iwt)
+            # The emitted MF3 section's MT is the deck `mtd` (=4 here); C2 is the
+            # entry's fzam (already the effective C2 value: izar+lfs/1000 for
+            # card9a, or izam for the direct compound form).
+            push!(mt_results, (mfd=3, mt=ent.mtd, name=ent.name,
+                               records=records, c2=ent.fzam))
+        end
+
         push!(per_temp_results, mt_results)
         @info "groupr: T=$(temp)K → $(length(mt_results)) MT sections"
     end
@@ -620,14 +653,17 @@ function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
             mt = res.mt
             records = res.records
             seq = 1
+            ng = length(records)
 
-            # Per-MT HEAD (Fortran groupr.f90:833-838): (za, izam=0, nl=1, nz, lrflag=0, ngi=ngn).
+            # Per-MT HEAD (Fortran groupr.f90:833-884): (za, C2, nl=1, nz,
+            # lrflag=0, ngi=ngn). C2 = scr(2): 0 for a plain MF3 reaction, or
+            # izam/fzam for an MF10 nuclide-production section (line 874-879).
             # We emit `nz_mf3=1` because the current per-(g, ig2) body holds only
             # one σ₀ column. Fortran's full nsigz×ngn block matrix (URR self-
             # shielding) is a follow-up; this preserves wimsr's body indexing
             # (`_bidx(i, iz, ig2, nl, nz)` at wimsr_xsecs.jl:260) for nl=nz=1.
             nz_mf3 = 1
-            _write_cont_line(io, za, 0.0, 1, nz_mf3, 0, ngn, mat, 3, mt, seq); seq += 1
+            _write_cont_line(io, za, res.c2, 1, nz_mf3, 0, ngn, mat, 3, mt, seq); seq += 1
 
             # Per-(g, ig2) record (groupr.f90:890-930). ng2=nl*nz*words is the
             # number of group constants: 2 (flux, σ) for a plain MF3 cross
@@ -636,6 +672,16 @@ function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
             # C1=tempin (Fortran 902), ig2lo=1, lim=ng2, ig=g.
             ng2 = (mt in (251, 252, 253, 452, 455, 456)) ? 3 : 2
             for (g, rec) in enumerate(records)
+                # igzero zero-group skip (Fortran groupr.f90:893):
+                # write group g only when its rate integral is nonzero
+                # (displa sets igzero=1, line 6312) OR it is the final group
+                # (ig==ngi, always emitted). For the plain-XS panel path
+                # (ng2==2) `rec[3]` is the panel rate integral; ratio sections
+                # (ng2==3) keep the all-groups behaviour they shipped with.
+                if ng2 == 2
+                    igzero = rec[3] != 0.0
+                    (igzero || g == ng) || continue
+                end
                 _write_cont_line(io, temp, 0.0, ng2, 1, ng2, g, mat, 3, mt, seq); seq += 1
                 # GENDF group constants use Fortran `listio`'s standard 7-sigfig
                 # a-format (NOT the 9-sigfig extended a11 form used for energy

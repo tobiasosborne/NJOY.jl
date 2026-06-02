@@ -286,6 +286,68 @@ function read_mf10_sections(io::IO, mat::Integer)
     sections
 end
 
+"""
+    MF10Subsection
+
+One MF10 final-state sub-section, retaining the per-sub-section ENDF metadata
+(IZAP target ZA, LFS level/isomer number) that `read_mf10_sections` discards.
+Needed by reconr's PENDF MF10 write path and by groupr's nuclide-production
+averaging, which match sub-sections by (IZAP, LFS).
+
+ENDF-6 §10.2: each MF10 sub-section is a TAB1 whose CONT carries
+C1=QM, C2=QI, L1=IZAP, L2=LFS, NR, NP. Mirrors the Fortran `nss=n1h` loop in
+reconr.f90:1848 / 4734 (lunion/emerge) and groupr getmf10 (groupr.f90).
+"""
+struct MF10Subsection
+    mt::Int32
+    izap::Int32       # L1 of the sub-section TAB1: target ZA (ZZZAAA)
+    lfs::Int32        # L2: final-state / isomer number
+    qm::Float64       # C1: mass-difference Q value
+    qi::Float64       # C2: reaction Q value for this final state
+    tab::TabulatedFunction
+end
+
+"""
+    read_mf10_subsections(io::IO, mat::Integer, mt::Integer) -> Vector{MF10Subsection}
+
+Read the MF10/MT=`mt` sub-sections for material `mat`, retaining IZAP/LFS.
+Returns an empty vector if no MF10/MT=`mt` section is present (gating: Hf-177
+MAT=7234 has MF10/MT4; most evaluations do not).
+
+Ref: njoy-reference/src/reconr.f90:1848 (`if (mfh.eq.10) nss=n1h`) — the HEAD's
+N1 is the sub-section count; each sub-section is a full TAB1.
+"""
+function read_mf10_subsections(io::IO, mat::Integer, mt::Integer)
+    subs = MF10Subsection[]
+    seekstart(io)
+
+    while !eof(io)
+        pos = position(io)
+        line = readline(io)
+        p = rpad(line, 80)
+        mf_line = _parse_int(p[71:72])
+        mt_line = _parse_int(p[73:75])
+        mat_line = _parse_int(p[67:70])
+
+        mat_line != mat && continue
+
+        if mf_line == 10 && mt_line == mt
+            seek(io, pos)
+            head = read_cont(io)
+            nss = Int(head.N1)  # number of final-state sub-sections
+            for _ in 1:max(1, nss)
+                tab1 = read_tab1(io)
+                push!(subs, MF10Subsection(Int32(mt), Int32(tab1.L1), Int32(tab1.L2),
+                    tab1.C1, tab1.C2,
+                    TabulatedFunction(tab1.interp, tab1.x, tab1.y)))
+            end
+            _skip_to_send(io)
+            break  # MF10/MT is unique per material
+        end
+    end
+    subs
+end
+
 function _detect_mat(io::IO, requested::Integer)
     requested > 0 && return Int32(requested)
     seekstart(io)
