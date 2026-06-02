@@ -920,9 +920,9 @@ The Fortran oracle (`njoy-reference/`, a per-machine git clone of NJOY2016) is *
 
 ---
 
-## Current State (2026-05-30, verified sweep)
+## Current State (2026-06-02 — T86 bit-identical + oracle aligned to pin; sweep report stale, re-baseline pending)
 
-Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; the previously-cited `develop @ ac5adf5` / 2026-04-06 is unreproducible and superseded) via the full 86-test sweep (`reports/REFERENCE_SWEEP.md`); 52 min, 0 crashes, 0 timeouts.
+Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"). **2026-06-02: the local `njoy-reference/` clone was STALE at `3c9873d` (Dec-2025 laptop oracle, EMAX=0 references) and was checked out to the pin `2c64dfb` this session** — this recovered T22 to BIT_IDENTICAL (its EMAX reference is now the nonzero pin value the committed leapr fix emits) and added tests 86/87. `njoy-reference/` is git-ignored, so alignment is a per-machine step (`git -C njoy-reference checkout 2c64dfb` or `bash scripts/setup_reference.sh`); the reference_test preflight prints `reference oracle at pin` when aligned. **`reports/REFERENCE_SWEEP.md` is badly stale (shows 2 BI; reality is ~9) — run a fresh sweep.**
 
 **Full test bit-identical** (rtol 1e-9, every produced tape):
 - T03 (moder→reconr, photoatomic) — tape37 9274/9274
@@ -931,7 +931,8 @@ Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"; t
 - T52 (acer p+H-1) — tape33 6042/6042 + tape34 3986/3986 + tape35 — **aplots ported (Phase 79)**
 - T53 (acer d+H-2) — tape33 17236/17236 + tape34 12030/12030 + tape35 — **aplots heating + aploxp ported (Phase 80)**
 - T62 (acer d+He-3) — tape33 5460/5460 + tape34 7221/7221 + tape35 — **aplots aplotr threshold ported (Phase 80)**
-- T22 (leapr S(α,β)) — tape20 4636/4636 — **MF1/MT451 EMAX fixed (bead NJOY_jl-ixb, oracle-pin follow-up)**
+- T22 (leapr S(α,β)) — tape20 4636/4636 — **EMAX fix (NJOY_jl-ixb); recovered to BI when the oracle was aligned to the pin 2026-06-02**
+- **T86 (groupr ign=1 + card9a extended format, Hf-177 TENDL2021) — tape25 52/52 — NEW 2026-06-02 (Phase 82, beads NJOY_jl-57z + ow6, commits 675fdb5 + 2375874).** Required: ign=1 user group read + card9a/compound-mfd parse; a faithful iwt∈{2,3} panel Lobatto-2 quadrature port (the old `group_integrate` linearized 1/E → g1 flux 10× low, never validated for bit-identical GENDF); reconr MF10 (radioactive nuclide production) reconstruction onto the PENDF (gated on MF10 presence → no-op elsewhere); groupr MF10 activation averaging emitting MF3/MTd with izam/fzam in C2 + igzero threshold-group skip.
 
 **aplots generalizes but blocked elsewhere** (Phase 80):
 - T54 (acer p+H-3) — **tape34 DIFFS → NUMERIC_PASS (2026-06-02, commits 648c6cc + 8c622c7, bead NJOY_jl-53h).** Two real bugs fixed: (1) `_terpa_scr2` below-range (`ace_lcp_build.jl:601`: `e<=Ei(1)&&return Vi(1)` → `e<Ei(1)&&return 0.0`, Fortran `terpa` label 170, endf.f90:1812-1817) — zeroed the triton MT=2 recoil heating[1]; (2) AND-block LC locators written as floats (`ace_lcp_build.jl:502` missing `isint=true`; Fortran writes i20 integers, acefc.f90:9520 + acecm `typen` iflag=1) — fixed 52 locator words. tape34 1e-9 6383→6398, NUMERIC_PASS 7326/7327 (only the wildcarded date). T53/T50/T52/T62 FULL BI + T02/T08 preserved. **But T54 the TEST is still DIFFS — the HANDOFF's old "tape33 flips once the recoil word lands" was WRONG on two counts (locator bug + FP residual).** tape33 DIFFS 9919/11340: all diffs are the charged heating/elastic ~7e-7 FP-floor (T01/T34 class), with 4 outliers >1e-5 (max 1.84e-5, lines 3109/3115/3130/3132, E=3.1–6.6 MeV) in the **'recoil heating' PLOT curve** — aplots computes it as `esz_heat − Σ particle_heating`, so subtractive cancellation amplifies the underlying 7e-7 ACE-heating residual to 1.8e-5. Same residual = tape34's 949 lines off @1e-9. **Remaining (bead 53h, deep FP grind):** to flip T54→NUMERIC_PASS, drop those 4 plot outliers <1e-5 (match Fortran aplots `esz_heat−Σ` order in `ace_aplots.jl`, or reduce the 7e-7 charged-heating residual); to flip→BI, kill the 7e-7 residual. See `worklog/T54_recoil_heating_terpa_diagnosis.md` + `worklog/phase81_t54_tape34_numeric_pass.md`.
