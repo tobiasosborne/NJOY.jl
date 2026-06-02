@@ -598,7 +598,7 @@ the LAW=2/4 tables use INT=2."""
 function _terpa_scr2(scr::Vector{Float64}, ne::Int, e::Float64)
     int = round(Int, scr[8])
     Ei(i) = scr[8 + 2*i - 1]; Vi(i) = scr[8 + 2*i]
-    e <= Ei(1) && return Vi(1)
+    e < Ei(1) && return 0.0   # Fortran terpa label 170 (endf.f90:1812-1817): below first point → 0; e == Ei(1) falls through to interp → Vi(1) (label 140)
     e >= Ei(ne) && return Vi(ne)
     j = 1
     while j < ne && Ei(j+1) < e
