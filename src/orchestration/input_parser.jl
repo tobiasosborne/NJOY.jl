@@ -702,18 +702,36 @@ function parse_errorr(mc::ModuleCall)::ErrorrParams
                  iread, mfcov, irespr, legord, user_egn)
 end
 
+# A single MF10-activation request parsed from a card9a (`-1` then
+# `file sec izar lfs`) or a direct compound-mfd card (e.g. `40721770 4 'foo'`).
+# Captures the fully-decoded state groupr.f90 computes at labels 383/682-713 so
+# Cycle 2 (MF10 averaging) can emit sections without re-deriving izam/fzam.
+#   mfd  : compound file*10^7 + izar*10 (e.g. mf10 → 40000000 + izar*10)
+#   mtd  : reaction MT (the `sec` field)
+#   izar : target ZA (the `izar` field, or decoded from a direct compound mfd)
+#   lfs  : final-state / level number (the `lfs` field)
+#   izam : Fortran izam = izar*1000 + lfs (card9a) or decoded mod (direct form)
+#   fzam : Fortran fzam, the C2 (HEAD field 2) written for the section
+#   name : optional label string
+struct GrouprActivationEntry
+    mfd::Int; mtd::Int; izar::Int; lfs::Int; izam::Int; fzam::Float64; name::String
+end
+
 struct GrouprParams
     nendf::Int; npend::Int; ngout_in::Int; nout::Int
     mat::Int; ign::Int; igg::Int; iwt::Int; lord::Int
     ntemp::Int; nsigz::Int; iprint::Int
     title::String
     temperatures::Vector{Float64}; sigz::Vector{Float64}
-    mt_list::Vector{Tuple{Int,Int,String}}  # (mfd, mtd, name) triplets
+    mt_list::Vector{Tuple{Int,Int,String}}  # (mfd, mtd, name) triplets — standard reactions only
+    user_egn::Vector{Float64}               # user group boundaries (ign==±1; card6a/6b)
+    activation_entries::Vector{GrouprActivationEntry}  # MF10-activation (Cycle 2)
 end
 
 function parse_groupr(mc::ModuleCall)::GrouprParams
     cards = mc.raw_cards
-    isempty(cards) && return GrouprParams(0,0,0,0,0,3,0,6,0,1,1,0,"",Float64[],Float64[],Tuple{Int,Int,String}[])
+    isempty(cards) && return GrouprParams(0,0,0,0,0,3,0,6,0,1,1,0,"",Float64[],Float64[],
+                                          Tuple{Int,Int,String}[],Float64[],GrouprActivationEntry[])
     # Card 1: nendf, npend, ngout, nout
     nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
     ngout_in = _fint(cards[1], 3; default=0); nout = abs(_fint(cards[1], 4; default=0))
@@ -753,6 +771,25 @@ function parse_groupr(mc::ModuleCall)::GrouprParams
         end
         ci += 1
     end
+    # Card 6a/6b (ign==±1 only): user group structure read free-format.
+    # Ref: njoy-reference/src/groupr.f90:4156-4165 (gengpn, abs(ign)==1):
+    #   read(nsysi,*) ngn          ! card6a: number of groups
+    #   read(nsysi,*) (egn(ig),ig=1,ngn+1)   ! card6b: ngn+1 boundaries
+    # gengpn is called from groupr.f90:1126 AFTER temp (1106) and sigz (1114)
+    # are read, so card6a/6b sit between sigz and the optional weight card.
+    user_egn = Float64[]
+    if abs(ign) == 1
+        ngn = ci <= length(cards) ? _fint(cards[ci], 1; default=0) : 0
+        ci += 1
+        while ci <= length(cards) && length(user_egn) < ngn + 1
+            for t in cards[ci]
+                startswith(t, "'") && continue
+                push!(user_egn, _parse_num(t))
+                length(user_egn) >= ngn + 1 && break
+            end
+            ci += 1
+        end
+    end
     # Card 7 (optional): weight function parameters
     # iwt=1: tabulated weight function → skip 1 card (plus tab1 data, simplified here)
     # iwt=4: ehi, sigpot, ebreak, tb[, tc, eb, ef] → skip 1 card
@@ -768,18 +805,64 @@ function parse_groupr(mc::ModuleCall)::GrouprParams
     # only mfd (e.g. `3 /`) leaves mtdp at -1000, which triggers auto-expand
     # via `nextr` (label 382, iauto=1). We preserve the sentinel verbatim;
     # groupr_module expands it against the PENDF MF=3 MT set.
+    #
+    # Ref: groupr.f90:625-713. Three card forms share the loop:
+    #  (a) standard `mfd mtd name` (label 365 read) — mfd in the legal set;
+    #  (b) card9a: `mfd==-1` (label 383) → read the NEXT card `file sec izar lfs`,
+    #      map file→compound (3→10^7, 6→2·10^7, 9→3·10^7, 10→4·10^7) + izar*10,
+    #      izam = izar*1000 + lfs, fzam = izar + lfs/1000;
+    #  (c) direct compound mfd ≥ 10000000 (label 682 decode): itmp=mfd/10^7 is the
+    #      file index, izar=(mfd-10^7·itmp)/10, lfs=mfd-(10^7·itmp+10·izar);
+    #      izam = mod(mfd,10^7) (·10 if lfs≥10).
+    # mfd==0 terminates the list (label 590). Standard reactions go to mt_list;
+    # activation forms (b)/(c) go to activation_entries (Cycle 2; not emitted now).
     mt_list = Tuple{Int,Int,String}[]
+    activation_entries = GrouprActivationEntry[]
     while ci <= length(cards)
         mfd = _fint(cards[ci], 1; default=0)
         mfd == 0 && break
-        mtd = length(cards[ci]) >= 2 ? _parse_int_token(cards[ci][2]) : -1000
-        name = length(cards[ci]) >= 3 ?
-            strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
-        push!(mt_list, (mfd, mtd, name))
-        ci += 1
+        if mfd == -1
+            # card9a trigger: decode the body on the following card.
+            ci += 1
+            ci > length(cards) && break
+            file = _fint(cards[ci], 1; default=0)
+            mtd  = length(cards[ci]) >= 2 ? _parse_int_token(cards[ci][2]) : -1000
+            izar = length(cards[ci]) >= 3 ? _parse_int_token(cards[ci][3]) : 0
+            lfs  = length(cards[ci]) >= 4 ? _parse_int_token(cards[ci][4]) : 0
+            base = file == 3  ? 10000000 :
+                   file == 6  ? 20000000 :
+                   file == 9  ? 30000000 :
+                   file == 10 ? 40000000 :
+                   error("parse_groupr: illegal card9a file=$file (must be 3/6/9/10)")
+            cmfd = base + izar * 10
+            izam = izar * 1000 + lfs
+            fzam = float(izar) + float(lfs) / 1000.0
+            push!(activation_entries,
+                  GrouprActivationEntry(cmfd, mtd, izar, lfs, izam, fzam, ""))
+            ci += 1
+        elseif mfd >= 10000000
+            # direct compound mfd (e.g. `40721770 4 'foo'`): decode per label 682.
+            mtd  = length(cards[ci]) >= 2 ? _parse_int_token(cards[ci][2]) : -1000
+            name = length(cards[ci]) >= 3 ?
+                strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
+            itmp = mfd ÷ 10000000
+            izar = (mfd - 10000000 * itmp) ÷ 10
+            lfs  = mfd - (10000000 * itmp + 10 * izar)
+            izam = lfs < 10 ? mod(mfd, 10000000) : 10 * mod(mfd, 10000000)
+            push!(activation_entries,
+                  GrouprActivationEntry(mfd, mtd, izar, lfs, izam, float(izam), name))
+            ci += 1
+        else
+            mtd = length(cards[ci]) >= 2 ? _parse_int_token(cards[ci][2]) : -1000
+            name = length(cards[ci]) >= 3 ?
+                strip(replace(join(cards[ci][3:end], " "), r"^['\"]|['\"]$" => "")) : ""
+            push!(mt_list, (mfd, mtd, name))
+            ci += 1
+        end
     end
     GrouprParams(nendf, npend, ngout_in, nout, mat, ign, igg, iwt, lord,
-                 ntemp, nsigz, iprint, title, temps, sigz, mt_list)
+                 ntemp, nsigz, iprint, title, temps, sigz, mt_list,
+                 user_egn, activation_entries)
 end
 
 # =========================================================================

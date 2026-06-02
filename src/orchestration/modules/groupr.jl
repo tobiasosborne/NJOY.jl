@@ -71,7 +71,14 @@ function groupr_module(tapes::TapeManager, params::GrouprParams)
                     end
                 else
                     if haskey(mf3, mtd)
-                        records = _groupr_xs_records(mf3[mtd], egn, wfn)
+                        energies, xs = mf3[mtd]
+                        # Panel-quadrature group averaging (bit-identical path)
+                        # for the nz=nl=1 MF3 σ case with iwt∈{2,3}. Falls back
+                        # to the linearized group_integrate path otherwise.
+                        records = (abs(params.iwt) in (2, 3) &&
+                                   params.nsigz == 1 && params.lord == 0) ?
+                            _groupr_panel_xs(energies, xs, egn, params.iwt) :
+                            _groupr_xs_records(mf3[mtd], egn, wfn)
                         push!(mt_results, (mfd=mfd, mt=mtd, name=name, records=records))
                     end
                 end
@@ -143,7 +150,13 @@ end
 
 function _groupr_group_structure(params::GrouprParams)
     ign = params.ign
-    if ign == 3
+    if abs(ign) == 1
+        # User-supplied group structure read free-format from card6a/6b.
+        # Ref: njoy-reference/src/groupr.f90:4156-4165 (gengpn, abs(ign)==1).
+        isempty(params.user_egn) &&
+            error("groupr: ign==$ign requires a read-in group structure (card6a/6b), got none")
+        return copy(params.user_egn)
+    elseif ign == 3
         return collect(Float64, LANL_30)
     elseif ign == 5
         return collect(Float64, RRD_50)
@@ -278,6 +291,218 @@ function _groupr_nubar_records(nubar_data, mf3::Dict, fis_mt::Int,
     records
 end
 
+# -------------------------------------------------------------------------
+# Panel quadrature group averaging — faithful port of groupr.f90's panel /
+# getsig / getwtf / getflx / displa for the nz=1, nl=1, MF3 cross-section
+# path (iwt=2 constant, iwt=3 1/E). This is the engine groupr uses for the
+# infinite-dilution multigroup constants and the ONLY path bit-identity to
+# the GENDF tape goes through. We do NOT linearize the weight over the PENDF
+# grid (group_integrate does that, which is wrong for 1/E over wide groups):
+# the weight is integrated analytically at the Lobatto/flux-step nodes exactly
+# as the Fortran does, so the flux equals the panel-quadrature ∫w dE.
+#
+# Restricted to the case T86 exercises (nz=nl=1, MF3 σ). The full nz>1 / nl>1
+# / MF6 transfer-matrix machinery (genflx, getunr, multi-order feed) is out of
+# scope here and falls back to the simpler group_integrate path below.
+# -------------------------------------------------------------------------
+
+# getwtf for nz=1: returns (weight, enext). Ref: groupr.f90:5200-5208 + 5305.
+#   iwt=2 → wtf=1,   enext=1.01·e
+#   iwt=3 → wtf=1/e, enext=1.01·e
+# CRITICAL: getwtf returns the step boundary "on an even grid" — the last line
+# (groupr.f90:5305) applies `enext = sigfig(enext, 6, 1)`, i.e. 6 sig figs
+# SHADED UP by 1 (idig=1). Without this the panel boundaries (and hence the
+# trapezoid flux sum) drift by ~1 ULP at 7 figures (T86 g2 flux). The 1/E
+# weight `wtf` is NOT sigfig'd.
+@inline function _groupr_getwtf(e::Float64, iwt::Int)
+    iwtt = abs(iwt)
+    if iwtt == 2
+        return (1.0, round_sigfig(1.01 * e, 6, 1))
+    elseif iwtt == 3
+        return (1.0 / e, round_sigfig(1.01 * e, 6, 1))
+    else
+        error("_groupr_getwtf: unsupported iwt=$iwt in panel quadrature path")
+    end
+end
+
+# gety1-style LinLin cross-section lookup on the (sorted) PENDF grid.
+# Returns (σ(e), enext) where enext is the first grid point strictly above e.
+# Below energies[1] the cross section is 0 (Ref: gety1 label 200,
+# endf.f90:2040-2043). At/above energies[end], σ holds at the last value and
+# enext = a large sentinel. Mirrors getsig→gety1 (groupr.f90:6784, endf.f90).
+function _groupr_getsig(e::Float64, energies::Vector{Float64},
+                        xs::Vector{Float64})
+    n = length(energies)
+    if e < energies[1]
+        return (0.0, energies[1])
+    elseif e >= energies[n]
+        return (xs[n], 1.0e12)
+    end
+    # locate panel [energies[j], energies[j+1]] containing e
+    j = searchsortedlast(energies, e)
+    j < 1 && (j = 1)
+    j >= n && (j = n - 1)
+    xl = energies[j]; xh = energies[j+1]
+    yl = xs[j];       yh = xs[j+1]
+    s = xh > xl ? yl + (yh - yl) * (e - xl) / (xh - xl) : yl
+    return (s, xh)
+end
+
+# panel constants (groupr.f90:5878-5901)
+const _GR_RNDOFF = 1.000002
+const _GR_DELTA  = 0.999995
+const _GR_EMAX   = 1.0e10
+const _GR_SMALL  = 1.0e-10
+const _GR_QP2 = (-1.0, 1.0)
+const _GR_QW2 = (1.0, 1.0)
+
+"""
+Group-average an MF3 cross section by the groupr panel quadrature.
+
+Returns a Vector of `(flux, sigma)` pairs (post-`displa`, both `sigfig(·,7,0)`),
+matching reference GENDF group records. `first` is the lowest σ grid point
+(groupr's `first`, the value getsig returns on its e=0 init call); groups whose
+ehi ≤ first are written as zero per displa's igzero handling but, for the final
+group (ig==ngn), are always emitted.
+
+Ref: groupr.f90:510-540 (group loop), 5858-6091 (panel), 6211-6245 (displa,
+infinite-dilution branch).
+"""
+function _groupr_panel_xs(energies::Vector{Float64}, xs::Vector{Float64},
+                          egn::Vector{Float64}, iwt::Int)
+    ngn = length(egn) - 1
+    first = energies[1]
+    records = NTuple{3,Float64}[]
+
+    # Per-reaction saved panel state (Fortran `save` vars in panel, reset only
+    # when mtd changes — groupr.f90:5913-5935). These PERSIST across group
+    # boundaries: the bottom of group g+1 is the top of group g, and slst/flst/
+    # enext carry over so the quadrature stitches continuously.
+    elast = 0.0          # last panel's upper boundary (ehigh)
+    nq    = 0            # quadrature order (saved)
+    slst  = 0.0          # σ at lower panel boundary
+    flst  = 0.0          # weight at lower panel boundary
+    enext = first        # panel-local saved next-point (groupr.f90 `save enext`)
+
+    for ig in 1:ngn
+        elo_g = egn[ig]
+        ehi_g = egn[ig+1]
+
+        # ans(1)=flux integral, ans(2)=σ·flux integral, zeroed per group (799).
+        flux_int = 0.0
+        rr_int   = 0.0
+
+        # Whole group below first σ point → zero record (groupr.f90:796 go to 580).
+        if ehi_g <= first
+            push!(records, (0.0, 0.0, 0.0))
+            continue
+        end
+
+        # --- panel walk over [elo_g, ehi_g] (groupr.f90:806-811) ---
+        elo = elo_g          # current lower boundary (caller's elo)
+        ehi_arg = ehi_g      # caller's `enext` ≡ panel arg `ehi` (the target top)
+        while true
+            # --- panel(elo, ehi_arg) ---  groupr.f90:5936-6090
+            # elow captures the ORIGINAL lower boundary BEFORE the rndoff nudge
+            # (groupr.f90:5936 sets elow=elo, then 5939 nudges elo). bq uses elow.
+            elow = elo
+            # Lower-boundary retrieval (only when elo moved; always true here).
+            if abs(elo - elast) >= elast * _GR_SMALL
+                if elo * _GR_RNDOFF < ehi_arg
+                    elo = elo * _GR_RNDOFF      # nudge up (groupr.f90:5939)
+                end
+                elast = elo
+                flst, en_flx = _groupr_getwtf(elo, iwt)       # getflx (nz=1)
+                slst, enext  = _groupr_getsig(elo, energies, xs)  # getsig
+                # enext = min(next σ point, flux 1.01·e step). (5946-5947)
+                if en_flx < enext * (1 - _GR_SMALL)
+                    enext = en_flx
+                end
+                # getff (MF3, label 100) sets its nq argument to 0 (groupr.f90:
+                # 7111) — panel's `nq` is OVERWRITTEN to 0 at line 5948 before
+                # the +2, so nq is always 2 here. enext stays (emax).
+                nq = 0
+                nq += 2
+                nq > 10 && (nq = 10)
+            end
+
+            # Upper boundary selection (groupr.f90:5958-5964). `ehi_top` is the
+            # value the argument `ehi` takes (= caller's enext on return).
+            local ehigh, ehi_top
+            if enext < _GR_DELTA * ehi_arg
+                ehi_top = enext
+                ehigh   = enext
+            else
+                ehi_top = ehi_arg
+                ehigh   = _GR_DELTA * ehi_arg
+            end
+
+            # Upper-boundary retrieval (groupr.f90:5965-5970). getsig(ehigh,...)
+            # recomputes `enext` = next σ point above ehigh; getflx gives the
+            # 1.01·ehigh flux step `en`; enext = min(σ-point, 1.01·ehigh).
+            ftmp, en_flx_hi = _groupr_getwtf(ehigh, iwt)
+            stmp, enext     = _groupr_getsig(ehigh, energies, xs)
+            if en_flx_hi < enext * (1 - _GR_SMALL)
+                enext = en_flx_hi
+            end
+
+            # Flux: trapezoid of weight over panel (groupr.f90:5990-5997).
+            # CRITICAL Fortran quirk: aq/bq use `ehi` (= ehi_top, the panel
+            # ARGUMENT), NOT `ehigh`. The weights ftmp/flst are evaluated at
+            # ehigh (= delta·ehi or the σ point) but the panel WIDTH is
+            # (ehi_top - elow). In the else-branch ehi_top=ehi_arg while
+            # ehigh=delta·ehi_arg, so width and weight-point differ.
+            aq = (ehi_top + elow) / 2
+            bq = (ehi_top - elow) / 2
+            flux_int += (ftmp + flst) * bq
+
+            # Reaction rate via Lobatto-2 (groupr.f90:5999-6057); ff=1, ng1=1,
+            # iglo=1 ⇒ all rate folds into this output group. t1 uses (ehi-elow)
+            # too (the argument), matching the Fortran panel.
+            for iq in 1:nq
+                nq == 2 || error("_groupr_panel_xs: nq=$nq quadrature not ported")
+                eq = aq + bq * _GR_QP2[iq]
+                wq = bq * _GR_QW2[iq]
+                eq = round_sigfig(eq, 9, 0)
+                t1 = (eq - elow) / (ehi_top - elow)
+                a = stmp * ftmp
+                b = slst * flst
+                rr = (b + (a - b) * t1) * wq
+                rr_int += rr
+            end
+
+            # Save upper-boundary values as next panel's lower (groupr.f90:6076-6089).
+            elast = ehigh
+            slst  = stmp
+            flst  = ftmp
+            nq = 2          # nqp(=0 for MF3 getff) + 2
+            # Local `enext` adjustment (6087): if enext ≤ ehi_top, bump to rndoff·top.
+            if enext <= ehi_top
+                enext = _GR_RNDOFF * ehi_top
+            end
+
+            # Caller advance (groupr.f90:808-811): exit when integrated to ehi_g.
+            if ehi_top >= ehi_g * (1 - _GR_SMALL)
+                break
+            end
+            # Next panel: elo = caller's enext (= ehi_top). The panel-local saved
+            # `enext` (next σ/flux point above ehigh) drives the next upper bound.
+            elo = ehi_top
+            ehi_arg = ehi_g
+        end
+
+        # displa: ans(1)=sigfig(flux,7,0); σ=sigfig(rr/flux,7,0) (groupr.f90:6296-6304)
+        flux_sf = round_sigfig(flux_int, 7, 0)
+        sigma = 0.0
+        if rr_int != 0.0
+            fl = flux_sf == 0.0 ? _GR_EMAX : flux_sf
+            sigma = round_sigfig(rr_int / fl, 7, 0)
+        end
+        push!(records, (flux_sf, sigma, rr_int))
+    end
+    records
+end
+
 """Compute GENDF records for standard XS: (flux, sigma_g, sigma_flux) per group."""
 function _groupr_xs_records(xs_data::Tuple, egn::Vector{Float64}, wfn)
     energies, xs = xs_data
@@ -404,13 +629,26 @@ function _write_groupr_tape(io::IO, mat::Int, za::Float64, awr::Float64,
             nz_mf3 = 1
             _write_cont_line(io, za, 0.0, 1, nz_mf3, 0, ngn, mat, 3, mt, seq); seq += 1
 
-            # Per-(g, ig2) record. Fortran 857-862 puts tempin in C1, ng2=3 (NW
-            # words = flux, sigma, sigma_int), ig2lo=1, lim=NW, ig=g.
+            # Per-(g, ig2) record (groupr.f90:890-930). ng2=nl*nz*words is the
+            # number of group constants: 2 (flux, σ) for a plain MF3 cross
+            # section (displa label 310, irat=0), 3 (flux, ν, σf) for ratio
+            # quantities MT251/252/253/452/455/456 (init ng=3, irat=1).
+            # C1=tempin (Fortran 902), ig2lo=1, lim=ng2, ig=g.
+            ng2 = (mt in (251, 252, 253, 452, 455, 456)) ? 3 : 2
             for (g, rec) in enumerate(records)
-                _write_cont_line(io, temp, 0.0, 3, 1, 3, g, mat, 3, mt, seq); seq += 1
-                buf = format_endf_float(rec[1]) *
-                      format_endf_float(rec[2]) *
-                      format_endf_float(rec[3])
+                _write_cont_line(io, temp, 0.0, ng2, 1, ng2, g, mat, 3, mt, seq); seq += 1
+                # GENDF group constants use Fortran `listio`'s standard 7-sigfig
+                # a-format (NOT the 9-sigfig extended a11 form used for energy
+                # grids). The displa-sigfig'd values already carry the bias tail;
+                # extended=true would mis-render values ≥ 10 (e.g. 11.53836 →
+                # "11.5383566" instead of "1.153836+1"). extended=false matches
+                # the reference for both small (<10) and large (≥10) constants.
+                buf = ng2 == 3 ?
+                    format_endf_float(rec[1]; extended=false) *
+                        format_endf_float(rec[2]; extended=false) *
+                        format_endf_float(rec[3]; extended=false) :
+                    format_endf_float(rec[1]; extended=false) *
+                        format_endf_float(rec[2]; extended=false)
                 _write_data_line(io, buf, mat, 3, mt, seq); seq += 1
             end
 
