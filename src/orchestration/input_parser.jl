@@ -295,7 +295,7 @@ end
 
 function parse_acer(mc::ModuleCall)::AcerParams
     cards = mc.raw_cards
-    isempty(cards) && return AcerParams(0,0,0,0,0, 0,1,0,1,"80c", 300.0, "", 0, NaN)
+    isempty(cards) && return AcerParams(0,0,0,0,0, 0,1,0,1,"00c", 300.0, "", 0, NaN)
 
     # Card 1: nendf npend ngend nace ndir
     c1 = cards[1]
@@ -323,7 +323,7 @@ function parse_acer(mc::ModuleCall)::AcerParams
         end
     end
 
-    suffix = "80c"
+    suffix = "00c"   # Fortran acer.f90:292 default suff=0 → ".00" ZAID; overridden by an explicit .XX token below
     if length(cards) >= 2 && length(cards[2]) >= 4
         tok = String(strip(cards[2][4]))
         if startswith(tok, ".") && length(tok) >= 3
