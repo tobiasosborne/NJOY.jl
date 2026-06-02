@@ -920,9 +920,11 @@ The Fortran oracle (`njoy-reference/`, a per-machine git clone of NJOY2016) is *
 
 ---
 
-## Current State (2026-06-02 — T86 bit-identical + oracle aligned to pin; sweep report stale, re-baseline pending)
+## Current State (2026-06-02 — fresh sweep vs pin 2c64dfb: 8 BIT_IDENTICAL, 3 NUMERIC_PASS)
 
-Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"). **2026-06-02: the local `njoy-reference/` clone was STALE at `3c9873d` (Dec-2025 laptop oracle, EMAX=0 references) and was checked out to the pin `2c64dfb` this session** — this recovered T22 to BIT_IDENTICAL (its EMAX reference is now the nonzero pin value the committed leapr fix emits) and added tests 86/87. `njoy-reference/` is git-ignored, so alignment is a per-machine step (`git -C njoy-reference checkout 2c64dfb` or `bash scripts/setup_reference.sh`); the reference_test preflight prints `reference oracle at pin` when aligned. **`reports/REFERENCE_SWEEP.md` is badly stale (shows 2 BI; reality is ~9) — run a fresh sweep.**
+Validated against NJOY2016 pinned at `2c64dfb` (see "## Reference Oracle Pin"). **2026-06-02: the local `njoy-reference/` clone was STALE at `3c9873d` (Dec-2025 laptop oracle, EMAX=0 references) and was checked out to the pin `2c64dfb` this session** — this recovered T22 to BIT_IDENTICAL (its EMAX reference is now the nonzero pin value the committed leapr fix emits) and added tests 86/87. `njoy-reference/` is git-ignored, so alignment is a per-machine step (`git -C njoy-reference checkout 2c64dfb` or `bash scripts/setup_reference.sh`); the reference_test preflight prints `reference oracle at pin` when aligned.
+
+**Fresh full sweep (2026-06-02, 84.8 min, `reports/REFERENCE_SWEEP.md`): 8 BIT_IDENTICAL, 3 NUMERIC_PASS, 67 DIFFS, 1 CRASH, 6 TIMEOUT, 1 NO_REFERENCE.** Up from the prior stale report's 2 BI. **Caveat — the sweep ran under CPU contention** (orphaned sweep-worker julia processes; T01 took 145s vs its usual 83s, ~1.7×): the **6 TIMEOUTs (T17/T65 broadr, T25 acer, T67/T68/T74 moder) are inflated by contention + known pre-existing perf** (broadr U-238/U-235; thermr lat=10 Bragg grid c3q) — none in code touched this session; a clean re-sweep should reduce them. The **1 CRASH (T72)** is a **pre-existing aplots bug, not a regression**: `_ascll` (ace_aplots.jl:129) calls `log10(-1e-6)` on a neutron acer-iopt7 plot curve — surfaced by the first full sweep since the Phase 79-80 aplots port (new bead filed). The BI/NUMERIC cohort below was each independently re-verified in targeted cache-nuked runs.
 
 **Full test bit-identical** (rtol 1e-9, every produced tape):
 - T03 (moder→reconr, photoatomic) — tape37 9274/9274
