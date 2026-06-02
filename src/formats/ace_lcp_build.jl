@@ -499,7 +499,11 @@ function _build_andh!(x::_Xss, prod::ParticleProduction, j::Int, mt::Int,
         for ie in 1:ne
             intc = round(Int, _get(x, loce))
             n = round(Int, _get(x, loce + 1))
-            _set!(x, nb + ie, -(next - andh + 1))
+            # AND-block LC locator: integer (cf. _andh_law2! line ~675; Fortran
+            # acefc.f90:9520 sets xss(nb+ie), written via write_integer_list /
+            # typen iflag=1 at acefc.f90:13724 — i20 integer format, negative =
+            # tabulated angular distribution).
+            _set!(x, nb + ie, -(next - andh + 1); isint=true)
             _set!(x, next, intc; isint=true)
             _set!(x, next + 1, n; isint=true)
             for i in 1:n
