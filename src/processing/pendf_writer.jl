@@ -142,6 +142,71 @@ end
 # ==========================================================================
 
 """
+    Mf1HeaderInfo
+
+ENDF MF1/MT451 descriptive-header fields as read from the *original* ENDF
+tape. These are the fields RECONR's `ruina` extracts from records 1-3 and that
+`tpend`/THERMR copy verbatim into the PENDF header (only TEMP, NXC, and the
+RECONR LRP/NFOR/NMOD overwrites differ). Carrying them faithfully lets
+`_write_full_mf1` reproduce the full 4-record (ENDF-6) / 3-record (ENDF-5)
+header instead of the legacy truncated form.
+
+Ref: njoy-reference/src/reconr.f90:219-256 (ruina — header read),
+     njoy-reference/src/reconr.f90:5028-5067 (tpend — header write),
+     njoy-reference/src/thermr.f90:3041-3061/3140-3154 (copy-and-modify).
+"""
+struct Mf1HeaderInfo
+    iverf::Int     # 4, 5, or 6 (record count: 2, 3, or 4 header CONTs)
+    za::Float64
+    awr::Float64
+    lrp::Int       # original LRP (RECONR overwrites to 2 for iverf==6)
+    lfi::Int
+    elis::Float64; sta::Float64; lis::Int; lis0::Int; nfor::Int
+    awin::Float64; efmax::Float64; lrel::Int; zain::Int; nver::Int
+end
+
+"""
+    read_mf1_header_info(endf_path, mat) -> Union{Mf1HeaderInfo, Nothing}
+
+Read the original ENDF MF1/MT451 descriptive header (records 1-3), mirroring
+RECONR's `ruina` extraction. Returns `nothing` if MF1/MT451 is absent.
+
+Ref: njoy-reference/src/reconr.f90:219-256 (ruina). Field-for-field:
+  rec1:  za=c1h, awr=c2h, lrp=l1h, lfi=l2h, n6=n2h
+  rec2:  if n1h≠0 → iverf=4 (nx=n6); elseif n2h==0 → iverf=5; else iverf=6
+         (re-read) if iverf≥5: elis=c1h, sta=c2h, lis=l1h, lis0=l2h, nfor=n2h
+  rec3:  if iverf≥6: nsub=n1h, zain=nsub÷10, awin=c1h, efmax=c2h, lrel=l1h, nver=n2h
+"""
+function read_mf1_header_info(endf_path::AbstractString, mat::Integer)
+    isfile(endf_path) || return nothing
+    open(endf_path, "r") do io
+        find_section(io, 1, 451; target_mat=mat) || return nothing
+        r1 = read_cont(io)                       # record 1: ZA/AWR/LRP/LFI/0/N6
+        za = Float64(r1.C1); awr = Float64(r1.C2)
+        lrp = Int(r1.L1); lfi = Int(r1.L2); n6 = Int(r1.N2)
+        r2 = read_cont(io)                       # record 2 (probe for iverf)
+        # iverf detection (reconr.f90:227-235): N1≠0 ⇒ v4; N2==0 ⇒ v5; else v6.
+        iverf = Int(r2.N1) != 0 ? 4 : (Int(r2.N2) == 0 ? 5 : 6)
+        elis = 0.0; sta = 0.0; lis = 0; lis0 = 0; nfor = 0
+        awin = 1.0; efmax = 0.0; lrel = 0; zain = 1; nver = 0
+        if iverf >= 5
+            # reconr re-reads record 2 via skiprz(-1); r2 IS that record.
+            elis = Float64(r2.C1); sta = Float64(r2.C2)
+            lis = Int(r2.L1); lis0 = Int(r2.L2); nfor = Int(r2.N2)
+        end
+        if iverf >= 6
+            r3 = read_cont(io)                   # record 3: AWI/EMAX/LREL/0/NSUB/NVER
+            nsub = Int(r3.N1)
+            zain = div(nsub, 10)
+            awin = Float64(r3.C1); efmax = Float64(r3.C2)
+            lrel = Int(r3.L1); nver = Int(r3.N2)
+        end
+        return Mf1HeaderInfo(iverf, za, awr, lrp, lfi, elis, sta, lis, lis0,
+                             nfor, awin, efmax, lrel, zain, nver)
+    end
+end
+
+"""
     write_full_pendf(io, reconr_result; mat=0, label="", err=0.001, tempr=0.0,
                      override_mf3=Dict(), extra_mf3=Dict(),
                      mf6_records=Dict(), mf12_lines=String[], mf13_lines=String[])
@@ -170,7 +235,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
                           mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
                           thermr_mts::Set{Int} = Set{Int}(),
-                          thermr_coh_ne::Int = -1)
+                          thermr_coh_ne::Int = -1,
+                          mf1_header::Union{Mf1HeaderInfo,Nothing} = nothing)
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -262,7 +328,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
 
     # MF1/MT451 with full directory
     _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns;
-                    descriptions=descriptions, thermr_mts=thermr_mts)
+                    descriptions=descriptions, thermr_mts=thermr_mts,
+                    hdr=mf1_header)
 
     # MF2/MT151
     _write_legacy_mf2(io, mf2, actual_mat, ns)
@@ -397,11 +464,21 @@ function write_full_pendf(io::IO, result::NamedTuple;
     @printf(io, "%s%4d%2d%3d%5d\n", blanks, -1, 0, 0, 0)
 end
 
-"""Write MF1/MT451 with full directory covering MF3+MF6+MF12+MF13."""
+"""Write MF1/MT451 with full directory covering MF3+MF6+MF12+MF13.
+
+When `hdr` (an `Mf1HeaderInfo` from the original ENDF) is supplied, the full
+ENDF-6 descriptive header is reproduced: RECONR/THERMR copy records 1-3 from
+the source and overwrite only LRP/NMOD (rec1), NFOR (rec2), TEMP/NXC (rec4).
+
+Ref: njoy-reference/src/reconr.f90:5028-5067 (tpend header write),
+     njoy-reference/src/thermr.f90:3041-3061/3140-3154 (copy-and-modify TEMP+NXC).
+Without `hdr` (legacy / ENDF-4 fallback) the historical 3-record form is kept.
+"""
 function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
                           section_lines::Dict{Tuple{Int,Int}, Int}, ns::Ref{Int};
                           descriptions::Vector{String}=String[],
-                          thermr_mts::Set{Int}=Set{Int}())
+                          thermr_mts::Set{Int}=Set{Int}(),
+                          hdr::Union{Mf1HeaderInfo,Nothing}=nothing)
     za = mf2.ZA; awr = mf2.AWR
     ns[] = 1
 
@@ -409,22 +486,57 @@ function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
     nxc = 2 + length(section_lines)
     nwd = length(descriptions)
 
-    # HEAD (Fortran tpend: L1=0, L2=0)
-    _write_cont_line(io, za, awr, 0, 0, 0, 0, Int(mat), 1, 451, ns)
-    # Blank CONT (Fortran convention)
-    _write_cont_line(io, 0.0, 0.0, 0, 0, 0, 0, Int(mat), 1, 451, ns)
-    # Control: tempr, err, 0, 0, NWD, NXC
-    _write_cont_line(io, tempr, err, 0, 0, nwd, nxc, Int(mat), 1, 451, ns)
+    if hdr !== nothing
+        # ---- Faithful ENDF-6/5 header (reconr.f90:5028-5067 / thermr copy) ----
+        # Record 1: ZA, AWR, LRP, LFI, 0, 0  (scr(5)=0, scr(6)=0).
+        # reconr forces LRP=2 for ENDF-6 (reconr.f90:5031 `if iverf.eq.6 lrp=2`);
+        # THERMR then copies this record verbatim.
+        lrp_out = hdr.iverf == 6 ? 2 : hdr.lrp
+        _write_cont_line(io, hdr.za, hdr.awr, lrp_out, hdr.lfi, 0, 0,
+                         Int(mat), 1, 451, ns)
+        # Record 2 (iverf≥5): ELIS, STA, LIS, LIS0, 0, NFOR (=6 for ENDF-6).
+        # reconr.f90:5043-5054.
+        if hdr.iverf >= 5
+            nfor_out = hdr.iverf == 6 ? 6 : hdr.nfor
+            _write_cont_line(io, hdr.elis, hdr.sta, hdr.lis, hdr.lis0, 0,
+                             nfor_out, Int(mat), 1, 451, ns)
+        end
+        # Record 3 (iverf==6): AWI, EMAX, LREL, 0, int(10*zain), NVER.
+        # reconr.f90:5055-5061.
+        if hdr.iverf == 6
+            _write_cont_line(io, hdr.awin, hdr.efmax, hdr.lrel, 0,
+                             10 * hdr.zain, hdr.nver, Int(mat), 1, 451, ns)
+        end
+        # Record 4 (the descriptive-control CONT): TEMP, ERR, LDRV(=1 for v6),
+        # 0, NWD, NXC. reconr.f90:5062-5067; THERMR overwrites TEMP and NXC.
+        ldrv = hdr.iverf == 6 ? 1 : 0
+        _write_cont_line(io, tempr, err, ldrv, 0, nwd, nxc, Int(mat), 1, 451, ns)
+    else
+        # ---- Legacy 3-record fallback (kept for non-ENDF-6 sources) ----
+        # HEAD (Fortran tpend: L1=0, L2=0)
+        _write_cont_line(io, za, awr, 0, 0, 0, 0, Int(mat), 1, 451, ns)
+        # Blank CONT (Fortran convention)
+        _write_cont_line(io, 0.0, 0.0, 0, 0, 0, 0, Int(mat), 1, 451, ns)
+        # Control: tempr, err, 0, 0, NWD, NXC
+        _write_cont_line(io, tempr, err, 0, 0, nwd, nxc, Int(mat), 1, 451, ns)
+    end
     # Description text lines
     for desc in descriptions
         @printf(io, "%-66s%4d%2d%3d%5d\n", desc, Int(mat), 1, 451, ns[])
         ns[] += 1
     end
 
-    # Directory entries (6 integers per line: MF, MT, NC, MOD per entry)
-    # Self count: 3 header + NWD text + NXC directory entries + 1 SEND = 4 + NWD + NXC
+    # Directory entries (6 integers per line: MF, MT, NC, MOD per entry).
+    # Self-NC: THERMR carries forward the input PENDF's self-NC and adjusts by
+    # the directory-count delta (thermr.f90:3156 `dicn(5)=dico(5)+nxn-nx`), so
+    # the final self-NC equals RECONR's base `ncards+2+nxc` for the ENDF-6 path
+    # (reconr.f90:5072 `ncs(1)=ncs(1)+nxc...` with ncs(1) seeded `ncards+2` at
+    # anlyzd reconr.f90:651). For the ENDF-5 / legacy chains the observed
+    # reference self-NC is NWD+NXC (the +2 base cancels along broadr/heatr's
+    # directory rewrites). Match the reference exactly, conditioned on iverf.
+    self_nc = (hdr !== nothing && hdr.iverf == 6) ? (nwd + nxc + 2) : (nwd + nxc)
     entries = Tuple{Int,Int,Int,Int}[]
-    push!(entries, (1, 451, nwd + nxc, 0))  # self: NC = NWD + NXC (Fortran convention)
+    push!(entries, (1, 451, self_nc, 0))  # self-reference directory entry
     push!(entries, (2, 151, 4, 0))  # MF2
 
     for ((mf, mt), nc) in sort(collect(section_lines))

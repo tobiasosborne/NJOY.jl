@@ -87,7 +87,8 @@ function final_assembly!(tapes::TapeManager, output_unit::Int,
                          reconr_result, override_mf3, extra_mf3,
                          mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
                          mf12_lines, mf13_lines, descriptions, thermr_mts,
-                         thermr_coh_ne; mat, err, tempr, label="")
+                         thermr_coh_ne; mat, err, tempr, label="",
+                         mf1_header=nothing)
     output_path = resolve(tapes, output_unit)
     @info "final_assembly: writing $output_path"
 
@@ -100,7 +101,8 @@ function final_assembly!(tapes::TapeManager, output_unit::Int,
             mf6_xsi=mf6_xsi, mf6_emax=mf6_emax,
             thermr_mts=thermr_mts,
             thermr_coh_ne=thermr_coh_ne,
-            descriptions=descriptions)
+            descriptions=descriptions,
+            mf1_header=mf1_header)
     end
 
     register!(tapes, output_unit, output_path)

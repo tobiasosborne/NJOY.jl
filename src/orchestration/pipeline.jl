@@ -29,6 +29,7 @@ mutable struct RunContext
     thermr_coh_ne::Int
     extra_data::Dict{Symbol, Any}    # raw broadened data for heatr
     mat::Int; err::Float64; tempr::Float64; label::String
+    mf1_header::Any                  # original ENDF MF1/MT451 header (Mf1HeaderInfo)
 end
 
 RunContext() = RunContext(
@@ -39,7 +40,7 @@ RunContext() = RunContext(
     Dict{Int, Float64}(), Dict{Int, NamedTuple}(),
     String[], String[], String[], Set{Int}(), 0,
     Dict{Symbol, Any}(),
-    0, 0.0, 0.0, "")
+    0, 0.0, 0.0, "", nothing)
 
 """
     RunProgress
@@ -148,6 +149,12 @@ function run_njoy(input_path::AbstractString;
             ctx.mat = params.mat; ctx.err = params.err
             ctx.label = params.title
             ctx.descriptions = descs
+            # Capture the original ENDF MF1/MT451 descriptive header (records 1-3)
+            # so final_assembly can reproduce the full ENDF-6/5 header, mirroring
+            # how RECONR/THERMR copy-and-modify it (reconr.f90:219-256/5028-5067,
+            # thermr.f90:3041-3061/3140-3154). Without this the assembled PENDF
+            # header is missing the AWI/EMAX/NSUB/NVER record and has wrong LRP/NFOR.
+            ctx.mf1_header = read_mf1_header_info(endf_path, params.mat)
             # Extract MF12/MF13 passthrough from original ENDF
             _extract_mf12_mf13!(ctx, endf_path, params.mat)
 
@@ -277,7 +284,8 @@ function run_njoy(input_path::AbstractString;
             ctx.mf6_records, ctx.mf6_xsi, ctx.mf6_emax, ctx.mf6_stubs,
             ctx.mf12_lines, ctx.mf13_lines, ctx.descriptions,
             ctx.thermr_mts, ctx.thermr_coh_ne;
-            mat=ctx.mat, err=ctx.err, tempr=ctx.tempr, label=ctx.label)
+            mat=ctx.mat, err=ctx.err, tempr=ctx.tempr, label=ctx.label,
+            mf1_header=ctx.mf1_header)
     end
 
     @info "run_njoy: complete"
