@@ -34,14 +34,23 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
     ssm = zeros(nbeta, nalpha, ntempr)
     ssp = zeros(nbeta, nalpha, ntempr)
     tempr = copy(params.temperatures)
-    tempf = copy(params.temperatures)   # updated in-place by trans!/coldh!
+    tempf = copy(params.temperatures)   # updated in-place by trans!/coldh!/discre!
+    # Per-temperature Debye-Waller λ. Fortran `start` sets dwpix(itemp)=f0
+    # (leapr.f90:715); `discre` reads it and may augment it. Allocated here so
+    # it persists across trans!/discre!. Ref: leapr.f90:715, 1379, 1388.
+    dwpix = zeros(ntempr)
 
     # Coher / secondary-scatterer guards (not yet ported)
     if params.iel > 0
         @warn "leapr: iel=$(params.iel) (coher) not yet ported — MF7/MT2 elastic will be stub"
     end
-    if params.nss > 0
-        @warn "leapr: nss=$(params.nss) (secondary scatterer) not yet ported — treating as primary only"
+    # Secondary-scatterer guard. Fortran only runs the SCT-secondary loop when
+    # nss>0 AND b7<=0 AND isecs==0 (leapr.f90:398: `if (nss.eq.0 .or. b7.gt.0
+    # .or. isecs.gt.0) idone=1` skips it otherwise). For b7>0 the secondary is
+    # free-gas metadata only and principal-only output IS correct — so only
+    # warn for the genuinely-unported b7<=0 SCT-secondary case.
+    if params.nss > 0 && params.b7 <= 0
+        @warn "leapr: nss=$(params.nss), b7=$(params.b7)<=0 (SCT secondary scatterer) not yet ported — treating as primary only"
     end
 
     for itemp in 1:ntempr
@@ -64,6 +73,7 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
         # deltab and f0 feed into trans!; tbar sets the initial effective temperature.
         _, deltab, f0, tbar = _start(params.p1_dos[itemp], ni, delta1, T, tbeta_val)
         tempf[itemp] = tbar * T
+        dwpix[itemp] = f0          # Fortran `start`: dwpix(itemp)=f0 (leapr.f90:715)
 
         # Base phonon-expansion S(α,β). Mirrors Fortran `contin`
         # (leapr.f90:455-645). lat=1 triggers the `sc=therm/tev` rescaling
@@ -92,6 +102,17 @@ function leapr_module(tapes::TapeManager, params::LeaprParams)
             trans!(ssm, itemp, params.alpha, params.beta,
                    params.twt[itemp], params.c[itemp], params.tbeta[itemp],
                    tev, deltab, f0, params.lat, 1.0, tempr, tempf)
+        end
+
+        # Discrete oscillators (nd > 0). Mirrors Fortran call order:
+        # contin → trans → discre (leapr.f90:377-383). discre! reads
+        # dwpix[itemp] (=f0) and the post-trans tempf[itemp].
+        if params.nd[itemp] > 0
+            discre!(ssm, itemp, params.alpha, params.beta,
+                    params.bdel[itemp], params.adel[itemp],
+                    tev, params.lat, 1.0,
+                    params.twt[itemp], params.tbeta[itemp],
+                    dwpix, tempr, tempf)
         end
 
         # Cold-H/D rotational convolution (ncold > 0)

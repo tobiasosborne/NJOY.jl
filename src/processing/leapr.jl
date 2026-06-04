@@ -109,6 +109,353 @@ function _interp_sab_log(ssm::Matrix{Float64}, nal::Int,
     lval = ls1 + frac*(ls2 - ls1); lval > slim ? exp(lval) : 0.0
 end
 
+"""
+    _bfact_leapr(x, dwc, betai) -> (bzero, bplus, bminus)
+
+Faithful port of Fortran `bfact` (leapr.f90:1663-1796). Computes the Bessel
+weights for one discrete oscillator using NJOY's OWN approximations:
+`I₀`/`I₁` via the Abramowitz-&-Stegun polynomial fits (NOT the exact Bessel
+values from SpecialFunctions — those differ at ~1e-7 and break bit-identity),
+and higher orders `Iₙ` via downward (reverse) recursion normalised against
+`I₁`. The `y>1` branch returns scaled Bessel values (the `exp(+x)` is folded
+back into the exponential weights).
+
+`bplus[i]  = exp(-dwc - i·βᵢ/2)·Iᵢ(x)` (+x in the y>1 branch)
+`bminus[i] = exp(-dwc + i·βᵢ/2)·Iᵢ(x)` (+x in the y>1 branch)
+
+Ref: njoy-reference/src/leapr.f90:1663-1796 (bfact).
+"""
+function _bfact_leapr(x::Float64, dwc::Float64, betai::Float64)
+    # Polynomial coefficients (leapr.f90:1675-1711)
+    c0=3.75; c1=1.0; c2=3.5156229; c3=3.0899424; c4=1.2067492
+    c5=0.2659732; c6=0.0360768; c7=0.0045813
+    c8=0.39894228; c9=0.01328592; c10=0.00225319; c11=0.00157565
+    c12=0.00916281; c13=0.02057706; c14=0.02635537; c15=0.01647633
+    c16=0.00392377; c17=0.5; c18=0.87890594; c19=0.51498869
+    c20=0.15084934; c21=0.02658733; c22=0.00301532; c23=0.00032411
+    c24=0.02282967; c25=0.02895312; c26=0.01787654; c27=0.00420059
+    c28=0.39894228; c29=0.03988024; c30=0.00362018; c31=0.00163801
+    c32=0.01031555
+    big = 1.0e10; tiny = 1.0e-30
+
+    bplus  = zeros(50)
+    bminus = zeros(50)
+    bn     = zeros(50)
+
+    # --compute bessi0 (leapr.f90:1713-1722)
+    y = x / c0
+    if y <= 1.0
+        u = y*y
+        bessi0 = c1+u*(c2+u*(c3+u*(c4+u*(c5+u*(c6+u*c7)))))
+    else
+        v = 1/y
+        bessi0 = (c8+v*(c9+v*(c10+v*(-c11+v*(c12+v*(-c13+v*(c14+v*(-c15+v*c16))))))))/sqrt(x)
+    end
+
+    # --compute bessi1 (leapr.f90:1724-1733)
+    bessi1 = 0.0
+    if y <= 1.0
+        u = y*y
+        bessi1 = (c17+u*(c18+u*(c19+u*(c20+u*(c21+u*(c22+u*c23))))))*x
+    else
+        v = 1/y
+        bessi1 = c24+v*(-c25+v*(c26-v*c27))
+        bessi1 = c28+v*(-c29+v*(-c30+v*(c31+v*(-c32+v*bessi1))))
+        bessi1 = bessi1/sqrt(x)
+    end
+
+    # --generate higher orders by reverse recursion (leapr.f90:1735-1753)
+    imax = 50
+    bn[imax]   = 0.0
+    bn[imax-1] = 1.0
+    i = imax - 1
+    while i > 1
+        bn[i-1] = bn[i+1] + i*(2/x)*bn[i]
+        i -= 1
+        if bn[i] >= big
+            for j in i:imax
+                bn[j] /= big
+            end
+        end
+    end
+    rat = bessi1 / bn[1]
+    for k in 1:imax
+        bn[k] *= rat
+        bn[k] < tiny && (bn[k] = 0.0)
+    end
+
+    # --apply exponential terms to bessel functions (leapr.f90:1755-1794)
+    if y <= 1.0
+        bzero = bessi0 * exp(-dwc)
+        for k in 1:imax
+            if bn[k] != 0.0
+                arg = -dwc - k*betai/2
+                bplus[k]  = exp(arg)*bn[k]; bplus[k]  < tiny && (bplus[k]  = 0.0)
+                arg = -dwc + k*betai/2
+                bminus[k] = exp(arg)*bn[k]; bminus[k] < tiny && (bminus[k] = 0.0)
+            end
+        end
+    else
+        bzero = bessi0 * exp(-dwc + x)
+        for k in 1:imax
+            if bn[k] != 0.0
+                arg = -dwc - k*betai/2 + x
+                bplus[k]  = exp(arg)*bn[k]; bplus[k]  < tiny && (bplus[k]  = 0.0)
+                arg = -dwc + k*betai/2 + x
+                bminus[k] = exp(arg)*bn[k]; bminus[k] < tiny && (bminus[k] = 0.0)
+            end
+        end
+    end
+    return (bzero, bplus, bminus)
+end
+
+"""
+    discre!(ssm, itemp, alpha_grid, beta_grid, bdel, adel,
+            tev, lat, arat, twt, tbeta, dwpix, tempr, tempf) -> nothing
+
+Convolve the discrete oscillators (energies `bdel`, weights `adel`) with the
+continuous S(α,-β) stored in `ssm[β, α, T]`. Faithful port of Fortran
+`discre` (leapr.f90:1320-1661) operating on the same column-major
+`ssm(nbeta,nalpha,ntempr)` layout, so the IEEE-754 accumulation order and the
+`bfill`/`exts`/`sint` interpolation path match exactly.
+
+Mutates `ssm[:,:,itemp]` in place. Also updates the per-temperature
+Debye-Waller factor `dwpix[itemp]` (`+= Σ dbwᵢ` when it was already positive)
+and the effective temperature `tempf[itemp]` (`(tbeta+twt)·tempf + tsave`).
+
+`dwpix[itemp]` on entry must equal `f0` from `_start` (Fortran sets
+`dwpix(itemp)=f0` in `start`, leapr.f90:715). `tempf[itemp]` on entry must
+equal `tbar·tempr[itemp]` (the post-`trans` effective temperature when twt>0).
+
+Ref: njoy-reference/src/leapr.f90:1320-1661 (discre).
+"""
+function discre!(ssm::AbstractArray{Float64,3}, itemp::Int,
+                 alpha_grid::Vector{Float64}, beta_grid::Vector{Float64},
+                 bdel::Vector{Float64}, adel::Vector{Float64},
+                 tev::Float64, lat::Int, arat::Float64,
+                 twt::Float64, tbeta::Float64,
+                 dwpix::Vector{Float64},
+                 tempr::Vector{Float64}, tempf::Vector{Float64})
+    therm  = 0.0253
+    small  = 1.0e-8
+    vsmall = 1.0e-10
+    tiny   = 1.0e-20
+    bk     = PhysicsConstants.bk
+
+    nbeta  = length(beta_grid)
+    nalpha = length(alpha_grid)
+    nd     = length(bdel)
+    maxdd  = 500
+    maxbb  = 2*nbeta + 1
+
+    sc = lat == 1 ? therm/tev : 1.0
+
+    betan = Vector{Float64}(undef, nbeta)
+    exb   = Vector{Float64}(undef, nbeta)
+    sexpb = Vector{Float64}(undef, nbeta)
+    bex   = Vector{Float64}(undef, maxbb)
+    rdbex = Vector{Float64}(undef, maxbb)
+    sex   = Vector{Float64}(undef, maxbb)
+    bes   = zeros(maxdd)
+    wts   = zeros(maxdd)
+    ben   = zeros(maxdd)
+    wtn   = zeros(maxdd)
+
+    # --set up oscillator parameters (leapr.f90:1372-1389)
+    bdeln = Vector{Float64}(undef, nd)
+    eb    = Vector{Float64}(undef, nd)
+    dbw   = Vector{Float64}(undef, nd)
+    ar    = Vector{Float64}(undef, nd)
+    dist  = Vector{Float64}(undef, nd)
+    dwt   = 0.0
+    for i in 1:nd
+        bdeln[i] = bdel[i]/tev
+        dwt += adel[i]
+    end
+    tsave = 0.0
+    dw0   = dwpix[itemp]
+    for i in 1:nd
+        eb[i] = exp(bdeln[i]/2)
+        sn = (eb[i] - 1/eb[i])/2
+        cn = (eb[i] + 1/eb[i])/2
+        ar[i]   = adel[i]/(sn*bdeln[i])
+        dist[i] = adel[i]*bdel[i]*cn/(2*sn)
+        tsave  += dist[i]/bk
+        dbw[i]  = ar[i]*cn
+        dwpix[itemp] > 0.0 && (dwpix[itemp] += dbw[i])
+    end
+
+    # --prepare functions of beta (leapr.f90:1393-1398)
+    for i in 1:nbeta
+        be = beta_grid[i]*sc
+        exb[i]   = exp(-be/2)
+        betan[i] = be
+    end
+    nbx = _bfill!(bex, rdbex, betan, nbeta, maxbb)
+    wt    = tbeta
+    tbart = tempf[itemp]/tempr[itemp]
+
+    # --main alpha loop (leapr.f90:1406-1641)
+    for nal in 1:nalpha
+        al  = alpha_grid[nal]*sc/arat
+        dwf = exp(-al*dw0)
+        _exts!(view(ssm, 1:nbeta, nal, itemp), sex, exb, betan, nbeta, maxbb)
+        fill!(sexpb, 0.0)
+
+        # --initialize for delta function calculation (leapr.f90:1421-1424)
+        ben[1] = 0.0
+        wtn[1] = 1.0
+        nn = 1
+        n  = 0
+        wt    = tbeta
+        tbart = tempf[itemp]/tempr[itemp]
+
+        # --loop over all oscillators (leapr.f90:1427-1495)
+        for i in 1:nd
+            dwc = al*dbw[i]
+            x   = al*ar[i]
+            bzero, bplus, bminus = _bfact_leapr(x, dwc, bdeln[i])
+
+            # --n=0 term (leapr.f90:1433-1444)
+            for m in 1:nn
+                besn = ben[m]
+                wtsn = wtn[m]*bzero
+                if (besn <= 0.0 || wtsn >= small) && n < maxdd
+                    n += 1
+                    bes[n] = besn
+                    wts[n] = wtsn
+                end
+            end
+
+            # --negative n terms (leapr.f90:1446-1464)
+            k = 0
+            idone = 0
+            while k < 50 && idone == 0
+                k += 1
+                if bminus[k] <= 0.0
+                    idone = 1
+                else
+                    for m in 1:nn
+                        besn = ben[m] - k*bdeln[i]
+                        wtsn = wtn[m]*bminus[k]
+                        if wtsn >= small && n < maxdd
+                            n += 1
+                            bes[n] = besn
+                            wts[n] = wtsn
+                        end
+                    end
+                end
+            end
+
+            # --positive n terms (leapr.f90:1466-1484)
+            k = 0
+            idone = 0
+            while k < 50 && idone == 0
+                k += 1
+                if bplus[k] <= 0.0
+                    idone = 1
+                else
+                    for m in 1:nn
+                        besn = ben[m] + k*bdeln[i]
+                        wtsn = wtn[m]*bplus[k]
+                        if wtsn >= small && n < maxdd
+                            n += 1
+                            bes[n] = besn
+                            wts[n] = wtsn
+                        end
+                    end
+                end
+            end
+
+            # --continue oscillator loop (leapr.f90:1486-1495)
+            nn = n
+            for m in 1:nn
+                ben[m] = bes[m]
+                wtn[m] = wts[m]
+            end
+            n = 0
+            wt    += adel[i]
+            tbart += dist[i]/bk/tempr[itemp]
+        end
+        n = nn
+
+        # --sort the discrete lines and throw out the smallest ones
+        # (leapr.f90:1498-1519). Descending selection sort with `>=` swap.
+        nn = n - 1
+        for i in 2:(n-1)
+            for j in (i+1):n
+                if wts[j] >= wts[i]
+                    save = wts[j]; wts[j] = wts[i]; wts[i] = save
+                    save = bes[j]; bes[j] = bes[i]; bes[i] = save
+                end
+            end
+        end
+        i = 0
+        idone = 0
+        while i < nn && idone == 0
+            i += 1
+            n = i
+            wts[i] < 100*small && i > 5 && (idone = 1)
+        end
+
+        # --add the continuum part to the scattering law (leapr.f90:1538-1547)
+        for m in 1:n
+            for j in 1:nbeta
+                be = -betan[j] - bes[m]
+                st = _sint(be, bex, rdbex, sex, nbx, al, tbeta+twt, tbart,
+                           betan, nbeta, maxbb)
+                add = wts[m]*st
+                add >= tiny && (sexpb[j] += add)
+            end
+        end
+
+        # --add the delta functions to the scattering law (leapr.f90:1549-1585)
+        # delta(0.) is saved for the incoherent elastic. Only when twt<=0.
+        if twt <= 0.0
+            m = 0
+            idone = 0
+            while m < n && idone == 0
+                m += 1
+                if dwf < vsmall
+                    idone = 1
+                else
+                    if bes[m] < 0.0
+                        be = -bes[m]
+                        if be <= betan[nbeta-1]
+                            db = 1000.0
+                            idone2 = 0
+                            j = 0
+                            jj = 0
+                            while j < nbeta && idone2 == 0
+                                j += 1
+                                jj = j
+                                if abs(be - betan[j]) > db
+                                    idone2 = 1
+                                else
+                                    db = abs(be - betan[j])
+                                end
+                            end
+                            add = jj <= 2 ? wts[m]/betan[jj] :
+                                            2*wts[m]/(betan[jj]-betan[jj-2])
+                            add *= dwf
+                            add >= tiny && (sexpb[jj-1] += add)
+                        end
+                    end
+                end
+            end
+        end
+
+        # --record the results (leapr.f90:1587-1590)
+        for j in 1:nbeta
+            ssm[j, nal, itemp] = sexpb[j]
+        end
+    end
+
+    # --finished (leapr.f90:1644)
+    tempf[itemp] = (tbeta + twt)*tempf[itemp] + tsave
+    return nothing
+end
+
 "Convolve discrete oscillator delta functions with continuous S(a,b)."
 function _add_discrete_oscillators!(ssm::Matrix{Float64}, ag::Vector{Float64},
                                     bg::Vector{Float64},
