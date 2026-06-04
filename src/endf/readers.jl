@@ -84,21 +84,48 @@ function read_mf6_incident_energies(filename::AbstractString, mat::Integer, mt::
         # TAB1, what follows depends on LAW.
         yield = read_tab1(io)
         law = Int(yield.L2)
-        if law in (1, 5, 6, 7)
-            # TAB2: NR=yield.L1? no, TAB2 has its own interp range. NZ field is
-            # the number of incident energies (NE) in the energy distribution.
+        if law in (1, 5)
+            # LAW=1 (continuum, ENDF-6 §6.2.1) / LAW=5 (charged-particle
+            # elastic, §6.2.5): an outer TAB2 over NE incident energies, then
+            # NE LIST records. Each LIST header CONT carries C2=incident E and
+            # N1=NW data words (skip ceil(NW/6) data lines).
             tab2 = read_tab2(io)
             ne = Int(tab2.NZ)
-            # Each of NE records starts with a CONT header whose C2 = incident E.
             for _ in 1:ne
                 rec = read_cont(io)
                 push!(energies, Float64(rec.C2))
                 nw = Int(rec.N1)
-                nlines = cld(nw, 6)
-                for _ in 1:nlines; readline(io); end
+                for _ in 1:cld(nw, 6); readline(io); end
             end
+        elseif law == 7
+            # LAW=7 (laboratory angle-energy, ENDF-6 §6.2.7) is NESTED, unlike
+            # LAW=1/5: outer TAB2 over NE incident energies, then for EACH
+            # incident energy an *inner TAB2* over NMU cosines (its C2 = the
+            # incident energy E), then NMU TAB1 records (E' spectra per cosine).
+            # The pre-fix code treated this like LAW=1 (read a CONT, skip
+            # ceil(N1/6) lines) and so walked into the cosine TAB1 headers,
+            # harvesting μ values (-1.0, -0.9, …) as bogus "incident energies"
+            # — the source of T72's negative ESZ grid (DomainError in _ascll).
+            # Fortran's acensd mirrors exactly this nesting: per incident E it
+            # reads the energy header then loops i=1,nmu reading a TAB1 per
+            # cosine. Ref: njoy-reference/src/acefc.f90:6363-6366,6455-6462
+            # (acensd law==7 nmu loop); ENDF-6 manual §6.2.7.
+            tab2 = read_tab2(io)
+            ne = Int(tab2.NZ)
+            for _ in 1:ne
+                etab2 = read_tab2(io)          # inner TAB2 over cosines; C2 = E
+                push!(energies, Float64(etab2.C2))
+                nmu = Int(etab2.NZ)
+                for _ in 1:nmu; read_tab1(io); end
+            end
+        elseif law == 6
+            # LAW=6 (n-body phase space, ENDF-6 §6.2.6): a single CONT
+            # (APSX, 0, 0, 0, 0, NPSX) with NO per-incident-energy records —
+            # there is no tabulated incident-energy grid to union. Emit none.
         elseif law == 2
-            # LAW=2 embeds incident energies in a different structure — port later.
+            # LAW=2 (discrete two-body angular, §6.2.2) embeds incident
+            # energies in a TAB2 + per-E LIST structure — not yet exercised by
+            # any reference test; port when one needs it.
         end
     end
     energies
