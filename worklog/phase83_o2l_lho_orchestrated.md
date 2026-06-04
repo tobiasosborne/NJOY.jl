@@ -68,3 +68,30 @@ The discrete oscillators were **never applied**: `leapr_module` called `generate
 
 ### Lesson
 The misleading "not yet ported" warning nearly sent the fix down the wrong path. Fortran-before-Julia (LAW 2) + the T09-vs-T80 component diff (which primary pieces does the failing test exercise that a passing test doesn't?) localized the real bug. The dormant-but-unwired helper is a recurring trap — check the call graph, not just the presence of a function.
+
+---
+
+## NJOY_jl-c3q (part 1) — T70 thermr MF1/MT451 faithful header (commit `cf8e66a`)
+
+### Symptom
+T70 (moder→moder→reconr→broadr→thermr→moder; compared tape = thermr output tape60) had a corrupt MF1/MT451 header.
+
+### Root cause
+`_write_full_mf1` (`src/processing/pendf_writer.jl`) wrote a hardcoded **3-record** header regardless of ENDF version: record 1 with LRP=0, a blank CONT (NFOR=0), then the TEMP/ERR control record. For ENDF-6 inputs the AWI/EMAX/NSUB/NVER record (record 3) was **entirely missing** and LRP/NFOR were wrong. Fortran THERMR copies records 1-3 of MF1/MT451 from its input PENDF verbatim (thermr.f90:3041-3061/3140-3154), which RECONR builds per reconr.f90:5028-5067 (iverf=6 → LRP=2, NFOR=6, record-3 AWI/EMAX/NSUB/NVER).
+
+### Fix (minimal blast radius)
+- New `read_mf1_header_info(endf_path, mat)` — reads the original ENDF MF1/MT451 records 1-3 with iverf detection mirroring reconr `ruina` (reconr.f90:219-256: N1≠0⇒v4, N2==0⇒v5, else v6). Returns `nothing` if absent → graceful fallback to the legacy 3-record path.
+- `_write_full_mf1` gains `hdr` kwarg → emits the faithful iverf-conditioned header (ENDF-6: 4 records incl. LRP=2/NFOR=6/AWI/EMAX/NSUB/NVER/LDRV=1; ENDF-5: 3 records), each cited to reconr.f90. Self-NC dir entry `nwd+nxc+2` (ENDF-6 carry-forward, thermr.f90:3156 + reconr.f90:651,5072) vs `nwd+nxc` (ENDF-5/legacy).
+- Plumbed via `RunContext.mf1_header` (read in the reconr branch, pipeline.jl) → `final_assembly!` (moder.jl) → `write_full_pendf` → `_write_full_mf1`.
+- **`_write_legacy_mf1` (reconr-only T02/T08) untouched.**
+
+### Verification
+- T70 tape60 MF1/MT451 records 1-8 now **BYTE-IDENTICAL** to reference (was corrupt); 25562/112818 lines match; first whole-tape diff moved off the header to MF3/MT221.
+- T01 NUMERIC_PASS 32812/32962 preserved; its ENDF-5 header now byte-identical.
+- T03 BIT_IDENTICAL 9274/9274 preserved (pipeline header-read safe); T09 BIT_IDENTICAL 1830/1830 preserved.
+
+### Triage correction (important)
+The 2026-06-02 c3q triage claimed the grid-over-production premise was stale ("Julia 213800 == local ref 213800; 112817 from an older clone"). **That is WRONG.** After the oracle was aligned to pin `2c64dfb` (2026-06-02), the current T70 referenceTape60 = **112818** lines; Julia produces **213800** (~1.9× over). The ORIGINAL bead premise (grid over-production) is CORRECT and is c3q's remaining **part 2** blocker: the inelastic S(α,β) calcem MF3 grid (MT=221) + lat=10 coherent (MT=223/229) + the missing `sigfig(emax,7,-1)` nudge in `sigcoh`. DEEP — left open.
+
+### Lesson
+Re-verify a "stale premise" note against the *current* pinned oracle before trusting it (Rule 2). A bead's own triage can drift from the reference when the oracle changes underneath it.
