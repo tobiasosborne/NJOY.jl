@@ -39,7 +39,14 @@ if [[ ! -d "${REF_DIR}" ]]; then
     git clone "${URL}" "${REF_DIR}"
 else
     echo "njoy-reference/ present — fetching origin ..."
-    git -C "${REF_DIR}" fetch --quiet origin
+    git -C "${REF_DIR}" fetch --quiet origin || true
+    # Upstream `develop` rebases, so the pin can be rebased off every branch
+    # tip. A plain `fetch origin` retrieves only branch tips and will then MISS
+    # such a pin — the checkout below fails with "fatal: reference is not a
+    # tree". Also fetch the exact SHA directly: GitHub serves any commit that is
+    # reachable-by-SHA this way even when it is on no branch.
+    echo "fetching pin ${SHA} directly (covers a pin rebased off branch tips) ..."
+    git -C "${REF_DIR}" fetch --quiet origin "${SHA}" || true
 fi
 
 echo "Checking out ${SHA} ..."

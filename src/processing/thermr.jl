@@ -998,10 +998,34 @@ end
 
 # ---- MF6 record data structure ----
 
+"""
+    _mf6_entry(ep, sigma, cosines, nbin) -> Vector{Float64}
+
+Build one secondary-energy point for an MF6 LIST record:
+`[E', σ, μ₁ ... μ_nbin]`, length `nbin+2`.
+
+Mirrors Fortran thermr.f90:1630 (`nl = nbin+1`) and :2230 (`scr(6)=nl+1`),
+which store `nbin+2` words per secondary energy (E', σ, then nbin cosines).
+For nbin=8 this yields exactly `[E', σ, μ₁...μ₈]` (length 10), byte-identical
+to the previous 10-tuple. `cosines` shorter than `nbin` is zero-padded,
+matching the old `k-2 <= nbin ? cosines[k-2] : 0.0` behavior.
+"""
+function _mf6_entry(ep::Float64, sigma::Float64, cosines::AbstractVector{Float64},
+                    nbin::Int)
+    entry = Float64[ep, sigma]
+    n = min(length(cosines), nbin)
+    append!(entry, @view cosines[1:n])
+    n < nbin && append!(entry, zeros(nbin - n))  # zero-pad to nbin cosines
+    return entry
+end
+
 """MF6 LIST record for one incident energy: secondary energies with equi-probable cosines."""
 struct MF6ListRecord
     E_incident::Float64
-    entries::Vector{NTuple{10, Float64}}  # (E', σ, μ₁...μ₈) per secondary energy
+    # Each inner vector is one secondary energy point: (E', σ, μ₁...μ_nbin),
+    # length nbin+2 per secondary energy (Fortran thermr.f90:1630 nl=nbin+1,
+    # thermr.f90:2230 scr(6)=nl+1 words stored per point).
+    entries::Vector{Vector{Float64}}
 end
 
 # ---- Calcem: Fortran-style thermal XS + angular computation ----
@@ -1120,10 +1144,14 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
         end
 
         # Adaptive refinement between consecutive seed points (Fortran lines 2041-2162)
-        entries = NTuple{10, Float64}[]
+        entries = Vector{Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
         j_count = 0  # total emitted points (like Fortran j)
+
+        # Build one secondary-energy point: [E', σ, μ₁...μ_nbin], length nbin+2
+        # (Fortran thermr.f90:1630 nl=nbin+1, :2230 scr(6)=nl+1 words per point).
+        make_entry(ep, sigma, cosines) = _mf6_entry(ep, sigma, cosines, nbin)
 
         function emit_point!(ep, sigma, cosines)
             j_count += 1
@@ -1136,8 +1164,7 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                 j_count = 2
                 xlast = ep; ylast = sigma
                 # Overwrite previous entry (Fortran overwrites scr[j=2] position)
-                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
-                               k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
+                entry = make_entry(ep, sigma, cosines)
                 if !isempty(entries)
                     entries[end] = entry
                 else
@@ -1148,9 +1175,7 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
 
             xlast = ep; ylast = sigma
             # Store ALL entries (Fortran stores even sig=0; jnz+1 trim handles trailing zeros)
-            entry = ntuple(k -> k == 1 ? ep : k == 2 ? sigma :
-                           k - 2 <= nbin ? cosines[k-2] : 0.0, 10)
-            push!(entries, entry)
+            push!(entries, make_entry(ep, sigma, cosines))
         end
 
         # Process seed points with adaptive refinement between them
@@ -1294,10 +1319,13 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
         nbeta = length(FREE_GAS_BETA)
 
         # Match Fortran calcem sequential beta processing (lines 1985-2152)
-        entries = NTuple{10, Float64}[]
+        entries = Vector{Float64}[]
         total_xs = 0.0
         xlast = 0.0; ylast = 0.0
         j_count = 0
+
+        # [E', σ, μ₁...μ_nbin], length nbin+2 (Fortran thermr.f90:1630,2230)
+        make_entry(ep, sig, cosv) = _mf6_entry(ep, sig, cosv, nbin)
 
         function emit_point!(ep, sig, cosv)
             j_count += 1
@@ -1307,14 +1335,12 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
             if j_count == 3 && total_xs < tolmin_area
                 j_count = 2
                 xlast = ep; ylast = sig
-                entry = ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                               k - 2 <= nbin ? cosv[k-2] : 0.0, 10)
+                entry = make_entry(ep, sig, cosv)
                 !isempty(entries) ? (entries[end] = entry) : push!(entries, entry)
                 return
             end
             xlast = ep; ylast = sig
-            push!(entries, ntuple(k -> k == 1 ? ep : k == 2 ? sig :
-                           k - 2 <= nbin ? cosv[k-2] : 0.0, 10))
+            push!(entries, make_entry(ep, sig, cosv))
         end
 
         # Convergence stack subroutine (Fortran labels 330-410)
@@ -1491,12 +1517,11 @@ function compute_mf6_thermal(pendf_energies::Vector{Float64},
         sort!(unique!(ep_grid))
         filter!(ep -> ep > 0, ep_grid)
 
-        entries = NTuple{10, Float64}[]
+        entries = Vector{Float64}[]
         for Ep in ep_grid
             sigma, cosines = sigl_equiprobable(E, Ep, nbin, kernel, tev; tol=0.001)
-            entry = ntuple(k -> k == 1 ? Ep : k == 2 ? sigma :
-                           k-2 <= nbin ? cosines[k-2] : 0.0, 10)
-            push!(entries, entry)
+            # [E', σ, μ₁...μ_nbin], length nbin+2 (Fortran thermr.f90:1630,2230)
+            push!(entries, _mf6_entry(Ep, sigma, cosines, nbin))
         end
         push!(records, MF6ListRecord(E, entries))
     end

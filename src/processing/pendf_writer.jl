@@ -297,7 +297,9 @@ function write_full_pendf(io::IO, result::NamedTuple;
         n_lines = 1 + 3 + 2
         for rec in records
             n_ep = length(rec.entries)
-            nw = n_ep * 10
+            # width = nbin+2 per secondary energy (Fortran thermr.f90:1630,2230)
+            nl = n_ep > 0 ? length(rec.entries[1]) : 2
+            nw = n_ep * nl
             n_lines += 1 + cld(nw, 6)  # LIST header + data lines
         end
         # Subtract 1: Fortran ncds counts TAB1 as 2 lines (packed), actual is 3
@@ -595,7 +597,9 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
     # For each incident energy, a LIST record (thermr.f90:2225-2237)
     for (ie, rec) in enumerate(records)
         n_ep = length(rec.entries)  # number of secondary energies
-        nl = 10  # values per secondary energy: E', σ, μ₁...μ₈
+        # values per secondary energy = nbin+2: E', σ, μ₁...μ_nbin
+        # (Fortran thermr.f90:1630 nl=nbin+1, :2230 scr(6)=nl+1 words stored)
+        nl = n_ep > 0 ? length(rec.entries[1]) : 2
         nw = n_ep * nl
         rxsec = has_xsi && xsi[ie] != 0.0 ? 1.0 / xsi[ie] : 1.0
         # Pack data: flatten all entries into a single vector
