@@ -1221,16 +1221,31 @@ function calcem(sab::SABData, T::Real, emax::Real, nbin::Int;
                         sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol,
                                                          awr=Float64(sab.awr), tev_peak=kT_eff)
 
-                        # Convergence tests (Fortran lines 2057-2068)
+                        # Convergence tests (Fortran thermr.f90:2057-2068).
+                        # ym is NOT the simple midpoint average: Fortran uses
+                        #   call terp1(x(i),y(k,i),x(i-1),y(k,i-1),xm,ym,2)
+                        # (endf.f90:1614, law 2 = lin-lin), evaluating the chord
+                        # at the SIGFIG-ROUNDED xm. Since xm=sigfig(0.5*(x(i)+x(i-1)),8,0)
+                        # is generally not the exact midpoint, terp1(xm) ≠ 0.5*(y_lo+y_hi);
+                        # using the average shifts the E'-adaptive add/skip decision and
+                        # over-refines high-incident-energy blocks (T70 MF6/MT221 +26 lines).
+                        # Stack orientation here: stk_e[depth]=x(i) (lower E'),
+                        # stk_e[depth-1]=x(i-1) (higher E'), matching Fortran x(i)<x(i-1).
+                        # Ref: thermr.f90:2058 + endf.f90:1614 (terp1 law 2).
+                        terp1_lin(x1, y1, x2, y2, x) =
+                            x1 == x2 ? y1 : y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+
                         # k=1 sigma test: test2 = tol*abs(yt(1)), no floor
-                        ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                        ym_s = terp1_lin(stk_e[depth], stk_s[depth],
+                                         stk_e[depth-1], stk_s[depth-1], xm)
                         pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
 
                         # k>1 per-component cosine tests + accumulate for integral test
                         uu = 0.0; uum = 0.0
                         if pass
                             for k in 1:nbin
-                                ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                                ym_c = terp1_lin(stk_e[depth], stk_c[depth][k],
+                                                 stk_e[depth-1], stk_c[depth-1][k], xm)
                                 uu += cos_m[k]
                                 uum += ym_c
                                 if abs(cos_m[k] - ym_c) > tol
@@ -1366,12 +1381,20 @@ function calcem_free_gas(A::Float64, T::Float64, emax::Float64, nbin::Int;
                     depth -= 1; continue
                 end
                 sig_m, cos_m = sigl_equiprobable(E, xm, nbin, kernel, kT; tol=tol, awr=A)
-                ym_s = 0.5 * (stk_s[depth] + stk_s[depth-1])
+                # ym = chord value at the SIGFIG-ROUNDED xm via terp1 law 2 (lin-lin),
+                # NOT the simple midpoint average — same Fortran calcem convergence
+                # test as the S(α,β) path. Ref: thermr.f90:2058 + endf.f90:1614 (terp1 law 2).
+                # Stack: stk_e[depth]=x(i) (lower E'), stk_e[depth-1]=x(i-1) (higher E').
+                terp1_lin(x1, y1, x2, y2, x) =
+                    x1 == x2 ? y1 : y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+                ym_s = terp1_lin(stk_e[depth], stk_s[depth],
+                                 stk_e[depth-1], stk_s[depth-1], xm)
                 pass = abs(sig_m - ym_s) <= tol * abs(sig_m)
                 uu = 0.0; uum = 0.0
                 if pass
                     for k in 1:nbin
-                        ym_c = 0.5 * (stk_c[depth][k] + stk_c[depth-1][k])
+                        ym_c = terp1_lin(stk_e[depth], stk_c[depth][k],
+                                         stk_e[depth-1], stk_c[depth-1][k], xm)
                         uu += cos_m[k]; uum += ym_c
                         if abs(cos_m[k] - ym_c) > tol
                             pass = false; break
