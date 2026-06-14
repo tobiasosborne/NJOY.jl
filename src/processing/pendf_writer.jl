@@ -12,6 +12,19 @@
 using Printf
 
 # ==========================================================================
+# MF1/MT451 directory NC (line-count) formulas for MF3 sections
+# ==========================================================================
+
+# Fortran thermr tpend: nc = 3 + (ne+2)/3, where ne = NP_written - 1 because tpend
+# appends one etop=20e6 sentinel counted in the written NP (scr(6)=ne+1) but not in ne.
+# Diverges from ceil(np/3)+3 only when np≡1 (mod 3), where Fortran undercounts by 1 —
+# reproduce the quirk (GROUND-TRUTH PRINCIPLE), do NOT "fix" it to cld.
+# Ref: njoy-reference/src/thermr.f90:3087 (nc=3+(ne+2)/3), :3198 (scr(6)=ne+1).
+_thermr_mf3_dir_nc(np::Int) = 3 + div(np + 1, 3)
+# Reconr tpend: full np, no appended sentinel. Ref: njoy-reference/src/reconr.f90:5115-5116.
+_reconr_mf3_dir_nc(np::Int) = 3 + cld(np, 3)
+
+# ==========================================================================
 # Main entry points
 # ==========================================================================
 
@@ -235,7 +248,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
                           mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
                           thermr_mts::Set{Int} = Set{Int}(),
-                          thermr_coh_ne::Int = -1,
+                          thermr_coh_ne::Int = -1,  # DEPRECATED unused after NJOY_jl-h61; removal tracked by NJOY_jl-czw
                           mf1_header::Union{Mf1HeaderInfo,Nothing} = nothing)
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
@@ -256,10 +269,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
     # Count lines for each section (needed for MF1 directory)
     section_lines = Dict{Tuple{Int,Int}, Int}()  # (MF,MT) → line count
 
-    # Pre-compute MF3 line counts
-    # Fortran tpend NC formula: nc = 3 + (ne_param+2)/3 where ne_param is the
-    # grid count BEFORE tpend adds sentinel points. For free-gas thermr,
-    # ne_param = NP. For coh-grid thermr, ne_param = NP - 2 (coh sentinels).
+    # Pre-compute MF3 line counts. thermr MF3 sections use _thermr_mf3_dir_nc
+    # (accounts for the appended etop sentinel); all others use _reconr_mf3_dir_nc.
     for (mt, _) in reactions
         imt = Int(mt)
         if haskey(override_mf3, imt)
@@ -273,15 +284,8 @@ function write_full_pendf(io::IO, result::NamedTuple;
             sec === nothing && continue
             np = length(sec[1])
         end
-        if imt in thermr_mts && thermr_coh_ne >= 0
-            # Use Fortran tpend formula: nc = 3 + (ne+2)/3
-            # For coh-grid sections (NP > coh_ne), ne = coh_ne
-            # For free-gas sections (NP < coh_ne), ne = NP
-            ne_param = np > thermr_coh_ne ? thermr_coh_ne : np
-            section_lines[(3, imt)] = 3 + div(ne_param + 2, 3)
-        else
-            section_lines[(3, imt)] = 3 + cld(np, 3)
-        end
+        section_lines[(3, imt)] = imt in thermr_mts ?
+            _thermr_mf3_dir_nc(np) : _reconr_mf3_dir_nc(np)
     end
 
     # MF6 stub line counts: Fortran ncdse=3 (undercounts TAB1 by 1 vs actual 4)
