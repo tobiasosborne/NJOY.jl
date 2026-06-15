@@ -249,6 +249,7 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
                           thermr_mts::Set{Int} = Set{Int}(),
                           thermr_coh_ne::Int = -1,  # DEPRECATED unused after NJOY_jl-h61; removal tracked by NJOY_jl-czw
+                          mf6_iel_nc::Dict{Int, Int} = Dict{Int, Int}(),  # MT → MF6 directory-NC quirk (iel ncdse, thermr.f90:1423)
                           mf1_header::Union{Mf1HeaderInfo,Nothing} = nothing)
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
@@ -308,6 +309,12 @@ function write_full_pendf(io::IO, result::NamedTuple;
         end
         # Subtract 1: Fortran ncds counts TAB1 as 2 lines (packed), actual is 3
         section_lines[(6, mt)] = n_lines - 1
+        # Incoherent-elastic (iel) directory-NC QUIRK (thermr.f90:1423):
+        # ncdse = 5 + ne*((nbin+11)/6) where `ne` is the ELASTIC grid count
+        # (the MT221 grid passed to iel), NOT the calcem record count. The
+        # section BODY stays the real `n_lines-1`; only the MF1/MT451 directory
+        # entry shows the quirk value (=1730 for T74, 1640 for T69).
+        haskey(mf6_iel_nc, mt) && (section_lines[(6, mt)] = mf6_iel_nc[mt])
     end
 
     # MF12/MF13 line counts
@@ -431,9 +438,15 @@ function write_full_pendf(io::IO, result::NamedTuple;
     all_mf6_mts = sort(collect(union(keys(mf6_records), keys(mf6_stubs))))
     for mt in all_mf6_mts
         if haskey(mf6_records, mt)
+            # iel (incoherent-elastic) sections emit LIP=-2 in the product TAB1
+            # (thermr.f90:1348) and write raw (un-sigfig'd) cosines; the calcem
+            # inelastic path keeps LIP=-1 and sigfigs cosines.
+            is_iel = haskey(mf6_iel_nc, mt)
+            mt_lip = is_iel ? -2 : -1
             _write_mf6_section(io, Int(actual_mat), mt, za, awr, mf6_records[mt], tempr;
                                xsi=get(mf6_xsi, mt, Float64[]),
-                               emax_yield=get(mf6_emax, mt, 0.0))
+                               emax_yield=get(mf6_emax, mt, 0.0), lip=mt_lip,
+                               sigfig_cosines=!is_iel)
         elseif haskey(mf6_stubs, mt)
             s = mf6_stubs[mt]
             _write_mf6_coherent_stub(io, Int(actual_mat), mt, za, awr,
@@ -573,7 +586,8 @@ Write one MF6 section (HEAD + product TAB1 + TAB2 + LIST records).
 """
 function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64,
                              records::AbstractVector, temperature::Float64;
-                             xsi::Vector{Float64}=Float64[], emax_yield::Float64=0.0)
+                             xsi::Vector{Float64}=Float64[], emax_yield::Float64=0.0,
+                             lip::Int=-1, sigfig_cosines::Bool=true)
     id = MaterialId(Int32(mat), Int32(6), Int32(mt))
     ne = length(records)  # number of incident energies
     ns = 1
@@ -581,11 +595,13 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
     # HEAD: ZA, AWR, JP=0, LCT=1, NK=1, 0 (thermr.f90:1927-1934)
     ns = write_cont(io, ContRecord(za, awr, Int32(0), Int32(1), Int32(1), Int32(0), id); ns=ns)
 
-    # Product yield TAB1: ZAP=1, AWP=1, LIP=-1, LAW=1 (thermr.f90:1936-1949)
+    # Product yield TAB1: ZAP=1, AWP=1, LIP, LAW=1.
+    # LIP=-1 for the inelastic (calcem) path (thermr.f90:1936-1949); LIP=-2 for
+    # the incoherent-elastic (iel) path (thermr.f90:1348 scr(3)=-2).
     emin = ne > 0 ? records[1].E_incident : 1e-5
     emax_y = emax_yield > 0 ? emax_yield : (ne > 0 ? records[end].E_incident * 1.2 : 1.2)
     interp_yield = InterpolationTable(Int32[2], [LinLin])
-    yield_tab1 = Tab1Record(1.0, 1.0, Int32(-1), Int32(1),
+    yield_tab1 = Tab1Record(1.0, 1.0, Int32(lip), Int32(1),
                             interp_yield, [emin, emax_y], [1.0, 1.0], id)
     ns = write_tab1(io, yield_tab1; ns=ns)
 
@@ -617,8 +633,12 @@ function _write_mf6_section(io::IO, mat::Int, mt::Int, za::Float64, awr::Float64
                     push!(data, abs(yy) >= 1e-9 ? round_sigfig(yy, 7, 0) :
                                                    round_sigfig(yy, 6, 0))
                 elseif k >= 3
-                    # Cosines: sigfig(9,0) matching Fortran line 2182
-                    push!(data, round_sigfig(entry[k], 9, 0))
+                    # Cosines. The calcem (inelastic) path sigfigs them in sigl
+                    # (thermr.f90:2182). The iel (incoherent-elastic) path does
+                    # NOT sigfig — iel computes raw cosines (thermr.f90:1396) and
+                    # tpend's ltt=6 branch copies them verbatim (thermr.f90:3293-
+                    # 3301). For iel, pass sigfig_cosines=false to write raw.
+                    push!(data, sigfig_cosines ? round_sigfig(entry[k], 9, 0) : entry[k])
                 else
                     push!(data, entry[k])
                 end

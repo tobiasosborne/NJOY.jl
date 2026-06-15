@@ -2786,17 +2786,22 @@ using LinearAlgebra
     # THERMR -- Incoherent Elastic
     # ======================================================================
     @testset "THERMR -- Incoherent elastic" begin
-        sigma_b, dwp = 80.0, 10.0
+        # Integrated incoherent-elastic XS (iel, thermr.f90:1322,1379-1384):
+        #   σ(E) = sb/(2*natom) · 1/(2·E·W') · (1 − exp(−4·E·W'))
+        sigma_b, dwp, natom = 80.0, 10.0, 1
 
-        @test incoh_elastic_xs(0.0, sigma_b, dwp) == 0.0
-        @test isapprox(incoh_elastic_xs(100.0, sigma_b, dwp),
-                       sigma_b/2, rtol=1e-6)
-        es = [1e-4, 1e-3, 0.01, 0.1, 1.0, 10.0]
-        xv = [incoh_elastic_xs(E, sigma_b, dwp) for E in es]
-        for i in 2:length(xv); @test xv[i] >= xv[i-1]; end
+        @test incoh_elastic_xs(0.0, sigma_b, dwp, natom) == 0.0
+        # Large E*W': (1 − exp(−4·E·W')) → 1, so σ → sb/(2*natom)·1/(2·E·W').
+        @test isapprox(incoh_elastic_xs(100.0, sigma_b, dwp, natom),
+                       sigma_b/(2*natom)/(2*100.0*dwp), rtol=1e-6)
+        # Small E*W' limit: 1 − exp(−4·E·W') ≈ 4·E·W', so σ → sb/(2*natom)·2·W'·...
+        #   = sb/(2*natom)·(1/(2·E·W'))·(4·E·W') = sb/(2*natom)·2 → sb/natom.
         E_s = 1e-6
-        @test isapprox(incoh_elastic_xs(E_s, sigma_b, dwp),
-                       sigma_b/2*4*E_s*dwp, rtol=1e-4)
+        @test isapprox(incoh_elastic_xs(E_s, sigma_b, dwp, natom),
+                       sigma_b/natom, rtol=1e-4)
+        # natom divides the whole XS.
+        @test isapprox(incoh_elastic_xs(1e-4, sigma_b, dwp, 2),
+                       incoh_elastic_xs(1e-4, sigma_b, dwp, 1)/2, rtol=1e-12)
     end
 
     # ======================================================================

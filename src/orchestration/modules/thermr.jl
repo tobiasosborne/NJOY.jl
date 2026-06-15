@@ -154,17 +154,24 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     # (coh(10,...) at line 429). Otherwise the input icoh>0 selects a hardcoded
     # graphite/Be/BeO lattice (lat=1/2/3).
     bragg = nothing
+    lthr = 0
+    incoh_endf = nothing
     if icoh > 0
         # lat=10 path: try reading the reciprocal-lattice / Bragg structure
         # factors directly from ENDF MF7/MT2 (LTHR=1). thermr.f90:409-413 (coh
         # dispatch) + rdelas + sigcoh lat=10 branch. This is the faithful path
         # for materials without a hardcoded lattice (e.g. Al-27 TSL, T70).
-        lthr, bragg_endf = try
+        # read_mf7_mt2 returns (lthr, bragg, incoh). LTHR=1 → coherent (Bragg);
+        # LTHR=2 → incoherent elastic (iel); LTHR=3 → both. We capture
+        # `incoh_endf` (the W'(T) Debye-Waller TAB1) for the LTHR=2 iel path
+        # (Stage 2 of NJOY_jl-69j). thermr.f90:404-414 sets icoh=10*lthr; LTHR=2
+        # ⇒ icoh=20 ⇒ iel(20,...,mtref+1) dispatch (thermr.f90:430-431).
+        lthr, bragg_endf, incoh_endf = try
             read_mf7_mt2(sab_path, mat_thermal, temp)
         catch err
             @warn "thermr SAB: MF7/MT2 read failed for MAT=$mat_thermal — " *
                   "$(sprint(showerror, err))"
-            (0, nothing)
+            (0, nothing, nothing)
         end
 
         if lthr == 1 && bragg_endf !== nothing
@@ -172,6 +179,12 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
             bragg = bragg_endf
             @info "thermr SAB: coherent elastic from ENDF MF7/MT2 LTHR=1 " *
                   "(lat=10), $(bragg.n_edges) Bragg edges"
+        elseif lthr == 2
+            # Incoherent elastic only (LTHR=2): no Bragg grid refinement; the
+            # MT221 grid stays the broadened elastic grid. iel branch handled
+            # below via `incoh_endf`. (thermr.f90:430-431, icoh=20 dispatch.)
+            @info "thermr SAB: incoherent elastic (iel) from ENDF MF7/MT2 " *
+                  "LTHR=2 — MT$(mtref+1)"
         else
             # Fallback: hardcoded graphite/Be/BeO lattice (lat=1/2/3).
             bragg = try
@@ -195,15 +208,26 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
         Float64[e for e in el_e if e <= emax],
         [emax, round_sigfig(emax, 7, 1)])))
 
-    thermal_e = if bragg !== nothing
-        build_thermal_grid(bragg, broadened_grid, emax; tol=tol)
+    if bragg !== nothing
+        # Coherent (Bragg) path: the merged grid is built by build_thermal_grid
+        # (coh adaptive merge). The cutoff sentinels follow sigcoh/tpend:
+        # sigfig(emax,7,-1) (coh grid last point), emax, sigfig(emax,7,+1), etop.
+        thermal_e = build_thermal_grid(bragg, broadened_grid, emax; tol=tol)
+        coh_ne = length(thermal_e)
+        _append_emax_sentinels!(thermal_e, emax)
     else
-        copy(broadened_grid)
+        # Incoherent-only (LTHR=2) / no-elastic path: NO coherent grid refinement
+        # and NO sigfig(emax,7,-1) point. The grid is the broadened elastic grid
+        # ≤ emax plus the save-elastic cutoff (thermr.f90:383-395):
+        #   …, emax (held value), up*emax (σ=0, first point past cutoff),
+        # then tpend appends etop=2e7 (σ=0, thermr.f90:3212). up=1.00001
+        # (thermr.f90:161) — NOT sigfig(emax,7,+1) (that is the coherent sentinel).
+        up = 1.00001
+        thermal_e = sort(unique(vcat(
+            Float64[e for e in el_e if e <= emax],
+            [emax, up * emax, 2e7])))
+        coh_ne = length(thermal_e)
     end
-    coh_ne = length(thermal_e)
-
-    # Add sentinels at the thermal cutoff (Fortran tpend / sigcoh / save-elastic).
-    _append_emax_sentinels!(thermal_e, emax)
 
     # MT=mtref (inelastic): calcem → two-step interpolation → thermal grid
     esi_sab, xsi_sab, mf6_sab = calcem(sab, temp, emax, nbin; tol=tol)
@@ -233,6 +257,30 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     else
         @info "thermr SAB: MT=$mtref (inelastic only), $(length(thermal_e)) grid pts, " *
               "$(length(esi_sab)) calcem IEs"
+    end
+
+    # --- Incoherent elastic (iel, LTHR=2) — MF3/MT(mtref+1) ---------------
+    # Fortran iel (thermr.f90:1377-1417). σ(E) is computed on the calcem grid
+    # `esi_sab` (xie, raw, no sigfig), then interpolated onto the MT221 grid
+    # `thermal_e` with `terp(esi,xie,nne,ex(1),3)` — 3-point Lagrange in linear
+    # x/y (thermr.f90:1412). The trailing sentinel point gets σ=0
+    # (thermr.f90:1413 `if(iex==ne) ej(nj)=0`).
+    if lthr == 2 && incoh_endf !== nothing
+        dwp = incoh_dwp_at(incoh_endf, temp)                 # W'(T) (thermr.f90:1303-1318)
+        mt_iel = mtref + 1                                   # LTHR=2 ⇒ mtref+1 (thermr.f90:431)
+        xie, _records = build_incoh_elastic_records(esi_sab, incoh_endf.sigma_b,
+                                                    dwp, nbin, natom)
+        # terp order-3 (Lagrange) onto the MT221 grid (thermr.f90:1412).
+        iel_xs = Float64[_terp_lagrange(esi_sab, xie, e, 3) for e in thermal_e]
+        # Last grid point (etop sentinel + thermal cutoff) → σ=0 (thermr.f90:1413).
+        # thermal_e ends with [sigfig(emax,7,1), 2e7]; both above emax → 0.
+        for i in eachindex(thermal_e)
+            thermal_e[i] > emax && (iel_xs[i] = 0.0)
+        end
+        added_mf3[mt_iel] = (thermal_e, iel_xs)
+        push!(thermr_mts, mt_iel)
+        @info "thermr SAB: incoherent-elastic MT=$mt_iel (iel), W'($temp)=$dwp, " *
+              "SB=$(incoh_endf.sigma_b), σ(1e-5)=$(iel_xs[1])"
     end
 
     return coh_ne

@@ -88,7 +88,8 @@ function final_assembly!(tapes::TapeManager, output_unit::Int,
                          mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
                          mf12_lines, mf13_lines, descriptions, thermr_mts,
                          thermr_coh_ne; mat, err, tempr, label="",
-                         mf1_header=nothing)
+                         mf1_header=nothing,
+                         mf6_iel_nc::Dict{Int,Int}=Dict{Int,Int}())
     output_path = resolve(tapes, output_unit)
     @info "final_assembly: writing $output_path"
 
@@ -102,6 +103,7 @@ function final_assembly!(tapes::TapeManager, output_unit::Int,
             thermr_mts=thermr_mts,
             thermr_coh_ne=thermr_coh_ne,
             descriptions=descriptions,
+            mf6_iel_nc=mf6_iel_nc,
             mf1_header=mf1_header)
     end
 

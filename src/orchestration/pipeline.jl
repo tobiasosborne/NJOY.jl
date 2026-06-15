@@ -22,6 +22,7 @@ mutable struct RunContext
     mf6_xsi::Dict{Int, Vector{Float64}}
     mf6_emax::Dict{Int, Float64}
     mf6_stubs::Dict{Int, NamedTuple}
+    mf6_iel_nc::Dict{Int, Int}       # MT → MF6 directory-NC quirk for iel (thermr.f90:1423)
     mf12_lines::Vector{String}
     mf13_lines::Vector{String}
     descriptions::Vector{String}
@@ -37,7 +38,7 @@ RunContext() = RunContext(
     Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(),
     Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(),
     Dict{Int, Any}(), Dict{Int, Vector{Float64}}(),
-    Dict{Int, Float64}(), Dict{Int, NamedTuple}(),
+    Dict{Int, Float64}(), Dict{Int, NamedTuple}(), Dict{Int, Int}(),
     String[], String[], String[], Set{Int}(), 0,
     Dict{Symbol, Any}(),
     0, 0.0, 0.0, "", nothing)
@@ -285,7 +286,7 @@ function run_njoy(input_path::AbstractString;
             ctx.mf12_lines, ctx.mf13_lines, ctx.descriptions,
             ctx.thermr_mts, ctx.thermr_coh_ne;
             mat=ctx.mat, err=ctx.err, tempr=ctx.tempr, label=ctx.label,
-            mf1_header=ctx.mf1_header)
+            mf1_header=ctx.mf1_header, mf6_iel_nc=ctx.mf6_iel_nc)
     end
 
     @info "run_njoy: complete"
@@ -543,18 +544,43 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
         ctx.mf6_xsi[mtref] = xsi
         ctx.mf6_emax[mtref] = emax
 
-        # Bragg stub — only when coherent elastic is requested.
-        # Mirror thermr_module's lat=10 selection: prefer ENDF MF7/MT2 (LTHR=1),
-        # fall back to the hardcoded graphite/Be/BeO lattice (lat=1/2/3).
+        # Elastic MF6 — only when elastic scattering is requested.
+        # Mirror thermr_module's lat=10 selection: prefer ENDF MF7/MT2.
+        # LTHR=1 → coherent (Bragg stub); LTHR=2 → incoherent elastic (iel,
+        # full MF6 LIST records, NOT a stub). thermr.f90:428-434 dispatch.
         if params.icoh > 0
             bragg = nothing
-            lthr, bragg_endf = try
+            lthr, bragg_endf, incoh_endf = try
                 read_mf7_mt2(sab_path, params.mat_thermal, temp)
             catch err
-                @warn "thermr MF6 Bragg: MF7/MT2 read failed — $(sprint(showerror, err))"
-                (0, nothing)
+                @warn "thermr MF6 elastic: MF7/MT2 read failed — $(sprint(showerror, err))"
+                (0, nothing, nothing)
             end
-            if lthr == 1 && bragg_endf !== nothing
+
+            if lthr == 2 && incoh_endf !== nothing
+                # --- Incoherent elastic (iel, LTHR=2) MF6/MT(mtref+1) --------
+                # Fortran iel (thermr.f90:1377-1406): one LANG=3 LIST record per
+                # calcem incident energy. NO xsi normalization (tpend ltt=6 path
+                # sets scr(8)=1 verbatim, thermr.f90:3293-3301) — so we do NOT
+                # set ctx.mf6_xsi for this MT (writer keeps weight=1.0).
+                dwp = incoh_dwp_at(incoh_endf, temp)
+                xie, iel_records = build_incoh_elastic_records(
+                    esi, incoh_endf.sigma_b, dwp, nbin, params.natom)
+                mt_iel = mtref + 1
+                ctx.mf6_records[mt_iel] = iel_records
+                ctx.mf6_emax[mt_iel] = emax
+
+                # Directory-NC QUIRK (thermr.f90:1423): ncdse = 5 + ne*((nbin+11)/6),
+                # where `ne` is the ELASTIC (MT221) grid count = MF3/MT222 NP − 1
+                # (tpend scr(6)=ne+1, thermr.f90:3198). Read NP from the tape MF3.
+                pendf_path = resolve(tapes, params.nout)
+                tape = read_pendf(pendf_path)
+                mf3 = extract_mf3_all(tape, params.mat)
+                np_mf3 = haskey(mf3, mt_iel) ? length(mf3[mt_iel][1]) :
+                         (haskey(mf3, mtref) ? length(mf3[mtref][1]) : 0)
+                ne_elastic = np_mf3 - 1
+                ctx.mf6_iel_nc[mt_iel] = 5 + ne_elastic * div(Int(nbin) + 11, 6)
+            elseif lthr == 1 && bragg_endf !== nothing
                 bragg = bragg_endf  # lat=10: coherent elastic from ENDF
             else
                 bragg = try

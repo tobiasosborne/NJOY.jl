@@ -21,6 +21,20 @@ struct BraggData
     econ::Float64; scon::Float64; n_edges::Int
 end
 
+"""
+Incoherent-elastic Debye-Waller data (ENDF MF7/MT2 LTHR=2, and the second
+TAB1 of LTHR=3). The TAB1 holds C1=SB (bound XS) and the W'(T) table — NP
+(T_i, W'_i) pairs with NR interpolation regions. Mirrors the ENDF6 path of
+`iel` (mat.eq.20, thermr.f90:1298-1318), where `fl(index)` is this TAB1.
+
+- `sigma_b`  : SB, the bound (characteristic) cross section [barn] (TAB1 C1).
+- `dwp_table`: TabulatedFunction over (T_i [K], W'_i), honoring the NR/INT regions.
+"""
+struct IncoherentElasticData
+    sigma_b::Float64
+    dwp_table::TabulatedFunction
+end
+
 "Output of compute_thermal: thermal cross sections on an energy grid."
 struct ThermalResult
     energies::Vector{Float64}; inelastic_xs::Vector{Float64}
@@ -466,10 +480,14 @@ end
 # ---- lat=10: coherent-elastic Bragg data read directly from ENDF MF7/MT2 ----
 
 """
-    read_mf7_mt2(filename, mat, T) -> (lthr::Int, bragg::Union{BraggData,Nothing})
+    read_mf7_mt2(filename, mat, T)
+        -> (lthr::Int, bragg::Union{BraggData,Nothing},
+                       incoh::Union{IncoherentElasticData,Nothing})
 
-Read coherent-elastic structure-factor data from ENDF MF7/MT2 (LTHR=1) and
-build a `BraggData` for the lat=10 path, picking the record matching `T` [K].
+Read elastic data from ENDF MF7/MT2. Coherent (LTHR=1/3) structure-factor data
+is built into a `BraggData` for the lat=10 path, picking the record matching
+`T` [K]; incoherent (LTHR=2/3) Debye-Waller W'(T) data is built into an
+`IncoherentElasticData` (for the `iel` path).
 
 Mirrors two Fortran routines:
 
@@ -488,66 +506,90 @@ Mirrors two Fortran routines:
 
 `econ = ev·8·(amassn·amu/hbar)/hbar` matches sigcoh line 1012.
 
-Returns the LTHR value so the caller can distinguish coherent (1) from
-incoherent (2) / mixed (3) elastic. For LTHR≠1 returns `(lthr, nothing)` —
-incoherent (`iel`) wiring is a separate bead.
+Returns a 3-tuple `(lthr, bragg, incoh)` so the caller can distinguish
+coherent (1) from incoherent (2) / mixed (3) elastic:
+  * LTHR=1 → `(1, BraggData, nothing)`               (coherent only)
+  * LTHR=2 → `(2, nothing, IncoherentElasticData)`   (incoherent only)
+  * LTHR=3 → `(3, BraggData, IncoherentElasticData)` (mixed)
+  * not found → `(0, nothing, nothing)`
 
-ENDF-6 MF7/MT2 LTHR=1 layout (manual §7.2):
-  HEAD : ZA, AWR, LTHR=1, 0, 0, 0
-  TAB1 : C1=T0, C2=0, L1=LT, L2=0, N1=NR, N2=NP ; NR int pairs ; NP (E_i, S_cum) pairs
-  then LT LIST records: C1=T_j, C2=0, L1=LI, L2=0, N1=NP, N2=0 ; NP S_cum values
+ENDF-6 MF7/MT2 layout (manual §7.2):
+  HEAD : ZA, AWR, LTHR, 0, 0, 0
+  LTHR=1 (coherent):
+    TAB1 : C1=T0, C2=0, L1=LT, L2=0, N1=NR, N2=NP ; NR int pairs ; NP (E_i, S_cum)
+    then LT LIST records: C1=T_j, C2=0, L1=LI, L2=0, N1=NP, N2=0 ; NP S_cum values
+  LTHR=2 (incoherent):
+    TAB1 : C1=SB, C2=0, L1=0, L2=0, N1=NR, N2=NT ; NR int pairs ; NT (T_i, W'_i)
+  LTHR=3 (mixed): the coherent TAB1(+LT LIST) block FIRST, then a SECOND TAB1
+    holding the incoherent W'(T) table (same shape as the LTHR=2 TAB1).
 """
 function read_mf7_mt2(filename::AbstractString, mat::Integer, T::Real)
     open(filename) do io
-        find_section(io, 7, 2; target_mat=mat) || return (0, nothing)
+        find_section(io, 7, 2; target_mat=mat) || return (0, nothing, nothing)
         head = read_cont(io)
         lthr = head.L1
-        # Only LTHR=1 (coherent elastic) is wired here. LTHR=2 (incoherent) and
-        # LTHR=3 (mixed) need the iel path — out of scope for this branch.
-        lthr == 1 || return (lthr, nothing)
 
-        # Base TAB1: (E_i, S_cum_i) at T0. (rdelas thermr.f90:505)
-        base = read_tab1(io)
-        nr = length(base.interp.nbt)
-        np = length(base.x)
-        lt = base.L1                 # number of extra-temperature LIST records
-        energies = copy(base.x)      # E_i [eV] — reused across all temperatures
-        scum = copy(base.y)          # S_cum at T0; overwritten if a later T matches
+        # --- Coherent elastic block (LTHR=1 and LTHR=3) ---
+        bragg = nothing
+        if lthr == 1 || lthr == 3
+            # Base TAB1: (E_i, S_cum_i) at T0. (rdelas thermr.f90:505)
+            base = read_tab1(io)
+            np = length(base.x)
+            lt = base.L1                 # number of extra-temperature LIST records
+            energies = copy(base.x)      # E_i [eV] — reused across all temperatures
+            scum = copy(base.y)          # S_cum at T0; overwritten if a later T matches
 
-        # Pick the temperature: T0 (base) or one of the LT LIST records.
-        # Fortran rdelas line 545: abs(tnow-temp) < temp/1000+5.
-        ttol = T / 1000 + 5
-        ifound = abs(base.C1 - T) < ttol
-        for _ in 1:lt
-            lst = read_list(io)      # rdelas thermr.f90:536
-            if !ifound && abs(lst.C1 - T) < ttol
-                ifound = true
-                # Overwrite S_cum with this temperature's values (NP entries).
-                # rdelas lines 547-553: energies stay, S values replaced.
-                length(lst.data) >= np ||
-                    error("MF7/MT2 LIST at T=$(lst.C1)K has $(length(lst.data)) " *
-                          "values, expected NP=$np (MAT=$mat in $filename)")
-                @inbounds for i in 1:np
-                    scum[i] = lst.data[i]
+            # Pick the temperature: T0 (base) or one of the LT LIST records.
+            # Fortran rdelas line 545: abs(tnow-temp) < temp/1000+5.
+            ttol = T / 1000 + 5
+            ifound = abs(base.C1 - T) < ttol
+            for _ in 1:lt
+                lst = read_list(io)      # rdelas thermr.f90:536
+                if !ifound && abs(lst.C1 - T) < ttol
+                    ifound = true
+                    # Overwrite S_cum with this temperature's values (NP entries).
+                    # rdelas lines 547-553: energies stay, S values replaced.
+                    length(lst.data) >= np ||
+                        error("MF7/MT2 LIST at T=$(lst.C1)K has $(length(lst.data)) " *
+                              "values, expected NP=$np (MAT=$mat in $filename)")
+                    @inbounds for i in 1:np
+                        scum[i] = lst.data[i]
+                    end
                 end
             end
-        end
-        ifound || error("MF7/MT2 coherent elastic: temperature $(T)K not found " *
-                        "for MAT=$mat in $filename (base T0=$(base.C1)K, $lt extra temps)")
+            ifound || error("MF7/MT2 coherent elastic: temperature $(T)K not found " *
+                            "for MAT=$mat in $filename (base T0=$(base.C1)K, $lt extra temps)")
 
-        # sigcoh lat=10 transform (thermr.f90:1150-1166).
-        amne = PhysicsConstants.amassn * PhysicsConstants.amu
-        econ = PhysicsConstants.ev * 8 * amne / PhysicsConstants.hbar^2
-        tau_sq = Vector{Float64}(undef, np)
-        dS = Vector{Float64}(undef, np)
-        blast = 0.0
-        @inbounds for i in 1:np
-            tau_sq[i] = energies[i] * econ
-            dS[i] = scum[i] - blast
-            blast = scum[i]
+            # sigcoh lat=10 transform (thermr.f90:1150-1166).
+            amne = PhysicsConstants.amassn * PhysicsConstants.amu
+            econ = PhysicsConstants.ev * 8 * amne / PhysicsConstants.hbar^2
+            tau_sq = Vector{Float64}(undef, np)
+            dS = Vector{Float64}(undef, np)
+            blast = 0.0
+            @inbounds for i in 1:np
+                tau_sq[i] = energies[i] * econ
+                dS[i] = scum[i] - blast
+                blast = scum[i]
+            end
+            # scon=1 (line 1157); no ulim sentinel for lat=10 (n_edges = NP).
+            bragg = BraggData(tau_sq, dS, econ, 1.0, np)
         end
-        # scon=1 (line 1157); no ulim sentinel for lat=10 (n_edges = NP).
-        (lthr, BraggData(tau_sq, dS, econ, 1.0, np))
+
+        # --- Incoherent elastic block (LTHR=2 and LTHR=3) ---
+        # The W'(T) TAB1: C1=SB (bound XS), then NR interp pairs and NT (T_i, W'_i)
+        # pairs. This is `fl(index)` in the ENDF6 branch of iel (thermr.f90:1298-1318).
+        incoh = nothing
+        if lthr == 2 || lthr == 3
+            wtab = read_tab1(io)         # for LTHR=3 this is the SECOND TAB1
+            sb = wtab.C1
+            incoh = IncoherentElasticData(sb, TabulatedFunction(wtab))
+        end
+
+        if lthr ∉ (1, 2, 3)
+            error("MF7/MT2 unsupported LTHR=$lthr for MAT=$mat in $filename")
+        end
+
+        (lthr, bragg, incoh)
     end
 end
 
@@ -739,9 +781,135 @@ end
 
 # ---- Incoherent elastic (iel(), thermr.f90:1244-1425) ----
 
-"Incoherent elastic XS: sigma(E) = sigma_b/2 * (1 - exp(-4*E*W'))."
-function incoh_elastic_xs(E::Real, sigma_b::Real, dwp::Real)
-    E <= 0 && return 0.0; sigma_b/2*(1.0-exp(-4.0*E*dwp))
+"""
+    incoh_elastic_xs(E, sigma_b, dwp, natom) -> Float64
+
+Integrated incoherent-elastic cross section at incident energy `E` [eV].
+
+`sigma_b` is the bound (characteristic) cross section SB [barn], `dwp` is the
+Debye-Waller integral W'(T) at the current temperature, and `natom` is the
+number of principal atoms (thermr card-2 field 8 / Fortran `natom`).
+
+Mirrors `iel` exactly (thermr.f90:1322,1379-1384) in FP order:
+    c1   = sb/(2*natom)            (line 1322)
+    c2   = 2*e*dwa                 (line 1379)
+    rc2  = 1/c2                    (line 1381)
+    x1   = exp(-2*c2)              (line 1382)
+    xsec = c1*rc2*(1-x1)          (line 1384)
+i.e.  σ(E) = sb/(2*natom) · 1/(2·E·W') · (1 − exp(−4·E·W')).
+
+`E <= 0` returns 0.0 (the calcem grid never includes E=0, but the Fortran
+`c2`/`rc2` would divide by zero there; guard loudly-safe).
+"""
+function incoh_elastic_xs(E::Real, sigma_b::Real, dwp::Real, natom::Integer)
+    E <= 0 && return 0.0
+    c1 = sigma_b / (2 * natom)
+    c2 = 2 * E * dwp
+    rc2 = 1 / c2
+    x1 = exp(-2 * c2)
+    c1 * rc2 * (1 - x1)
+end
+
+"""
+    incoh_dwp_at(iel::IncoherentElasticData, T) -> Float64
+
+W'(T): the Debye-Waller integral at temperature `T` [K], interpolated from the
+MF7/MT2 LTHR=2/3 table. Mirrors the ENDF6 branch of `iel` (thermr.f90:1303-1318):
+
+* NP==1 — single tabulated temperature `T1`; require `abs(T-T1) <= T/10`, else
+  error (Fortran calls `error('iel','bad temperature for debye-waller factor')`).
+  Returns W'(T1).
+* NP>1  — require `0.9*T1 <= T <= 1.1*Tn` (`dn=0.9`, `up=1.1`, lines 1311-1312),
+  else error. Fortran then clamps the endpoints into range so `terpa` always
+  interpolates inside the table:
+      if (tt1 > temp) T1 := temp     (line 1313)
+      if (ttn < temp) Tn := temp     (line 1314)
+  and interpolates with `terpa` using the table's own INT law (here lin-lin,
+  INT=2 for these TSL evaluations).
+"""
+function incoh_dwp_at(iel::IncoherentElasticData, T::Real)
+    tab = iel.dwp_table
+    np = length(tab)
+    T1 = tab.x[1]
+    if np == 1
+        abs(T - T1) <= T / 10 || error(
+            "iel: bad temperature for debye-waller factor — MF7/MT2 LTHR=2/3 " *
+            "table has the single temperature $(T1)K but T=$(T)K " *
+            "(|T-T1|=$(abs(T-T1)) > T/10=$(T/10))")
+        return tab.y[1]
+    end
+    Tn = tab.x[np]
+    (T >= 0.9 * T1 && T <= 1.1 * Tn) || error(
+        "iel: bad temperature for debye-waller factor — T=$(T)K outside " *
+        "[0.9*T1, 1.1*Tn] = [$(0.9*T1), $(1.1*Tn)] (T1=$(T1)K, Tn=$(Tn)K)")
+    # Clamp the spanned endpoints into range so terpa interpolates inside the
+    # table (thermr.f90:1313-1314). Build the clamped TAB1 with the same INT law.
+    xclamp = copy(tab.x)
+    T1 > T && (xclamp[1] = Float64(T))
+    Tn < T && (xclamp[np] = Float64(T))
+    clamped = TabulatedFunction(tab.interp, xclamp, tab.y)
+    interpolate(clamped, Float64(T))
+end
+
+"""
+    build_incoh_elastic_records(esi, sigma_b, dwp, nbin, natom)
+        -> (xie::Vector{Float64}, records::Vector{MF6ListRecord})
+
+The deterministic `iel` record builder (thermr.f90:1377-1406). Given the calcem
+incident-energy grid `esi` [eV], the bound XS `sigma_b` [barn], the Debye-Waller
+integral `dwp` = W'(T), the number of equiprobable cosine bins `nbin`, and the
+number of principal atoms `natom`, returns:
+
+* `xie[i]` — the raw incoherent-elastic cross section at `esi[i]` (no sigfig
+  rounding, matching `xie(iex)=xsec` at thermr.f90:1400).
+* `records[i]` — one `MF6ListRecord` per incident energy, holding a single
+  secondary-energy point (elastic: E'=E) with the LANG=3 equiprobable cosines.
+  Layout matches `iel`'s LIST record: scr(7)=E (secondary energy), scr(8)=1
+  (weight word), scr(8+iu)=cosine_iu (thermr.f90:1385-1399). We reuse the
+  calcem `_mf6_entry` helper, so each entry is `[E, 1.0, μ₁...μ_nbin]`.
+
+Per-energy cosine loop (thermr.f90:1393-1399), verbatim FP order:
+    c2  = 2*e*dwa ; rc2 = 1/c2 ; x1 = exp(-2*c2) ; r1x1 = 1/(1-x1)
+    u = -1
+    do iu = 1,n
+       x2   = exp(-c2*(1-u))
+       unow = 1 + rc2*log((1-x1)/n + x2)
+       cos  = n*rc2*(exp(-c2*(1-unow))*(c2*unow-1) - x2*(c2*u-1))*r1x1
+       u    = unow
+    end
+"""
+function build_incoh_elastic_records(esi::AbstractVector{<:Real},
+                                     sigma_b::Real, dwp::Real,
+                                     nbin::Integer, natom::Integer)
+    nne = length(esi)
+    n = Int(nbin)
+    xie = Vector{Float64}(undef, nne)
+    records = Vector{MF6ListRecord}(undef, nne)
+    @inbounds for iex in 1:nne
+        e = Float64(esi[iex])
+        # σ(E) — raw, no sigfig (thermr.f90:1400). incoh_elastic_xs reproduces
+        # the c1/c2/rc2/x1 FP order of lines 1322,1379-1384.
+        xie[iex] = incoh_elastic_xs(e, sigma_b, dwp, natom)
+        # Equiprobable cosines (thermr.f90:1379-1399).
+        c2 = 2 * e * dwp
+        rc2 = 1 / c2
+        x1 = exp(-2 * c2)
+        r1x1 = 1 / (1 - x1)
+        cosines = Vector{Float64}(undef, n)
+        u = -1.0
+        for iu in 1:n
+            x2 = exp(-c2 * (1 - u))
+            unow = 1 + rc2 * log((1 - x1) / n + x2)
+            cosines[iu] = n * rc2 *
+                (exp(-c2 * (1 - unow)) * (c2 * unow - 1) - x2 * (c2 * u - 1)) * r1x1
+            u = unow
+        end
+        # One secondary-energy point: elastic, E'=E, weight word scr(8)=1.0
+        # (thermr.f90:1391-1392). Reuse the calcem MF6 entry/record types.
+        entry = _mf6_entry(e, 1.0, cosines, n)
+        records[iex] = MF6ListRecord(e, [entry])
+    end
+    return xie, records
 end
 
 # ---- Standard thermal energy grid (calcem, thermr.f90:1587-1607) ----
