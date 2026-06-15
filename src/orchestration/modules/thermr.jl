@@ -202,11 +202,8 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
     end
     coh_ne = length(thermal_e)
 
-    # Add sentinels (Fortran tpend)
-    push!(thermal_e, emax)
-    push!(thermal_e, round_sigfig(emax, 7, 1))
-    push!(thermal_e, 2e7)
-    sort!(unique!(thermal_e))
+    # Add sentinels at the thermal cutoff (Fortran tpend / sigcoh / save-elastic).
+    _append_emax_sentinels!(thermal_e, emax)
 
     # MT=mtref (inelastic): calcem → two-step interpolation → thermal grid
     esi_sab, xsi_sab, mf6_sab = calcem(sab, temp, emax, nbin; tol=tol)
@@ -244,6 +241,33 @@ end
 # =========================================================================
 # Interpolation helpers (matching Fortran terp/coh)
 # =========================================================================
+
+"""
+    _append_emax_sentinels!(grid, emax)
+
+Append the four held/zero boundary points at the thermal cutoff `emax` to the
+shared MT221/MT222 energy `grid`, then sort and dedupe in place. The reference
+grid near the cutoff is the 4-point sequence
+
+  `sigfig(emax,7,-1)` (held thermal value, last coherent grid point),
+  `emax` (held value), `sigfig(emax,7,+1)` (σ=0 above cutoff), `etop=2e7` (σ=0).
+
+Fortran ground truth:
+  - thermr.f90:1194 (sigcoh)  `enext = sigfig(elim,7,-1)` — coherent grid's last
+    point IS `sigfig(emax,7,-1)`.
+  - thermr.f90:393 (save-elastic) `enext = emax` — held value clamped at emax.
+  - thermr.f90:394 (save-elastic) `enext = up*emax` — step to zero above emax,
+    matching `sigfig(emax,7,+1)`.
+  - thermr.f90:3211-3213 (tpend) `ex(1) = etop` appended at `ib = ne+1`; etop=2e7.
+"""
+function _append_emax_sentinels!(grid::Vector{Float64}, emax::Float64)
+    push!(grid, round_sigfig(emax, 7, -1))     # held thermal value; coh grid's last point (sigcoh, thermr.f90:1194)
+    push!(grid, emax)                          # held value at emax (clamp, thermr.f90:393)
+    push!(grid, round_sigfig(emax, 7, 1))      # step to zero above emax (up*emax, thermr.f90:394)
+    push!(grid, 2e7)                           # etop sentinel (tpend, thermr.f90:3212)
+    sort!(unique!(grid))
+    return grid
+end
 
 """Order-N Lagrangian interpolation matching Fortran `terp` (thermr.f90:1427)."""
 function _terp_lagrange(xs, ys, arg, il=5)
