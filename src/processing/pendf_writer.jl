@@ -309,12 +309,20 @@ function write_full_pendf(io::IO, result::NamedTuple;
         end
         # Subtract 1: Fortran ncds counts TAB1 as 2 lines (packed), actual is 3
         section_lines[(6, mt)] = n_lines - 1
-        # Incoherent-elastic (iel) directory-NC QUIRK (thermr.f90:1423):
-        # ncdse = 5 + ne*((nbin+11)/6) where `ne` is the ELASTIC grid count
-        # (the MT221 grid passed to iel), NOT the calcem record count. The
-        # section BODY stays the real `n_lines-1`; only the MF1/MT451 directory
-        # entry shows the quirk value (=1730 for T74, 1640 for T69).
-        haskey(mf6_iel_nc, mt) && (section_lines[(6, mt)] = mf6_iel_nc[mt])
+    end
+
+    # Incoherent-elastic (iel) directory-NC QUIRK (thermr.f90:1423):
+    # ncdse = 5 + ne*((nbin+11)/6) where `ne` is the ELASTIC grid count
+    # (the MT221 grid passed to iel), NOT the calcem record count. The section
+    # BODY stays its real line count; only the MF1/MT451 directory entry shows
+    # the quirk value (=1730 for T74, 1640 for T69, 35300 for T67). This is a
+    # FINAL pass so it also overrides the coherent-elastic STUB's directory NC:
+    # for LTHR=3 (MIXED) tpend overwrites ncdse with iel's value and applies it
+    # to BOTH the coherent MF6 stub (mtref+1) AND the iel record (mtref+2)
+    # (thermr.f90:3120 sets nc=ncdse for every MF6 entry after MT221). The stub
+    # BODY is still 4 lines (ncdse=3 above); only its dir NC becomes 35300.
+    for (mt, nc) in mf6_iel_nc
+        section_lines[(6, mt)] = nc
     end
 
     # MF12/MF13 line counts

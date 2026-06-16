@@ -174,10 +174,14 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
             (0, nothing, nothing)
         end
 
-        if lthr == 1 && bragg_endf !== nothing
+        if (lthr == 1 || lthr == 3) && bragg_endf !== nothing
             # Coherent elastic from ENDF (lat=10). Bypass the hardcoded lattice.
+            # LTHR=1 → coherent only (icoh=10, coh(10,…,mtref+1)). LTHR=3 → MIXED:
+            # coh(10,…,mtref+1) THEN iel(20,…,mtref+2) (thermr.f90:428-434, icoh=30).
+            # For LTHR=3 the Bragg block fires here AND the incoherent block below
+            # (via `incoh_endf`, which read_mf7_mt2 populates for LTHR=3).
             bragg = bragg_endf
-            @info "thermr SAB: coherent elastic from ENDF MF7/MT2 LTHR=1 " *
+            @info "thermr SAB: coherent elastic from ENDF MF7/MT2 LTHR=$lthr " *
                   "(lat=10), $(bragg.n_edges) Bragg edges"
         elseif lthr == 2
             # Incoherent elastic only (LTHR=2): no Bragg grid refinement; the
@@ -259,15 +263,17 @@ function _thermr_sab!(added_mf3, mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
               "$(length(esi_sab)) calcem IEs"
     end
 
-    # --- Incoherent elastic (iel, LTHR=2) — MF3/MT(mtref+1) ---------------
+    # --- Incoherent elastic (iel, LTHR=2 or LTHR=3) — MF3/MT(mt_iel) ------
     # Fortran iel (thermr.f90:1377-1417). σ(E) is computed on the calcem grid
     # `esi_sab` (xie, raw, no sigfig), then interpolated onto the MT221 grid
     # `thermal_e` with `terp(esi,xie,nne,ex(1),3)` — 3-point Lagrange in linear
     # x/y (thermr.f90:1412). The trailing sentinel point gets σ=0
     # (thermr.f90:1413 `if(iex==ne) ej(nj)=0`).
-    if lthr == 2 && incoh_endf !== nothing
+    # Section MT: LTHR=2 ⇒ iel(20,…,mtref+1); LTHR=3 ⇒ iel(20,…,mtref+2) —
+    # MT223 after the coherent MT222 (thermr.f90:430-434).
+    if (lthr == 2 || lthr == 3) && incoh_endf !== nothing
         dwp = incoh_dwp_at(incoh_endf, temp)                 # W'(T) (thermr.f90:1303-1318)
-        mt_iel = mtref + 1                                   # LTHR=2 ⇒ mtref+1 (thermr.f90:431)
+        mt_iel = lthr == 3 ? mtref + 2 : mtref + 1           # thermr.f90:431,434
         xie, _records = build_incoh_elastic_records(esi_sab, incoh_endf.sigma_b,
                                                     dwp, nbin, natom)
         # terp order-3 (Lagrange) onto the MT221 grid (thermr.f90:1412).

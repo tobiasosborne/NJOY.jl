@@ -485,13 +485,17 @@ function _collect_thermr!(ctx::RunContext, tapes::TapeManager, params::ThermrPar
     tape = read_pendf(pendf_path)
     mf3 = extract_mf3_all(tape, params.mat)
 
-    # Collect thermr MF3 sections
+    # Collect thermr MF3 sections. mtref = inelastic; mtref+1 = elastic (coherent
+    # for LTHR=1/3, or incoherent for LTHR=2); mtref+2 = incoherent elastic for
+    # the LTHR=3 MIXED case (MT223 after coherent MT222). thermr.f90:428-434.
     mtref = params.mtref
     haskey(mf3, mtref) && (ctx.extra_mf3[mtref] = mf3[mtref])
     haskey(mf3, mtref + 1) && (ctx.extra_mf3[mtref + 1] = mf3[mtref + 1])
+    haskey(mf3, mtref + 2) && (ctx.extra_mf3[mtref + 2] = mf3[mtref + 2])
 
     push!(ctx.thermr_mts, mtref)
-    params.icoh > 0 && push!(ctx.thermr_mts, mtref + 1)
+    params.icoh > 0 && haskey(mf3, mtref + 1) && push!(ctx.thermr_mts, mtref + 1)
+    haskey(mf3, mtref + 2) && push!(ctx.thermr_mts, mtref + 2)
 
     # Read sidecar for MF6 data (thermr stores MF6 records alongside tape)
     sidecar = pendf_path * ".thermr"
@@ -546,8 +550,10 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
 
         # Elastic MF6 — only when elastic scattering is requested.
         # Mirror thermr_module's lat=10 selection: prefer ENDF MF7/MT2.
-        # LTHR=1 → coherent (Bragg stub); LTHR=2 → incoherent elastic (iel,
-        # full MF6 LIST records, NOT a stub). thermr.f90:428-434 dispatch.
+        #   LTHR=1 → coherent only      (Bragg stub at mtref+1).
+        #   LTHR=2 → incoherent only    (iel LIST records at mtref+1, NOT a stub).
+        #   LTHR=3 → MIXED              (coh stub at mtref+1 AND iel at mtref+2).
+        # thermr.f90:428-434 dispatch (icoh=10/20/30 from icoh=10*lthr).
         if params.icoh > 0
             bragg = nothing
             lthr, bragg_endf, incoh_endf = try
@@ -557,32 +563,42 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
                 (0, nothing, nothing)
             end
 
-            if lthr == 2 && incoh_endf !== nothing
-                # --- Incoherent elastic (iel, LTHR=2) MF6/MT(mtref+1) --------
+            # Read back the (now thermal-augmented) PENDF once; both the
+            # coherent-stub and iel paths need MF3 NP for the directory-NC quirk.
+            pendf_path = resolve(tapes, params.nout)
+            tape = read_pendf(pendf_path)
+            mf3 = extract_mf3_all(tape, params.mat)
+            # Directory-NC QUIRK (thermr.f90:1423): ncdse = 5 + ne*((nbin+11)/6),
+            # where `ne` is the ELASTIC (MT221) grid count = MF3 NP − 1
+            # (tpend scr(6)=ne+1, thermr.f90:3198). For LTHR=3, tpend overwrites
+            # `ncdse` with iel's value (iel runs AFTER coh), so BOTH the coherent
+            # MF6 stub (mtref+1) and the iel record (mtref+2) directory entries
+            # carry this value (thermr.f90:3120 applies nc=ncdse to both).
+            ne_for_nc(mt) = (haskey(mf3, mt) ? length(mf3[mt][1]) :
+                             (haskey(mf3, mtref) ? length(mf3[mtref][1]) : 0)) - 1
+
+            # --- Incoherent elastic (iel, LTHR=2 or LTHR=3) -----------------
+            if (lthr == 2 || lthr == 3) && incoh_endf !== nothing
                 # Fortran iel (thermr.f90:1377-1406): one LANG=3 LIST record per
                 # calcem incident energy. NO xsi normalization (tpend ltt=6 path
                 # sets scr(8)=1 verbatim, thermr.f90:3293-3301) — so we do NOT
                 # set ctx.mf6_xsi for this MT (writer keeps weight=1.0).
+                # Section MT: LTHR=2 ⇒ mtref+1; LTHR=3 ⇒ mtref+2 (MT223).
                 dwp = incoh_dwp_at(incoh_endf, temp)
                 xie, iel_records = build_incoh_elastic_records(
                     esi, incoh_endf.sigma_b, dwp, nbin, params.natom)
-                mt_iel = mtref + 1
+                mt_iel = lthr == 3 ? mtref + 2 : mtref + 1
                 ctx.mf6_records[mt_iel] = iel_records
                 ctx.mf6_emax[mt_iel] = emax
+                ctx.mf6_iel_nc[mt_iel] = 5 + ne_for_nc(mt_iel) * div(Int(nbin) + 11, 6)
+            end
 
-                # Directory-NC QUIRK (thermr.f90:1423): ncdse = 5 + ne*((nbin+11)/6),
-                # where `ne` is the ELASTIC (MT221) grid count = MF3/MT222 NP − 1
-                # (tpend scr(6)=ne+1, thermr.f90:3198). Read NP from the tape MF3.
-                pendf_path = resolve(tapes, params.nout)
-                tape = read_pendf(pendf_path)
-                mf3 = extract_mf3_all(tape, params.mat)
-                np_mf3 = haskey(mf3, mt_iel) ? length(mf3[mt_iel][1]) :
-                         (haskey(mf3, mtref) ? length(mf3[mtref][1]) : 0)
-                ne_elastic = np_mf3 - 1
-                ctx.mf6_iel_nc[mt_iel] = 5 + ne_elastic * div(Int(nbin) + 11, 6)
-            elseif lthr == 1 && bragg_endf !== nothing
+            # --- Coherent elastic (coh, LTHR=1 or LTHR=3) -------------------
+            if (lthr == 1 || lthr == 3) && bragg_endf !== nothing
                 bragg = bragg_endf  # lat=10: coherent elastic from ENDF
-            else
+            elseif lthr != 2
+                # Hardcoded graphite/Be/BeO lattice fallback (no ENDF Bragg, and
+                # not the incoherent-only LTHR=2 case).
                 bragg = try
                     bragg_params = lookup_bragg_params(params.mat_thermal)
                     build_bragg_data(
@@ -597,11 +613,15 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
             end
 
             if bragg !== nothing
-                ctx.mf6_stubs[mtref + 1] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
-
-                pendf_path = resolve(tapes, params.nout)
-                tape = read_pendf(pendf_path)
-                mf3 = extract_mf3_all(tape, params.mat)
+                mt_coh = mtref + 1
+                ctx.mf6_stubs[mt_coh] = (nbragg=bragg.n_edges, emin=1e-5, emax=emax)
+                # LTHR=3 quirk: the 4-line coherent stub's DIRECTORY entry also
+                # shows ncdse (=iel's value), because tpend's MF6 loop sets
+                # nc=ncdse for every MF6 entry after MT221 (thermr.f90:3120).
+                # The stub BODY stays 4 lines; only the dir NC is overridden.
+                if lthr == 3
+                    ctx.mf6_iel_nc[mt_coh] = 5 + ne_for_nc(mt_coh) * div(Int(nbin) + 11, 6)
+                end
                 if haskey(mf3, mtref)
                     ctx.thermr_coh_ne = length(mf3[mtref][1]) - 2
                 end
