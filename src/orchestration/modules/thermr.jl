@@ -118,8 +118,14 @@ function _thermr_free_gas!(added_mf3, mf6_records, mf6_xsi, mf6_emax,
         end
         push!(mt_e, emax); push!(mt_xs, xs_emax)
     end
-    # Cutoff sentinels
-    push!(mt_e, round_sigfig(emax, 7, 1)); push!(mt_xs, 0.0)
+    # Cutoff sentinels. Fortran free-gas save-elastic loop (thermr.f90:383-394)
+    # steps to zero at up*emax = 1.00001*emax (param `up`, line 161; `enext=up*emax`,
+    # line 394) — NOT sigfig(emax,7,+1). This is path-specific: the SAB *coherent*
+    # path steps to zero at sigfig(emax,7,+1) (emitted by sigcoh), but free-gas never
+    # calls sigcoh. Ref T01 tape25 MF3/MT221 endpoint is 1.200012 (=1.00001*1.2),
+    # not 1.200001. (NJOY_jl-nm2: bead premise was a missing sigfig(emax,7,-1) point;
+    # the real defect is this step-to-zero energy.)
+    push!(mt_e, 1.00001 * emax); push!(mt_xs, 0.0)
     push!(mt_e, 2e7); push!(mt_xs, 0.0)
     added_mf3[mtref] = (mt_e, mt_xs)
     push!(thermr_mts, mtref)
