@@ -28,12 +28,26 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
     # Read reconr result for mf3_sections (needed by resolve_thnmax)
     reconr_mf3_secs = _read_mf3_section_metadata(endf_path, params.mat)
 
-    # Extract eresh (resolved resonance range upper energy) from MF2/MT151
+    # Extract eresh (resolved resonance range upper energy) from MF2/MT151.
+    # Fortran caps it at e6pt5 = 6.5e6 eV (broadr.f90:423-424).
     eresh = _extract_eresh_from_pendf(pendf_in, params.mat)
+    eresh > 6.5e6 && (eresh = 6.5e6)
+
+    # Read original ENDF MF1/MT451 HEAD for LRP and the ENDF format version
+    # (iverf). The PENDF copy has LRP overwritten to 2 by reconr
+    # (reconr.f90:5031), so we MUST read the original ENDF here.
+    # Ref: broadr.f90:249 (lrp=l1h) and :363-368 (iverf from NX/N1/N2 probe).
+    hdr = read_mf1_header_info(endf_path, params.mat)
+    lrp = hdr === nothing ? 0 : hdr.lrp
+    iverf = hdr === nothing ? 6 : hdr.iverf
+
+    # emin: 1.0 for non-resonance (lrp==0); eresh for resolved (lrp==1).
+    # Ref: broadr.f90:356 (emin=1) and :432 (if lrp==1 emin=eresh).
+    emin = lrp == 1 ? eresh : 1.0
 
     # Resolve thnmax
     thnmax = resolve_thnmax(params.thnmax, reconr_mf3_secs, awr; eresh=eresh)
-    @info "broadr: MAT=$(params.mat) thnmax=$(thnmax) ntemp=$(length(params.temperatures))"
+    @info "broadr: MAT=$(params.mat) thnmax=$(thnmax) lrp=$(lrp) iverf=$(iverf) eresh=$(eresh) ntemp=$(length(params.temperatures))"
 
     # Dosimetry / IRDFF evaluations (e.g. Fe-nat IRDFF-II) carry only
     # partial reactions in MF3 — no MT=1 (total). Fortran broadr handles
@@ -50,8 +64,17 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
     end
     energies = mf3_data[1][1]
 
-    # Select partials for convergence testing (Trap 53: NOT total)
-    xs_partials, partial_mts = select_broadr_partials(mf3_data)
+    # LRF7 channel-partial MT list (Fortran nppmt, broadr.f90:308-330). Empty
+    # for non-LRF7 materials. These reactions are broadened even when their MF3
+    # threshold exceeds emin (broadr.f90:513-519).
+    nppmt = _extract_nppmt_from_endf(endf_path, params.mat)
+
+    # Select the mtr[] partials and project them onto the MT=1 master grid.
+    # Ref: broadr.f90:500-524 (membership) + :620 (shared union grid).
+    xs_partials, partial_mts = select_broadr_partials(
+        mf3_data, energies; emin=emin, lrp=lrp, eresh=eresh,
+        iverf=iverf, nppmt=nppmt)
+    @info "broadr: selected broadened partials MT=$(partial_mts)"
 
     # Sequential broadening for each temperature — collect ALL results
     cur_energies = energies
@@ -86,20 +109,57 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
 
         @info "broadr: T=$(temp)K alpha=$(round(alpha, sigdigits=5))"
 
-        # Broaden partials via convergence stack
+        # Broaden the mtr[] partials TOGETHER on one shared union grid (b_e).
+        # Ref: broadr.f90:620 (bfile3 broadens all nreac reactions at once).
         b_e, b_xs = broadn_grid(cur_energies, cur_xs, alpha, tol, errmax, errint, thnmax)
 
-        # Broaden total separately on the same grid.
-        # Precompute the velocity array ONCE — cur_energies is constant across
-        # the loop, so rebuilding sqrt.(alpha .* cur_energies) per call made the
-        # kernel O(nseg²). Broadcast form is bit-identical to the old per-call
-        # map(e->sqrt(alpha*e), cur_energies). See sigma1.jl / broadr.jl:79.
-        vel_cur = sqrt.(alpha .* cur_energies)
+        # Reconstruct MT=1 (total) on the broadened grid.
+        # Ref: broadr.f90:938-980 (label 275, MT=1 / ireac=0 path).
+        #   - Thermal range, E ≤ thnmax (f90:944-973): MT1 = Σ of the
+        #     individually-broadened partials  scr(k)=Σ tt(1+i)  (f90:974),
+        #     summed from the UNROUNDED broadened partials, with the iflag
+        #     channel-redundancy dedup (f90:944-973): when MT103 is in the set,
+        #     drop its summed-into partials MT600-649; MT104→650-699;
+        #     MT105→700-749; MT106→750-799; MT107→800-849 (iverf≥6 ranges,
+        #     f90:457-467; iverf<6 ranges f90:469-478). sigfig is applied ONLY
+        #     AFTER the sum (f90:980). The Doppler kernel is nonlinear so
+        #     sigma1(Σpᵢ) ≠ Σ sigma1(pᵢ); broadening the total directly is wrong
+        #     (bead e5n — gave ~5 b vs the correct ~1.93e5 b for B-10).
+        #   - Above thnmax (f90:939-940): MT1 is the ORIGINAL (unbroadened) total
+        #     read verbatim via gety1 — mirrored here by lin-lin interpolation of
+        #     cur_total (the original total carried through the loop).
+        #
+        # Determine the iflag channel-dedup ranges from the version (broadr.f90
+        # :457-478) and which MT103-107 sums are present in partial_mts.
+        mpmin, mpmax, mdmin, mdmax, mtmin, mtmax, m3min, m3max, m4min, m4max =
+            iverf >= 6 ?
+                (600,649, 650,699, 700,749, 750,799, 800,849) :
+                (700,718, 720,738, 740,758, 760,768, 780,798)
+        has103 = 103 in partial_mts; has104 = 104 in partial_mts
+        has105 = 105 in partial_mts; has106 = 106 in partial_mts
+        has107 = 107 in partial_mts
+        function _iflag(mt::Int)::Bool
+            mt >= 201 && return true                         # f90:957
+            has103 && mpmin <= mt <= mpmax && return true    # f90:959-961
+            has104 && mdmin <= mt <= mdmax && return true    # f90:962-964
+            has105 && mtmin <= mt <= mtmax && return true    # f90:965-967
+            has106 && m3min <= mt <= m3max && return true    # f90:968-970
+            has107 && m4min <= mt <= m4max && return true    # f90:971-973
+            return false
+        end
+        sum_cols = [j for j in axes(b_xs, 2) if !_iflag(partial_mts[j])]
+
         b_total = Vector{Float64}(undef, length(b_e))
         for i in eachindex(b_e)
             if b_e[i] <= thnmax
-                b_total[i] = sigma1_at(b_e[i], vel_cur, cur_total, alpha)
+                # f90:974 — sum the UNROUNDED broadened partials (dedup applied)
+                s = 0.0
+                for j in sum_cols
+                    s += b_xs[i, j]
+                end
+                b_total[i] = s
             else
+                # f90:940 — verbatim original total (gety1 lin-lin interp)
                 idx = searchsortedfirst(cur_energies, b_e[i])
                 if idx <= 1
                     b_total[i] = cur_total[1]
@@ -113,7 +173,8 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
             end
         end
 
-        # Apply round_sigfig(x, 7, 0) to broadened XS (Trap 120)
+        # sigfig AFTER the sum (f90:980 for MT1; Trap 120 for each partial).
+        # MT1 sum above used the UNROUNDED b_xs, so sigfig the partials now.
         for j in axes(b_xs, 2), i in axes(b_xs, 1)
             b_xs[i, j] = round_sigfig(b_xs[i, j], 7, 0)
         end
@@ -186,6 +247,26 @@ function _read_mf3_section_metadata(endf_path::String, mat::Int)
     io = open(endf_path, "r")
     try
         return read_mf3_sections(io, mat)
+    finally
+        close(io)
+    end
+end
+
+"""
+Extract the LRF7 channel-partial MT list (Fortran `nppmt`, broadr.f90:308-330)
+from the ENDF MF2/MT151 R-Matrix-Limited (LRU=1, LRF=7) range. Returns the set
+of particle-pair MTs, or an empty set for non-LRF7 materials.
+"""
+function _extract_nppmt_from_endf(endf_path::String, mat::Int)
+    isfile(endf_path) || return Set{Int}()
+    io = open(endf_path, "r")
+    try
+        rml = read_rml_data(io)
+        rml === nothing && return Set{Int}()
+        return Set{Int}(pp.MT for pp in rml.pairs)
+    catch e
+        @warn "broadr: failed to read LRF7 nppmt list — assuming none" exception=e
+        return Set{Int}()
     finally
         close(io)
     end

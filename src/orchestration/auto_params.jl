@@ -57,38 +57,118 @@ end
 # =========================================================================
 
 """
-    select_broadr_partials(mf3_data::Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}})
+    select_broadr_partials(mf3_data, mt1_e; emin, lrp, eresh, iverf, nppmt)
         -> (xs_matrix, mt_ids)
 
-Select which MF3 reactions to use for broadn_grid convergence testing.
-Matches Fortran broadr nreac: uses non-redundant primary partials only
-(elastic, fission, capture), NOT the total.
+Select which MF3 reactions broadr broadens (the `mtr[]` set) and project each
+onto the MT=1 master energy grid `mt1_e`.
 
-Returns (Matrix{Float64} with one column per partial, Vector{Int} of MT numbers).
+Mirrors the membership loop in broadr.f90:500-524. For each MF3 reaction `mth`
+with first grid energy `enext = mf3_data[mth][1][1]`:
+
+  HARD EXCLUDE (never broadened) — broadr.f90:500-512:
+    - iverf≥6: 201≤mth≤599 or mth>850;  iverf<6: mth>150
+    - mth ∈ {3,4,19};  46≤mth≤49
+  INCLUDE — broadr.f90:516-522:
+    - mth==18 (always)                                  (f90:512, "go to 170")
+    - mth is an LRF7 channel partial in `nppmt`          (f90:513-519)
+    - enext ≤ emin                                       (f90:521)
+    - lrp==1 and enext < eresh                           (f90:522)
+  Else SKIP (high-threshold reaction for lrp==0).
+
+`emin` is 1.0 for lrp==0, `eresh` for lrp==1 (broadr.f90:356,432). Exothermic
+reactions (QI>0, threshold ≈ 1e-5 eV) satisfy `enext ≤ emin` and are therefore
+INCLUDED — the bug fixed by bead e5n was selecting only {2,18,102}, which
+dropped the exothermic partials that dominate the thermal total for nuclides
+like B-10 ({2,102,103,107,113}) and Co-58m1 ({2,51,102,103,107}).
+
+All selected partials are broadened TOGETHER on one shared union grid
+(broadr.f90:620, bfile3). MT1's grid is the union of all reaction grids, so a
+lin-lin interpolation of a (linearized) partial onto `mt1_e` is exact and is the
+faithful "union grid" — for {2,18,102} already on the MT1 grid it is the
+identity. Non-mtr[] reactions are copied verbatim on their own grids by the
+writer and are not returned here.
+
+Returns (Matrix{Float64} with one column per partial on `mt1_e`, sorted Vector{Int}
+of MT numbers in Fortran MF3 dictionary (ascending) order).
 """
-function select_broadr_partials(mf3_data::Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}})
-    # Primary partials in Fortran order
-    primary_mts = Int[]
-    haskey(mf3_data, 2)   && push!(primary_mts, 2)    # elastic
-    haskey(mf3_data, 18)  && push!(primary_mts, 18)   # fission
-    haskey(mf3_data, 102) && push!(primary_mts, 102)  # capture
+function select_broadr_partials(mf3_data::Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}},
+                                mt1_e::AbstractVector{Float64};
+                                emin::Float64, lrp::Int, eresh::Float64,
+                                iverf::Int, nppmt::Set{Int}=Set{Int}())
+    selected = Int[]
+    for mth in sort(collect(keys(mf3_data)))
+        mth == 1 && continue  # total is never a broadened partial
 
-    isempty(primary_mts) && error("No broadr partials found (need MT=2, 18, or 102)")
-
-    # All partials must share the same energy grid (reconr grid)
-    ref_e = mf3_data[primary_mts[1]][1]
-    n = length(ref_e)
-
-    xs_matrix = Matrix{Float64}(undef, n, length(primary_mts))
-    for (col, mt) in enumerate(primary_mts)
-        e, xs = mf3_data[mt]
-        if length(e) != n
-            error("MT=$mt energy grid length $(length(e)) != reference $(n)")
+        # HARD EXCLUDE (broadr.f90:500-511)
+        if iverf >= 6
+            (mth > 200 && mth < 600) && continue
+            mth > 850 && continue
+        else
+            mth > 150 && continue
         end
-        xs_matrix[:, col] = xs
+        (mth == 3 || mth == 4 || mth == 19) && continue
+        (mth >= 46 && mth <= 49) && continue
+
+        enext = mf3_data[mth][1][1]  # first grid energy of this reaction
+
+        # INCLUDE tests (broadr.f90:512-522)
+        if mth == 18 || (mth in nppmt) || (enext <= emin) ||
+           (lrp == 1 && enext < eresh)
+            push!(selected, mth)
+        end
+        # else: high-threshold reaction → SKIP (copied verbatim by the writer)
     end
 
-    (xs_matrix, primary_mts)
+    isempty(selected) && error("No broadr partials selected (mtr[] predicate empty)")
+
+    n = length(mt1_e)
+    xs_matrix = Matrix{Float64}(undef, n, length(selected))
+    for (col, mt) in enumerate(selected)
+        e, xs = mf3_data[mt]
+        xs_matrix[:, col] = _interp_onto_grid(mt1_e, e, xs)
+    end
+
+    (xs_matrix, selected)
+end
+
+"""
+    _interp_onto_grid(target_e, src_e, src_xs) -> Vector{Float64}
+
+Lin-lin interpolation of a linearized cross section `(src_e, src_xs)` onto the
+master grid `target_e` (the MF3/MT1 union grid). Because every reaction's grid
+is a subset of the union grid and the data are linearized, this is exact on
+shared points and an exact in-segment evaluation elsewhere. Outside the source
+range the value is zeroed below the first source energy (threshold reactions:
+no cross section below threshold) and held flat above the last (mirrors gety1's
+out-of-range behaviour for the broadened union grid).
+
+When `src_e === target_e` (the common {2,18,102}-on-MT1-grid case) the result
+is the identity copy of `src_xs`.
+"""
+function _interp_onto_grid(target_e::AbstractVector{Float64},
+                           src_e::AbstractVector{Float64},
+                           src_xs::AbstractVector{Float64})
+    if length(src_e) == length(target_e) && src_e == target_e
+        return copy(Vector{Float64}(src_xs))
+    end
+    out = Vector{Float64}(undef, length(target_e))
+    for (i, e) in enumerate(target_e)
+        if e <= src_e[1]
+            out[i] = e == src_e[1] ? src_xs[1] : 0.0
+        elseif e >= src_e[end]
+            out[i] = src_xs[end]
+        else
+            idx = searchsortedfirst(src_e, e)
+            if src_e[idx] == e
+                out[i] = src_xs[idx]
+            else
+                f = (e - src_e[idx-1]) / (src_e[idx] - src_e[idx-1])
+                out[i] = src_xs[idx-1] + f * (src_xs[idx] - src_xs[idx-1])
+            end
+        end
+    end
+    return out
 end
 
 # =========================================================================
