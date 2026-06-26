@@ -76,8 +76,7 @@ end
     final_assembly!(tapes::TapeManager, output_unit::Int,
                     reconr_result, override_mf3, extra_mf3,
                     mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
-                    mf12_lines, mf13_lines, descriptions, thermr_mts,
-                    thermr_coh_ne; mat, err, tempr, label)
+                    mf12_lines, mf13_lines, descriptions, thermr_mts; mat, err, tempr, label)
 
 Assemble the final PENDF tape using write_full_pendf with all accumulated
 module outputs. This is called instead of a simple file copy when the
@@ -86,8 +85,7 @@ output requires MF6, MF12/MF13, and proper MF1 directory formatting.
 function final_assembly!(tapes::TapeManager, output_unit::Int,
                          reconr_result, override_mf3, extra_mf3,
                          mf6_records, mf6_xsi, mf6_emax, mf6_stubs,
-                         mf12_lines, mf13_lines, descriptions, thermr_mts,
-                         thermr_coh_ne; mat, err, tempr, label="",
+                         mf12_lines, mf13_lines, descriptions, thermr_mts; mat, err, tempr, label="",
                          mf1_header=nothing,
                          mf6_iel_nc::Dict{Int,Int}=Dict{Int,Int}())
     output_path = resolve(tapes, output_unit)
@@ -101,7 +99,6 @@ function final_assembly!(tapes::TapeManager, output_unit::Int,
             mf12_lines=mf12_lines, mf13_lines=mf13_lines,
             mf6_xsi=mf6_xsi, mf6_emax=mf6_emax,
             thermr_mts=thermr_mts,
-            thermr_coh_ne=thermr_coh_ne,
             descriptions=descriptions,
             mf6_iel_nc=mf6_iel_nc,
             mf1_header=mf1_header)

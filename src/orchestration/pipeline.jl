@@ -27,7 +27,6 @@ mutable struct RunContext
     mf13_lines::Vector{String}
     descriptions::Vector{String}
     thermr_mts::Set{Int}
-    thermr_coh_ne::Int
     extra_data::Dict{Symbol, Any}    # raw broadened data for heatr
     mat::Int; err::Float64; tempr::Float64; label::String
     mf1_header::Any                  # original ENDF MF1/MT451 header (Mf1HeaderInfo)
@@ -39,7 +38,7 @@ RunContext() = RunContext(
     Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}(),
     Dict{Int, Any}(), Dict{Int, Vector{Float64}}(),
     Dict{Int, Float64}(), Dict{Int, NamedTuple}(), Dict{Int, Int}(),
-    String[], String[], String[], Set{Int}(), 0,
+    String[], String[], String[], Set{Int}(),
     Dict{Symbol, Any}(),
     0, 0.0, 0.0, "", nothing)
 
@@ -284,7 +283,7 @@ function run_njoy(input_path::AbstractString;
             ctx.reconr_result, ctx.override_mf3, ctx.extra_mf3,
             ctx.mf6_records, ctx.mf6_xsi, ctx.mf6_emax, ctx.mf6_stubs,
             ctx.mf12_lines, ctx.mf13_lines, ctx.descriptions,
-            ctx.thermr_mts, ctx.thermr_coh_ne;
+            ctx.thermr_mts;
             mat=ctx.mat, err=ctx.err, tempr=ctx.tempr, label=ctx.label,
             mf1_header=ctx.mf1_header, mf6_iel_nc=ctx.mf6_iel_nc)
     end
@@ -621,9 +620,6 @@ function _recompute_thermr_mf6!(ctx::RunContext, tapes::TapeManager, params::The
                 # The stub BODY stays 4 lines; only the dir NC is overridden.
                 if lthr == 3
                     ctx.mf6_iel_nc[mt_coh] = 5 + ne_for_nc(mt_coh) * div(Int(nbin) + 11, 6)
-                end
-                if haskey(mf3, mtref)
-                    ctx.thermr_coh_ne = length(mf3[mtref][1]) - 2
                 end
             end
         end

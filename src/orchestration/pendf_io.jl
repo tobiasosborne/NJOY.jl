@@ -501,7 +501,7 @@ end
         modified_mf3=Dict(), added_mf3=Dict(), added_mf6=Dict(),
         mf6_stubs=Dict(), mf12_lines=String[], mf13_lines=String[],
         temperature=0.0, descriptions=String[],
-        thermr_mts=Set{Int}(), thermr_coh_ne=0) -> PENDFTape
+        thermr_mts=Set{Int}()) -> PENDFTape
 
 Build a new PENDFTape by copying `tape` with specified modifications:
 - `modified_mf3`: Dict{MT => (energies, xs)} — replace existing MF3 sections

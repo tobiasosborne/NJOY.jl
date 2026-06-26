@@ -248,7 +248,6 @@ function write_full_pendf(io::IO, result::NamedTuple;
                           mf6_xsi::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
                           mf6_emax::Dict{Int, Float64} = Dict{Int, Float64}(),
                           thermr_mts::Set{Int} = Set{Int}(),
-                          thermr_coh_ne::Int = -1,  # DEPRECATED unused after NJOY_jl-h61; removal tracked by NJOY_jl-czw
                           mf6_iel_nc::Dict{Int, Int} = Dict{Int, Int}(),  # MT → MF6 directory-NC quirk (iel ncdse, thermr.f90:1423)
                           mf1_header::Union{Mf1HeaderInfo,Nothing} = nothing)
     mf2 = result.mf2
