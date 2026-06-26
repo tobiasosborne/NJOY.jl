@@ -22,7 +22,7 @@
 # Channel radius constants (matching NJOY2016)
 const _RC1 = 0.123
 const _RC2 = 0.08
-const _THIRD = 1.0 / 3.0
+const _THIRD = 0.333333333  # Ref: reconr.f90:2877 (csmlbw) third=.333333333e0_kr — Fortran-TRUNCATED 1/3, NOT 1.0/3.0; channel radius ra=rc1*aw^third+rc2 must use this to match (NJOY_jl-4k2 trace)
 
 """
     cwaven_constant() -> Float64
