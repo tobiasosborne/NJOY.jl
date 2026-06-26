@@ -399,13 +399,19 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
         # are very close (duplicates encoding discontinuities), shade them to
         # sigfig(x, 7, -1) and sigfig(x, 7, +1) to prevent singularities.
         #
-        # Histogram shading (reconr.f90:2050-2064): for sections with histogram
-        # interpolation (like MF=12 photon multiplicities), each interior
-        # breakpoint is replaced by a shaded pair {sigfig(E,7,-1), sigfig(E,7,+1)}.
-        # This is a two-pass mechanism: first pass creates the lower shade,
-        # second pass (triggered when et==enl) creates the upper shade. Any
-        # existing grid point at the exact breakpoint energy is consumed.
-        is_histogram = any(l == Histogram for l in tab.interp.law)
+        # Histogram shading (reconr.f90:2049-2064): a breakpoint is replaced by a
+        # shaded pair {sigfig(E,7,-1), sigfig(E,7,+1)} ONLY when it lies in a
+        # histogram (INT=1) interpolation region. Fortran's label 250 guards this
+        # with `if (inta.ne.1) go to 255` (reconr.f90:2051), where `inta` is the
+        # interpolation law of the ENDF region containing the current point
+        # (set at reconr.f90:2019-2023 / 2076-2080). For a MIXED-law section the
+        # log-log breakpoints must NOT be shaded: e.g. Zn-67 MT107 has
+        # NBT/INT = 70/5, 99/1, 190/5 (log-log / histogram / log-log) with an
+        # explicit log-log breakpoint at 1.308720e-5. Shading that point into a
+        # {sigfig(-1),sigfig(+1)} pair (Δ≈2e-11) seeds a tiny panel that the
+        # resonance reconstruction (resxs / adaptive_reconstruct) then over-
+        # refines via its step-ratio guard — the +1096-point T42 grid blow-up.
+        has_histogram = any(l == Histogram for l in tab.interp.law)
         shaded_energies = Float64[]
 
         for k in start_k:npts
@@ -440,8 +446,9 @@ function lunion_grid(mf3_sections::Vector{MF3Section}, err::Float64;
                 if k < npts && abs(work_x[k+1] - shaded_up) < 1.0e-9 * shaded_up
                     work_x[k] = shaded_up
                 end
-            elseif is_histogram && k > start_k && k < npts
-                # Histogram interior breakpoint → shaded pair
+            elseif has_histogram && k > start_k && k < npts &&
+                   _inta_for_point(tab, k) == Histogram
+                # Histogram interior breakpoint (Fortran inta==1) → shaded pair
                 push!(grid, round_sigfig(e, 7, -1))
                 push!(grid, round_sigfig(e, 7, +1))
                 push!(shaded_energies, e)
@@ -805,6 +812,24 @@ Return the interpolation law for interval `idx` in the tabulated function.
 function _law_for_interval(tab::TabulatedFunction, idx::Int)
     for r in eachindex(tab.interp.nbt)
         idx < tab.interp.nbt[r] && return tab.interp.law[r]
+    end
+    return tab.interp.law[end]
+end
+
+"""
+    _inta_for_point(tab, k)
+
+Return the interpolation law of the ENDF region *containing point `k`* — the
+direct analogue of Fortran lunion's `inta` for breakpoint index `ir`
+(reconr.f90:2019-2023, 2076-2080): `inta = INT[jr]` for the smallest region `jr`
+with `k <= NBT[jr]`. This differs from `_law_for_interval` (which uses
+`idx < NBT[r]`, i.e. the law of the interval *starting* at `idx`): `inta`
+governs the histogram-discontinuity shading test at label 250
+(`if (inta.ne.1) go to 255`, reconr.f90:2051).
+"""
+function _inta_for_point(tab::TabulatedFunction, k::Int)
+    for r in eachindex(tab.interp.nbt)
+        k <= tab.interp.nbt[r] && return tab.interp.law[r]
     end
     return tab.interp.law[end]
 end
