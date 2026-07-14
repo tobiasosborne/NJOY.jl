@@ -56,10 +56,13 @@ function _write_reconr_mat_block(io::IO, result::NamedTuple, mat::Int, err::Floa
     for sec in result.mf3_sections
         mt_mf[Int(sec.mt)] = Int(sec.mf)
     end
+    photon_sections = hasproperty(result, :photon_sections) ? result.photon_sections :
+                      NamedTuple[]
 
     _write_legacy_mf1(io, mf2, actual_mat, err, 0.0, length(result.energies), reactions, ns;
-                      mt_to_mf=mt_mf)
+                      mt_to_mf=mt_mf, photon_sections=photon_sections)
     _write_legacy_mf2(io, mf2, actual_mat, ns)
     _write_legacy_mf3(io, result, actual_mat, reactions, ns)
+    _write_legacy_photons(io, actual_mat, mf2, photon_sections)
     _write_fend_zero(io, 0)  # MEND
 end

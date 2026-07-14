@@ -7368,6 +7368,9 @@ using LinearAlgebra
 
 end  # @testset "NJOY.jl"
 
+# Fast Fortran-line regression for RECONR photon threshold/eligibility logic.
+include("validation/test_reconr_photon_threshold.jl")
+
 # Integration tests against NJOY2016 reference outputs (separate file)
 include("integration_tests.jl")
 

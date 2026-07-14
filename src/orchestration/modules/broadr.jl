@@ -316,6 +316,9 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
             push!(mf3_order, sec.mt)
             mf3_lines[sec.mt] = sec.lines
         end
+        # BROADR copies every non-MF3 section unchanged (apart from MF2/MT152's
+        # temperature update above). Ref: broadr.f90:862-881,989-999.
+        passthrough = [sec for sec in src_mat.sections if sec.mf != 2 && sec.mf != 3]
 
         broadened_mts = Set{Int}()
         if !isempty(temp_results)
@@ -338,6 +341,9 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
             for mt3 in mf3_order
                 nc = mt3 in broadened_mts ? 3 + cld(b_np, 3) : _count_data_lines(mf3_lines[mt3])
                 push!(dir_entries, (3, mt3, nc, 0))
+            end
+            for sec in passthrough
+                push!(dir_entries, (sec.mf, sec.mt, _count_data_lines(sec.lines), 0))
             end
             nxc = length(dir_entries) + 1
             nwd = length(descriptions)
@@ -415,6 +421,23 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
                 _write_send(io, mat, 3)
             end
             _write_fend_zero(io, mat)
+
+            # Copy MF10/MF12/MF13/etc. verbatim, regenerating only identifiers
+            # and sequence numbers. MF14 is absent because RECONR omitted it.
+            copied_mf = 0
+            for sec in passthrough
+                copied_mf != 0 && sec.mf != copied_mf && _write_fend_zero(io, mat)
+                copied_mf = sec.mf
+                ns[] = 1
+                for li in 1:_count_data_lines(sec.lines)
+                    p = rpad(sec.lines[li], 80)
+                    @printf(io, "%s%4d%2d%3d%5d\n",
+                            p[1:66], mat, sec.mf, sec.mt, ns[])
+                    ns[] += 1
+                end
+                _write_send(io, mat, sec.mf)
+            end
+            copied_mf != 0 && _write_fend_zero(io, mat)
             # MEND (MAT=0): end of material block for this temperature
             @printf(io, "%66s%4d%2d%3d%5d\n", "", 0, 0, 0, 0)
         end

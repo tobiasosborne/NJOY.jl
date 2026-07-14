@@ -232,6 +232,14 @@ function reconr(endf_file::AbstractString;
         # Read MF=23 sections early (needed for the no-resonance path below)
         mf23_sections = read_mf23_sections(io, actual_mat)
 
+        # Photon totals participate in lunion even for LRU=0 materials.
+        # MF12 keeps only LO=1 and the first TAB1; MF13 likewise keeps its
+        # first (total) TAB1. Ref: reconr.f90:597-605,1868-1881.
+        mf12_sections = read_mf12_lo1_sections(io, actual_mat)
+        mf13_sections = read_mf13_sections(io, actual_mat)
+        photon_inputs = _eligible_photon_sections(
+            vcat(mf12_sections, mf13_sections), mf23_sections)
+
         # Handle materials with no resonances (LRU=0 only, e.g. H-2)
         if (isinf(eresl) || eresh == 0.0) && rml_data === nothing
             # For photoatomic materials (MF=23 only, no MF=3), use MF=23 sections
@@ -307,7 +315,8 @@ function reconr(endf_file::AbstractString;
             end
 
             # Standard LRU=0 path (neutron, e.g. H-2, C-nat)
-            all_energies = lunion_grid(mf3_sections, err;
+            all_lunion_sections = vcat(mf3_sections, photon_inputs)
+            all_energies = lunion_grid(all_lunion_sections, err;
                                        awr=mf2.AWR)
 
             n_pts = length(all_energies)
@@ -320,9 +329,12 @@ function reconr(endf_file::AbstractString;
             fission_arr = [xs.fission for xs in merged_xs]
             capture_arr = [xs.capture for xs in merged_xs]
 
+            photon_sections = _reconstruct_photon_sections(
+                photon_inputs, all_energies)
             return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                     fission=fission_arr, capture=capture_arr,
-                    mf2=mf2, mf3_sections=mf3_sections)
+                    mf2=mf2, mf3_sections=mf3_sections,
+                    photon_sections=photon_sections)
         end
 
         # Build unresolved XS table FIRST (needed for lunion grid + xs_fn)
@@ -355,16 +367,6 @@ function reconr(endf_file::AbstractString;
             end
         end
 
-        # Read MF=12 LO=1 sections (photon multiplicities) — Fortran lunion
-        # processes these alongside MF=3 (reconr.f90:1868,1878-1881).
-        # Their breakpoints contribute to the union grid and histogram
-        # interpolation triggers shading at shared breakpoints.
-        mf12_sections = read_mf12_lo1_sections(io, actual_mat)
-
-        # Read MF=13 sections (photon production cross sections) — Fortran
-        # lunion processes these alongside MF=3 (reconr.f90:1868,1880).
-        mf13_sections = read_mf13_sections(io, actual_mat)
-
         # Read MF=10 sections (radioactive production cross sections) — Fortran
         # lunion processes these alongside MF=3 (reconr.f90:1868).
         mf10_sections = read_mf10_sections(io, actual_mat)
@@ -376,7 +378,8 @@ function reconr(endf_file::AbstractString;
         if urr_table !== nothing
             append!(mf2_nodes, urr_table.energies)
         end
-        all_lunion_sections = vcat(mf3_sections, mf10_sections, mf12_sections, mf13_sections, mf23_sections)
+        all_lunion_sections = vcat(mf3_sections, mf10_sections,
+                                   photon_inputs, mf23_sections)
         # Fortran: if (eresr.lt.elim) elim=eresr (reconr.f90:1811)
         elim = min(0.99e6, eresr > 0.0 ? eresr : 0.99e6)
         bg_grid = lunion_grid(all_lunion_sections, err;
@@ -499,14 +502,79 @@ function reconr(endf_file::AbstractString;
         # Gated on MF10 presence: TENDL Hf-177 (MAT=7234) has MF10; almost all
         # other evaluations do not, so this is a no-op for them.
         mf10_subsections = _reconstruct_mf10(io, actual_mat, all_energies)
+        photon_sections = _reconstruct_photon_sections(
+            photon_inputs, all_energies)
 
         return (energies=all_energies, total=total_arr, elastic=elastic_arr,
                 fission=fission_arr, capture=capture_arr,
                 mf2=mf2, mf3_sections=mf3_sections,
                 reaction_xs=reaction_xs,
                 urr_table=urr_table, urr_lssf=urr_lssf,
-                mf10_subsections=mf10_subsections)
+                mf10_subsections=mf10_subsections,
+                photon_sections=photon_sections)
     end
+end
+
+"""Apply lunion's photon-section skips before grid construction and emerge.
+
+MT460/501 are always redundant; MT522 is redundant when MF23 subshell
+sections MT534-572 exist. Ref: reconr.f90:596-616,1875-1877.
+"""
+function _eligible_photon_sections(sections, mf23_sections)
+    has_subshells = any(sec -> 534 <= Int(sec.mt) <= 572, mf23_sections)
+    filter(sections) do sec
+        mt = Int(sec.mt)
+        mt != 460 && mt != 501 && !(mt == 522 && has_subshells)
+    end
+end
+
+"""Reconstruct MF12/MF13 total TAB1s on RECONR's union grid.
+
+Mirrors `emerge`: `gety1` evaluation, `sigfig(7,0)`, and output beginning one
+grid point before the first positive value (reconr.f90:4769-4838,4918-4937).
+"""
+function _reconstruct_photon_sections(sections, union_grid::Vector{Float64})
+    out = NamedTuple[]
+    for sec in sections
+        # Evaluate the scratch TAB1 written by lunion, not the source TAB1.
+        # Negative-Q thresholds replace x[1] with thrxx and cascade later
+        # non-increasing energies upward. Ref: reconr.f90:1911-1943.
+        scratch_x = copy(sec.tab.x)
+        physical_threshold = sec.QI < 0.0 ?
+            (sec.awr > 0.0 ? -sec.QI * (sec.awr + 1.0) / sec.awr : -sec.QI) : 0.0
+        if physical_threshold > 0.0
+            thrxx = round_sigfig(physical_threshold, 7, +1)
+            if scratch_x[1] < thrxx
+                scratch_x[1] = thrxx
+                i = 1; adjusted = 0
+                while i < length(scratch_x) && scratch_x[i + 1] <= scratch_x[i]
+                    adjusted > 10 && error(
+                        "reconr photon MF=$(sec.mf)/MT=$(sec.mt): ill-behaved threshold")
+                    scratch_x[i + 1] = round_sigfig(scratch_x[i], 7, +1)
+                    i += 1; adjusted += 1
+                end
+            end
+        end
+        scratch = TabulatedFunction(sec.tab.interp, scratch_x, sec.tab.y)
+        threshold = round_sigfig(scratch.x[1], 7, 0)
+        es = Float64[]; ys = Float64[]
+        for e in union_grid
+            threshold - e > 1.0e-10 * threshold && continue
+            y = threshold > 1.0 && abs(threshold - e) < 1.0e-10 * threshold ?
+                0.0 : interpolate(scratch, e)
+            push!(es, e); push!(ys, round_sigfig(y, 7, 0))
+        end
+        first_positive = findfirst(>(0.0), ys)
+        if first_positive !== nothing && first_positive > 1
+            first = first_positive - 1
+            es = es[first:end]; ys = ys[first:end]
+        end
+        push!(out, (mf=Int(sec.mf), mt=Int(sec.mt), qm=sec.QM, qi=sec.QI,
+                    za=sec.za, awr=sec.awr, head_l2=Int(sec.L2),
+                    l1=Int(sec.tab_l1), l2=Int(sec.LR),
+                    energies=es, xs=ys))
+    end
+    out
 end
 
 # ==========================================================================

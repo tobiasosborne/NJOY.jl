@@ -117,11 +117,13 @@ function write_pendf(io::IO, result::NamedTuple;
     # Gated: empty for all non-activation evaluations (Hf-177 MAT=7234 only).
     mf10_subs = hasproperty(result, :mf10_subsections) ? result.mf10_subsections :
                 NamedTuple[]
+    photon_sections = hasproperty(result, :photon_sections) ? result.photon_sections :
+                      NamedTuple[]
 
     # MF1/MT451 — directory must include the MF10 sections when present.
     _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
                       mt_to_mf=mt_mf, descriptions=descriptions, urr_table=urr_tab,
-                      mf10_subs=mf10_subs)
+                      mf10_subs=mf10_subs, photon_sections=photon_sections)
 
     # MF2/MT151 + MT152 (if URR data exists)
     _write_legacy_mf2(io, mf2, actual_mat, ns;
@@ -132,6 +134,9 @@ function write_pendf(io::IO, result::NamedTuple;
 
     # MF10/MT sections (radioactive nuclide production), gated on presence.
     _write_legacy_mf10(io, actual_mat, mf2, mf10_subs)
+
+    # MF12/MF13 totals reconstructed by lunion/emerge; MF14 is intentionally absent.
+    _write_legacy_photons(io, actual_mat, mf2, photon_sections)
 
     # MEND and TEND (NS=0 matching Fortran)
     _write_fend_zero(io, 0)   # MEND: MAT=0, MF=0, MT=0, NS=0
@@ -931,14 +936,16 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                             mt_to_mf::Dict{Int,Int}=Dict{Int,Int}(),
                             descriptions::Vector{String}=String[],
                             urr_table=nothing,
-                            mf10_subs=NamedTuple[])
+                            mf10_subs=NamedTuple[],
+                            photon_sections=NamedTuple[])
     ns[] = 1
     has_mt152 = urr_table !== nothing
     # Per-MT MF10 directory entries: one entry per MT (NC counts all of its
     # sub-sections together, Fortran emerge ncs accumulation reconr.f90:4919-4923).
     mf10_nc = _mf10_dir_nc(mf10_subs)   # MT => NC line count
     # NXC = self-ref + MT151 [+ MT152] + MF3 sections + MF10 sections
-    nxc = 2 + length(reactions) + (has_mt152 ? 1 : 0) + length(mf10_nc)
+    nxc = 2 + length(reactions) + (has_mt152 ? 1 : 0) + length(mf10_nc) +
+          length(photon_sections)
     nwd = length(descriptions)
 
     _write_cont_line(io, mf2.ZA, mf2.AWR, 2, 0, 0, 0,
@@ -970,8 +977,48 @@ function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
     for mt in sort(collect(keys(mf10_nc)))
         _write_cont_line(io, 0.0, 0.0, 10, mt, mf10_nc[mt], 0, Int(mat), 1, 451, ns)
     end
+    for sec in sort(photon_sections; by=s -> (s.mf, s.mt))
+        nc = 3 + cld(length(sec.energies), 3)
+        _write_cont_line(io, 0.0, 0.0, sec.mf, sec.mt, nc, 0, Int(mat), 1, 451, ns)
+    end
 
     _write_send(io, Int(mat), 1)
+    _write_fend_zero(io, Int(mat))
+end
+
+"""Write reconstructed total MF12/MF13 TAB1 sections.
+
+Ref: `lunion` forces NK=1 and `recout` copies the linearized scratch sections
+(reconr.f90:1878-1881,4918-4937,5424-5433).
+"""
+function _write_legacy_photons(io::IO, mat::Int32, mf2::MF2Data, sections)
+    isempty(sections) && return
+    current_mf = 0
+    for sec in sort(sections; by=s -> (s.mf, s.mt))
+        current_mf != 0 && sec.mf != current_mf && _write_fend_zero(io, Int(mat))
+        current_mf = sec.mf
+        ns = Ref(1); np = length(sec.energies)
+        # MF12 HEAD retains LO=1; both files advertise only the total TAB1.
+        section_za = sec.za > 0.0 ? sec.za : mf2.ZA
+        section_awr = sec.awr > 0.0 ? sec.awr : mf2.AWR
+        head_l1 = sec.mf == 12 ? 1 : 0
+        head_l2 = sec.mf == 12 ? sec.head_l2 : 0
+        _write_cont_line(io, section_za, section_awr, head_l1, head_l2, 1, 0,
+                         Int(mat), sec.mf, sec.mt, ns)
+        # emerge overwrites only NR/NP and interpolation; TAB1 L1/L2 survive.
+        # Ref: reconr.f90:4924-4937.
+        _write_cont_line(io, sec.qm, sec.qi, sec.l1, sec.l2, 1, np,
+                         Int(mat), sec.mf, sec.mt, ns)
+        @printf(io, "%11d%11d%44s%4d%2d%3d%5d\n",
+                np, 2, "", Int(mat), sec.mf, sec.mt, ns[])
+        ns[] += 1
+        data = Float64[]
+        for i in 1:np
+            push!(data, sec.energies[i], sec.xs[i])
+        end
+        _write_data_values(io, data, Int(mat), sec.mf, sec.mt, ns; pair_data=true)
+        _write_send(io, Int(mat), sec.mf)
+    end
     _write_fend_zero(io, Int(mat))
 end
 

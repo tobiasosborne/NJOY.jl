@@ -58,9 +58,10 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 91 (2026-06-26)
+## Current state — Phase 92 (2026-07-14)
 
-The committed post-Phase-91 sweep ran all 86 reference tests in 93.2 minutes:
+The latest full sweep remains the committed post-Phase-91 run of all 86
+reference tests in 93.2 minutes:
 
 | Status | Count |
 |---|---:|
@@ -77,6 +78,25 @@ Bit-identical full tests: T03, T09, T22, T50, T52, T53, T61, T62, and T86.
 Numeric-pass tests under the sweep's configured tolerance ladder: T01, T33,
 T54, and T80. Read the per-tape tolerance columns in
 `reports/REFERENCE_SWEEP.md`; `NUMERIC_PASS` does not by itself mean `1e-7`.
+
+Phase 92 closed two orchestration milestones:
+
+- Live documentation and Beads state were reconciled. The pre-cleanup HANDOFF
+  and design document are preserved verbatim in their archive directories;
+  README, HANDOFF, architecture, design, tutorial, and API docs now describe
+  the tape-first implementation and current oracle pin.
+- `NJOY_jl-2k4`: RECONR now unionizes the first total MF12 `LO=1` and MF13
+  TAB1 records even on the LRU=0 path, writes `NK=1` lin-lin sections, and
+  BROADR preserves non-MF2/MF3 sections. T45 photon bodies match the oracle
+  exactly in columns 1-66: MF12/102 NP=1014, MF13/4 NP=360, MF13/103 NP=228;
+  directory NC values are 341/123/79 and MF14 remains intentionally absent.
+  The focused regression passes 7/7, T84 preserves its nonzero MF12 TAB1
+  metadata exactly, the negative-Q/eligibility unit regression passes 6/6,
+  and T50/T52/T53/T61/T62 remain bit-identical.
+
+The full T45 tape is still structurally short by three MF1 records
+(7185 versus 7188); that separate metadata problem is `NJOY_jl-1kf`. No full
+Phase-92 sweep was run, so the status table above is not a new sweep claim.
 
 Phase 91 landed three milestones:
 
@@ -110,13 +130,14 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 91 follow-ups:
+Immediate Phase 92 follow-ups:
 
-- **`NJOY_jl-2k4` (in progress):** reproduce RECONR's total-photon processing:
-  keep the first MF12 `LO=1` and MF13 TAB1 records, unionize them onto the final
-  grid, emit `NK=1` lin-lin sections, and preserve them through BROADR/GASPR.
-  MF14 is intentionally absent from the PENDF. T45 B-10 tape40 is the oracle;
-  regression-gate the ACER BI cohort.
+- **`NJOY_jl-1kf` (open):** reproduce T45's final TPID/MF1/MT451 ownership and
+  three missing metadata records. Photon sections and their directory tuples
+  are already exact; keep this follow-up isolated from `NJOY_jl-2k4`.
+- **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
+  section bodies but currently default MOD to zero; retain incoming nonzero MOD
+  values from MF1/MT451 in a separately oracle-driven change.
 - **`NJOY_jl-c9f` (open, researched):** trace the 4–5 interior MF3/MT222
   incoherent-elastic values off by at most `4e-7` in T69/T74. The three-point
   Lagrange loop matches Fortran; instrument T69 first and inspect upstream
@@ -132,6 +153,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 92 | 2026-07-14 | Stale docs/Beads reconciled; T45 MF12/MF13 totals unionized and preserved exactly | `phase92_staleness_t45_photons.md` |
 | 91 | 2026-06-26 | `_THIRD` and mixed-law lunion shading fixed; dead THERMR field removed; sweep refreshed | `phase91_reconr_third_lunion_shading.md` |
 | 90 | 2026-06-20 | BROADR thermal MT1 rebuilt from widened, deduplicated broadened partials | `phase90_e5n_broadr_mt1_partials.md` |
 | 89 | 2026-06-19 | Dense Bragg grid fixed and accelerated; free-gas cutoff corrected | `phase89_thermr_grid_freegas_e5n.md` |
