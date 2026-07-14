@@ -1,18 +1,56 @@
-# Tutorial: Processing U-238 from ENDF to ACE
+# Tutorial: Deck execution and low-level U-238 processing
 
-This tutorial walks through the complete NJOY.jl processing chain for U-238,
-starting from an ENDF-6 evaluated data file and producing an ACE library
-suitable for MCNP continuous-energy transport.
+NJOY.jl has two related interfaces:
 
-The pipeline mirrors the classic NJOY2016 sequence
-RECONR -> BROADR -> HEATR -> ACER, but expressed as composable Julia
-function calls instead of card-image input decks.
+- `run_njoy` is the canonical, NJOY-compatible interface. It executes a
+  card-image input deck and passes data between module wrappers through tape
+  files.
+- Functions such as `reconstruct`, `doppler_broaden`, and `build_ace` expose
+  processing kernels for focused analysis and direct Julia use.
+
+Reference-test equivalence is established through the first interface. The
+U-238 walkthrough later in this page demonstrates the second interface; it is
+not a substitute for all of the tape-copying, header, directory, and option
+semantics of a complete NJOY deck.
 
 ## Prerequisites
 
 ```julia
 using NJOY
 ```
+
+## Execute an NJOY input deck
+
+Place the deck and its input tapes where the deck's unit numbers can be
+resolved, then execute it in a dedicated work directory:
+
+```julia
+using NJOY
+
+tapes = run_njoy("path/to/input"; work_dir="work/njoy-run")
+
+# Resolve an output unit named by the deck.
+output_path = resolve(tapes, 25)
+println("tape25: ", output_path)
+```
+
+`run_njoy` parses module calls in deck order. Each `<module>_module` wrapper
+reads its declared input tape or tapes and writes its output tape. Output unit
+25 above is only an example; use the unit numbers in the deck being executed.
+
+For the checked-in NJOY reference problems, the test directory's
+`CMakeLists.txt` maps resource files to input units. For example:
+
+```julia
+tapes = run_njoy("njoy-reference/tests/01/input";
+                 work_dir="/tmp/njoy-t01")
+println(resolve(tapes, 25))
+```
+
+The validation harness uses this same deck/tape path and compares every
+produced tape with the Fortran reference.
+
+## Low-level U-238 kernel walkthrough
 
 You will need an ENDF-6 file for U-238. The standard distribution is
 `n-092_U_238.endf` from the ENDF/B-VIII.0 library.
@@ -31,6 +69,7 @@ pendf = reconstruct(endf_file; err=0.001)
 ```
 
 The return value is a `PointwiseMaterial` containing:
+
 - `pendf.energies` -- energy grid in eV
 - `pendf.cross_sections` -- matrix of shape (n_energies, n_reactions)
 - `pendf.mt_list` -- reaction identifiers: `[1, 2, 18, 102]`
@@ -212,9 +251,9 @@ open("u238.pendf", "w") do io
 end
 ```
 
-## Complete script
+## Complete low-level script
 
-Putting it all together:
+Putting the direct processing-kernel calls together:
 
 ```julia
 using NJOY
@@ -248,10 +287,11 @@ println("  Grid points: ", length(pendf_T.energies))
 println("  Reactions: ", pendf_T.mt_list)
 ```
 
-## Additional processing modules
+## Additional low-level processing APIs
 
-Beyond the basic RECONR -> BROADR -> HEATR -> ACER chain shown above,
-NJOY.jl provides several additional processing capabilities:
+Beyond the kernel calls shown above, NJOY.jl provides additional processing
+APIs. Their corresponding NJOY module wrappers are exercised through
+`run_njoy` when faithful deck and tape behavior is required.
 
 ### Thermal scattering (THERMR)
 

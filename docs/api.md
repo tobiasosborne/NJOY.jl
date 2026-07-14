@@ -1,7 +1,108 @@
 # API Reference
 
-Complete reference for all exported functions and types in NJOY.jl, organized
+Reference for the principal exported functions and types in NJOY.jl, organized
 by module.
+
+The canonical NJOY-compatible interface is `run_njoy`, which executes an input
+deck and connects module wrappers through numbered tape files. The processing
+functions documented in later sections are also available directly for
+focused analysis and testing, but a sequence of direct calls does not replace
+all deck, tape, header, and section-copying semantics of the module wrappers.
+
+---
+
+## Deck and tape orchestration
+
+### Execute a deck
+
+#### `run_njoy`
+
+```julia
+run_njoy(input_path; work_dir=mktempdir(), verbose=false, progress=nothing)
+    -> TapeManager
+```
+
+Parse and execute an NJOY card-image input deck. Module calls run in deck
+order, and each wrapper resolves its input and output units through the
+returned `TapeManager`.
+
+```julia
+tapes = run_njoy("njoy-reference/tests/01/input";
+                 work_dir="/tmp/njoy-t01")
+println(resolve(tapes, 25))
+```
+
+Reference-test fidelity is measured on the tape files produced by this path.
+
+#### `parse_njoy_input`
+
+```julia
+parse_njoy_input(input_path) -> NJOYInputDeck
+```
+
+Parse a deck without executing it. `NJOYInputDeck.calls` contains ordered
+`ModuleCall` values. Each call retains tokenized cards and verbatim deck lines
+for modules whose empty-card or delimiter semantics cannot be reconstructed
+from tokens alone.
+
+### Tape resolution
+
+#### `TapeManager`
+
+```julia
+struct TapeManager
+    unit_to_path::Dict{Int,String}
+    work_dir::String
+end
+```
+
+Maps Fortran logical-unit numbers to file paths. Unit signs are normalized by
+absolute value; an unregistered unit resolves to `work_dir/tapeNN`.
+
+#### `build_tape_manager`
+
+```julia
+build_tape_manager(work_dir, input_path) -> TapeManager
+```
+
+Create a tape manager and discover checked-in reference resources from the
+input deck's test directory and `CMakeLists.txt` mappings.
+
+#### `resolve` and `register!`
+
+```julia
+resolve(tapes::TapeManager, unit::Int) -> String
+register!(tapes::TapeManager, unit::Int, path::String)
+```
+
+Resolve a unit to a path or associate a unit with an explicit path.
+
+### Orchestration PENDF representation
+
+#### `PENDFTape`, `PENDFMaterial`, and `PENDFSection`
+
+These types hold a structured in-memory view of a PENDF tape while one module
+processes it. They do not replace the file boundary between module wrappers.
+
+```julia
+read_pendf(path) -> PENDFTape
+write_pendf_tape(path, tape::PENDFTape)
+extract_mf3(tape, mat, mt)
+extract_mf3_all(tape, mat)
+copy_with_modifications(tape, mat; ...) -> PENDFTape
+```
+
+`copy_with_modifications` supports the common NJOY pattern of copying an input
+PENDF while replacing or adding selected sections.
+
+### Transitional assembly API
+
+`RunContext` and `final_assembly!` are currently exported but are transitional
+dispatcher plumbing, not recommended user APIs. They collect selected
+RECONR/BROADR/HEATR/THERMR results to rebuild some final PENDF tapes. New module
+implementations should communicate through their declared tape inputs and
+outputs instead of adding fields or side channels to this context. See
+[`architecture.md`](architecture.md#current-transitional-exceptions).
 
 ---
 
