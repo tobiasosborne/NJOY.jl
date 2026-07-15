@@ -93,7 +93,8 @@ Serial regression canaries:
   not crash.
 - T50, T52, T53, T61, and T62 remained `BIT_IDENTICAL` at `1e-9`.
 
-No full 86-test sweep was run.
+At the time the implementation milestone was committed, no full 86-test sweep
+had been run. The post-commit baseline below closes that gap.
 
 ## Residual split
 
@@ -105,3 +106,31 @@ exact, so this was split into `NJOY_jl-1kf` rather than expanding `2k4`.
 Final review also noted that BROADR passthrough directory entries default MOD
 to zero. T45's relevant MOD values are zero and the section bodies are exact;
 preserving nonzero incoming MOD is tracked separately as `NJOY_jl-6lg`.
+
+## Post-Phase-92 full-sweep baseline
+
+A clean serial sweep at `a7b9335`, after clearing the Julia 1.12 NJOY
+precompile cache, completed all 86 test slots in **3311.7 seconds (55.2 min)**.
+It used the documented default 300-second per-test hard timeout.
+
+| Status | Count |
+|---|---:|
+| `BIT_IDENTICAL` | 9 |
+| `NUMERIC_PASS` | 4 |
+| `DIFFS` | 71 |
+| `STRUCTURAL_FAIL` | 0 |
+| `MISSING_TAPE` | 0 |
+| `NO_REFERENCE` | 1 |
+| `CRASH` | 0 |
+| `TIMEOUT` | 1 |
+
+All 9 bit-identical tests (T03, T09, T22, T50, T52, T53, T61, T62, T86)
+and all 4 numeric-pass tests (T01, T33, T54, T80) were preserved. The Phase-92
+photon work is visible in the generated baseline: T45 now emits 7185 of 7188
+oracle lines (previously 6634), while T84 emits 1112 of 1115 (previously 849).
+
+T17 was the sole timeout: the 300-second interrupt landed at the next yield in
+ERRORR, for 311.8 seconds observed elapsed time. Its partial tape comparisons
+match the Phase-91 results; Phase 91 needed 612.9 seconds to complete it as an
+ordinary `DIFFS`. This is therefore recorded as the default-sweep performance
+blocker `NJOY_jl-5tu`, not as a new fidelity regression.

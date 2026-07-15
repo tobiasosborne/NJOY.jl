@@ -58,21 +58,22 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 92 (2026-07-14)
+## Current state — Phase 92 (2026-07-15)
 
-The latest full sweep remains the committed post-Phase-91 run of all 86
-reference tests in 93.2 minutes:
+The latest full sweep is the clean post-Phase-92 run of all 86 reference tests
+at `a7b9335`, using the documented default 300-second per-test timeout. It
+completed in 55.2 minutes:
 
 | Status | Count |
 |---|---:|
 | `BIT_IDENTICAL` | 9 |
 | `NUMERIC_PASS` | 4 |
-| `DIFFS` | 72 |
+| `DIFFS` | 71 |
 | `STRUCTURAL_FAIL` | 0 |
 | `MISSING_TAPE` | 0 |
 | `NO_REFERENCE` | 1 |
 | `CRASH` | 0 |
-| `TIMEOUT` | 0 |
+| `TIMEOUT` | 1 |
 
 Bit-identical full tests: T03, T09, T22, T50, T52, T53, T61, T62, and T86.
 Numeric-pass tests under the sweep's configured tolerance ladder: T01, T33,
@@ -95,8 +96,16 @@ Phase 92 closed two orchestration milestones:
   and T50/T52/T53/T61/T62 remain bit-identical.
 
 The full T45 tape is still structurally short by three MF1 records
-(7185 versus 7188); that separate metadata problem is `NJOY_jl-1kf`. No full
-Phase-92 sweep was run, so the status table above is not a new sweep claim.
+(7185 versus 7188); that separate metadata problem is `NJOY_jl-1kf`. The sweep
+confirms the Phase-92 photon gain: T45 moved from 6634 to 7185 generated lines,
+and T84 from 849 to 1112 against 1115 oracle lines. The 9 bit-identical and 4
+numeric-pass tests were preserved.
+
+T17 is the only timeout. It reached ERRORR and was interrupted at the next
+yield after the 300-second limit (311.8 seconds observed). Its partial tape
+comparisons are unchanged from Phase 91, when the same deck completed in 612.9
+seconds under a longer allowance, so this is a default-sweep performance gate
+rather than a fidelity regression. Track it as `NJOY_jl-5tu`.
 
 Phase 91 landed three milestones:
 
@@ -132,6 +141,8 @@ merely because an old HANDOFF snapshot calls it open.
 
 Immediate Phase 92 follow-ups:
 
+- **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
+  300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
 - **`NJOY_jl-1kf` (open):** reproduce T45's final TPID/MF1/MT451 ownership and
   three missing metadata records. Photon sections and their directory tuples
   are already exact; keep this follow-up isolated from `NJOY_jl-2k4`.
