@@ -58,7 +58,45 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 92 (2026-07-15)
+## Current state — Phase 93 (2026-07-15)
+
+The post-Phase-93 full sweep covers all 86 reference tests at the pinned
+Fortran oracle and the documented 300-second per-test timeout. It completed in
+56.0 minutes:
+
+| Status | Count |
+|---|---:|
+| `BIT_IDENTICAL` | 11 |
+| `NUMERIC_PASS` | 5 |
+| `DIFFS` | 68 |
+| `STRUCTURAL_FAIL` | 0 |
+| `MISSING_TAPE` | 0 |
+| `NO_REFERENCE` | 1 |
+| `CRASH` | 0 |
+| `TIMEOUT` | 1 |
+
+Bit-identical full tests are T03, T09, T22, T50, T52, T53, T61, T62,
+**T81, T84**, and T86. Numeric-pass tests are T01, T33, T54, T80, and
+**T85**; inspect the per-tape tolerance columns because T85 currently passes
+at `1e-5`, not the first-round `1e-7` floor.
+
+Phase 93 closed two direct-RECONR defects:
+
+- `NJOY_jl-gkw`: direct PENDF output now carries the full source-derived
+  ENDF-6 MF1 header, canonical blank description, per-section directory NC,
+  source ZA/AWR, faithful redundant L2/source LR, and signed-`npend` sequence
+  behavior. T81 moved from 2/45,369 aligned records to **45,372/45,372 BI**;
+  T84 moved from 2/1,112 to **1,115/1,115 BI**.
+- `NJOY_jl-rhm`: unresolved MT152 totals remain independent after background
+  addition and the sixth payload value copies total rather than elastic.
+  T85 is structurally exact and now NUMERIC_PASS with seven residual lines.
+
+T83's remaining `csunr2`/downstream-grid cluster is `NJOY_jl-fod`. T85's
+six-node last-digit grind is `NJOY_jl-c33`. T17 remains the sole timeout and
+again reached ERRORR before the 300-second cap. See
+`worklog/phase93_reconr_direct_pendf.md`.
+
+### Prior Phase 92 context
 
 The latest full sweep is the clean post-Phase-92 run of all 86 reference tests
 at `a7b9335`, using the documented default 300-second per-test timeout. It
@@ -139,10 +177,15 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 92 follow-ups:
+Immediate Phase 93 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
+- **`NJOY_jl-fod` (open):** match T83's `csunr2` accumulation/state-machine
+  and downstream grid propagation. Direct serialization and MT152 packing are
+  already faithful; start at tape50 line 103.
+- **`NJOY_jl-c33` (open):** eliminate T85's seven-line MT152 numerical
+  residual and reach at least the `1e-7` first-round floor.
 - **`NJOY_jl-1kf` (open):** reproduce T45's final TPID/MF1/MT451 ownership and
   three missing metadata records. Photon sections and their directory tuples
   are already exact; keep this follow-up isolated from `NJOY_jl-2k4`.
@@ -164,6 +207,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 93 | 2026-07-15 | T81/T84 bit-identical; T85 numeric; direct RECONR serialization and MT152 layout fixed | `phase93_reconr_direct_pendf.md` |
 | 92 | 2026-07-14 | Stale docs/Beads reconciled; T45 MF12/MF13 totals unionized and preserved exactly | `phase92_staleness_t45_photons.md` |
 | 91 | 2026-06-26 | `_THIRD` and mixed-law lunion shading fixed; dead THERMR field removed; sweep refreshed | `phase91_reconr_third_lunion_shading.md` |
 | 90 | 2026-06-20 | BROADR thermal MT1 rebuilt from widened, deduplicated broadened partials | `phase90_e5n_broadr_mt1_partials.md` |
@@ -240,6 +284,10 @@ The Fortran module files in `njoy-reference/src/` are the architecture map:
     use a six-by-eleven-character parse when a structural claim looks absurd.
 15. Read `err` from each reference input deck; historical tables have been
     wrong.
+16. Positive RECONR `npend` carries NS across copied sections/files, but a
+    computed redundant section still writes `SEND=99999` and restarts NS.
+17. MF2/MT152 stores total independently from elastic+fission+capture; its
+    sixth per-energy value is a copy of total.
 
 ## Test workflow
 

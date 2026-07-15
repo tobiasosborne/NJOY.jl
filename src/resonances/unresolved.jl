@@ -502,10 +502,10 @@ function build_unresolved_table(urr::URRData, abn::Float64,
         end
     end
 
-    # Update total after adding backgrounds (matching Fortran)
-    for i in 1:ne
-        total[i] = round_sigfig(elastic[i] + fission[i] + capture[i], 7)
-    end
+    # Keep the four channels independent.  genunr adds MF3/MT1 background to
+    # the stored total and MT2/18/102 backgrounds to their own slots; it never
+    # replaces total with the sum of the other three.
+    # Ref: njoy-reference/src/reconr.f90:1669-1726.
 
     # intlaw = 5 (log-log) for LRF=1 (mode=11)
     URRTable(energies, total, elastic, fission, capture, 5)
@@ -676,10 +676,6 @@ function build_unresolved_table(urr::URR2Data, abn::Float64,
                 end
             end
         end
-    end
-
-    for i in 1:ne
-        total[i] = round_sigfig(elastic[i] + fission[i] + capture[i], 7)
     end
 
     # Determine interpolation law from first sequence's INT

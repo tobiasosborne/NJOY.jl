@@ -24,9 +24,14 @@ function reconr_module(tapes::TapeManager, params::ReconrParams;
         mspec = materials[1]
         @info "reconr: MAT=$(mspec.mat) err=$(mspec.err) → $pendf_path"
         r = reconr(endf_path; mat=mspec.mat, err=mspec.err)
+        mf1_header = read_mf1_header_info(endf_path, mspec.mat)
+        mf1_header === nothing &&
+            error("RECONR MF1/MT451 header not found for MAT=$(mspec.mat) in $endf_path")
         write_pendf_file(pendf_path, r; mat=mspec.mat, err=mspec.err,
                          title=isempty(title) ? nothing : title,
-                         descriptions=descriptions)
+                         descriptions=descriptions,
+                         mf1_header=mf1_header,
+                         coded_output=params.coded_output)
         @info "reconr: $(length(r.energies)) points written"
     else
         open(pendf_path, "w") do io

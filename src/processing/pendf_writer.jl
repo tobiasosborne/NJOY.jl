@@ -91,7 +91,9 @@ function write_pendf(io::IO, result::NamedTuple;
                      err::Float64 = 0.001,
                      tempr::Float64 = 0.0,
                      title = nothing,
-                     descriptions::Vector{String} = String[])
+                     descriptions::Vector{String} = String[],
+                     mf1_header = nothing,
+                     coded_output::Bool = false)
     mf2 = result.mf2
     actual_mat = mat > 0 ? Int32(mat) : Int32(max(1, round(Int, mf2.ZA / 10)))
     ns = Ref(1)
@@ -120,28 +122,82 @@ function write_pendf(io::IO, result::NamedTuple;
     photon_sections = hasproperty(result, :photon_sections) ? result.photon_sections :
                       NamedTuple[]
 
-    # MF1/MT451 — directory must include the MF10 sections when present.
-    _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
-                      mt_to_mf=mt_mf, descriptions=descriptions, urr_table=urr_tab,
-                      mf10_subs=mf10_subs, photon_sections=photon_sections)
+    # ruina replaces ncards=0 with one blank Hollerith card.  The record is
+    # physical output (and contributes to NWD/self-NC), not optional padding.
+    # Ref: njoy-reference/src/reconr.f90:419-453.
+    reconr_descriptions = isempty(descriptions) ? [""] : descriptions
+
+    # MF1/MT451.  Direct orchestration supplies the source header and therefore
+    # takes the faithful ENDF-6 path.  Keep the legacy fallback for callers of
+    # the public writer that only have an in-memory reconstruction result.
+    if mf1_header === nothing
+        _write_legacy_mf1(io, mf2, actual_mat, err, tempr, length(result.energies), reactions, ns;
+                          mt_to_mf=mt_mf, descriptions=reconr_descriptions,
+                          urr_table=urr_tab, mf10_subs=mf10_subs,
+                          photon_sections=photon_sections)
+    else
+        section_lines = _reconr_section_lines(result, reactions, mt_mf,
+                                               urr_tab, mf10_subs,
+                                               photon_sections)
+        _write_full_mf1(io, mf2, actual_mat, err, tempr, section_lines, ns;
+                        descriptions=reconr_descriptions, hdr=mf1_header)
+    end
+
+    out_za = mf1_header === nothing ? mf2.ZA : mf1_header.za
+    out_awr = mf1_header === nothing ? mf2.AWR : mf1_header.awr
 
     # MF2/MT151 + MT152 (if URR data exists)
     _write_legacy_mf2(io, mf2, actual_mat, ns;
-                      urr_table=urr_tab, urr_lssf=urr_lssf_val)
+                      urr_table=urr_tab, urr_lssf=urr_lssf_val,
+                      za=out_za, awr=out_awr)
 
     # MF3/MF23 sections
-    _write_legacy_mf3(io, result, actual_mat, reactions, ns)
+    body_ns = _write_legacy_mf3(io, result, actual_mat, reactions, ns;
+                                za=out_za, awr=out_awr,
+                                coded_output=coded_output)
 
     # MF10/MT sections (radioactive nuclide production), gated on presence.
     _write_legacy_mf10(io, actual_mat, mf2, mf10_subs)
 
     # MF12/MF13 totals reconstructed by lunion/emerge; MF14 is intentionally absent.
-    _write_legacy_photons(io, actual_mat, mf2, photon_sections)
+    _write_legacy_photons(io, actual_mat, mf2, photon_sections;
+                          ns=body_ns, coded_output=coded_output)
 
     # MEND and TEND (NS=0 matching Fortran)
-    _write_fend_zero(io, 0)   # MEND: MAT=0, MF=0, MT=0, NS=0
+    if coded_output
+        _write_record_sep(io, 0, 0, 0; ns=body_ns)
+    else
+        _write_fend_zero(io, 0)
+    end
     blanks = repeat(" ", 66)
     @printf(io, "%s%4d%2d%3d%5d\n", blanks, -1, 0, 0, 0)  # TEND
+end
+
+"""Build RECONR's MF1 dictionary from the sections that will actually emit.
+
+Ref: njoy-reference/src/reconr.f90:4917-4927,5103-5119,5152-5166.
+Each section uses its own post-emerge `NP`; the union-grid length is never a
+valid blanket NC for the dictionary.
+"""
+function _reconr_section_lines(result, reactions, mt_mf, urr_table,
+                                mf10_subs, photon_sections)
+    lines = Dict{Tuple{Int,Int},Int}()
+    for (mt, _) in reactions
+        imt = Int(mt)
+        sec = _get_legacy_section(result, imt)
+        sec === nothing && continue
+        lines[(get(mt_mf, imt, 3), imt)] = _reconr_mf3_dir_nc(length(sec[1]))
+    end
+    urr_table === nothing ||
+        (lines[(2, 152)] = 3 + length(urr_table.energies))
+    for (mt, nc) in _mf10_dir_nc(mf10_subs)
+        lines[(10, mt)] = nc
+    end
+    for sec in photon_sections
+        lines[(Int(sec.mf), Int(sec.mt))] =
+            _reconr_mf3_dir_nc(length(sec.energies))
+    end
+    lines
 end
 
 """
@@ -553,7 +609,8 @@ function _write_full_mf1(io::IO, mf2, mat::Int32, err, tempr,
     end
     # Description text lines
     for desc in descriptions
-        @printf(io, "%-66s%4d%2d%3d%5d\n", desc, Int(mat), 1, 451, ns[])
+        @printf(io, "%s%4d%2d%3d%5d\n", rpad(desc, 66)[1:66],
+                Int(mat), 1, 451, ns[])
         ns[] += 1
     end
 
@@ -931,6 +988,28 @@ function _collect_reactions(result)
     return reactions
 end
 
+"""Return whether RECONR constructs `mt` as a redundant sum.
+
+This mirrors `anlyzd`'s flags and `recout`'s `L2=99` branches.  MT=4 and
+MT=18 are redundant only when their component sections exist; MT=103:107
+likewise require the corresponding charged-particle partial range.  The
+photoatomic total MT=501 is always constructed.
+
+Ref: njoy-reference/src/reconr.f90:567-590 (flags), 5230-5355 (recout).
+"""
+function _is_reconr_redundant(result, mt::Int, mf::Int=3)
+    mt == 1 && return mf == 3
+    mt == 501 && return mf == 23
+    mt == 4 && return any(s -> 51 <= Int(s.mt) <= 91, result.mf3_sections)
+    mt == 18 && return any(s -> Int(s.mt) == 19, result.mf3_sections)
+    ranges = Dict(103 => (600, 649), 104 => (650, 699),
+                  105 => (700, 749), 106 => (750, 799),
+                  107 => (800, 849))
+    haskey(ranges, mt) || return false
+    lo, hi = ranges[mt]
+    any(s -> lo <= Int(s.mt) <= hi, result.mf3_sections)
+end
+
 function _write_legacy_mf1(io::IO, mf2::MF2Data, mat::Int32, err, tempr,
                             n_pts, reactions, ns::Ref{Int};
                             mt_to_mf::Dict{Int,Int}=Dict{Int,Int}(),
@@ -991,13 +1070,19 @@ end
 Ref: `lunion` forces NK=1 and `recout` copies the linearized scratch sections
 (reconr.f90:1878-1881,4918-4937,5424-5433).
 """
-function _write_legacy_photons(io::IO, mat::Int32, mf2::MF2Data, sections)
-    isempty(sections) && return
+function _write_legacy_photons(io::IO, mat::Int32, mf2::MF2Data, sections;
+                               ns::Ref{Int}=Ref(1),
+                               coded_output::Bool=false)
+    isempty(sections) && return ns
     current_mf = 0
     for sec in sort(sections; by=s -> (s.mf, s.mt))
-        current_mf != 0 && sec.mf != current_mf && _write_fend_zero(io, Int(mat))
+        if current_mf != 0 && sec.mf != current_mf
+            coded_output ? _write_record_sep(io, Int(mat), 0, 0; ns=ns) :
+                           _write_fend_zero(io, Int(mat))
+        end
         current_mf = sec.mf
-        ns = Ref(1); np = length(sec.energies)
+        coded_output || (ns[] = 1)
+        np = length(sec.energies)
         # MF12 HEAD retains LO=1; both files advertise only the total TAB1.
         section_za = sec.za > 0.0 ? sec.za : mf2.ZA
         section_awr = sec.awr > 0.0 ? sec.awr : mf2.AWR
@@ -1017,9 +1102,12 @@ function _write_legacy_photons(io::IO, mat::Int32, mf2::MF2Data, sections)
             push!(data, sec.energies[i], sec.xs[i])
         end
         _write_data_values(io, data, Int(mat), sec.mf, sec.mt, ns; pair_data=true)
-        _write_send(io, Int(mat), sec.mf)
+        coded_output ? _write_record_sep(io, Int(mat), sec.mf, 0; ns=ns) :
+                       _write_send(io, Int(mat), sec.mf)
     end
-    _write_fend_zero(io, Int(mat))
+    coded_output ? _write_record_sep(io, Int(mat), 0, 0; ns=ns) :
+                   _write_fend_zero(io, Int(mat))
+    ns
 end
 
 """
@@ -1042,14 +1130,15 @@ function _mf10_dir_nc(mf10_subs)
 end
 
 function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
-                           urr_table=nothing, urr_lssf::Int=0)
+                           urr_table=nothing, urr_lssf::Int=0,
+                           za::Float64=mf2.ZA, awr::Float64=mf2.AWR)
     ns[] = 1
     nis = length(mf2.isotopes)
-    _write_cont_line(io, mf2.ZA, mf2.AWR, 0, 0, nis, 0, Int(mat), 2, 151, ns)
+    _write_cont_line(io, za, awr, 0, 0, nis, 0, Int(mat), 2, 151, ns)
 
     for iso in mf2.isotopes
         # Fortran recout uses ZA (not ZAI) for the isotope CONT record
-        _write_cont_line(io, mf2.ZA, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
+        _write_cont_line(io, za, iso.ABN, 0, 0, 1, 0, Int(mat), 2, 151, ns)
         # Fortran recout uses eresl (=elow=1e-5) for EL, not range[1].EL
         el = 1.0e-5
         # Fortran recout uses eresr for EH: resolved range EH if LRU=1 exists,
@@ -1068,6 +1157,16 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
             p = iso.ranges[1].parameters
             if hasproperty(p, :SPI); spi = p.SPI; end
             if hasproperty(p, :AP); ap = p.AP; end
+            if p isa SAMMYParameters
+                # rdsammy overwrites the range AP with every elastic-channel
+                # RDEFF in spin-group order; the final value is written by
+                # recout as the default MF2 scattering radius.
+                # Ref: njoy-reference/src/samm.f90:664,1093-1127.
+                for group in p.spin_groups, i in eachindex(group.ipp)
+                    ipp = Int(group.ipp[i])
+                    p.particle_pairs[ipp].mt == 2 && (ap = group.rdeff[i])
+                end
+            end
         end
         _write_cont_line(io, spi, ap, 0, 0, 0, 0, Int(mat), 2, 151, ns)
     end
@@ -1080,12 +1179,14 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
         nunr = length(urr_table.energies)
         ns[] = 1
         # CONT record: ZA, AWR, LSSF, 0, 0, INTUNR
-        _write_cont_line(io, mf2.ZA, mf2.AWR, urr_lssf, 0, 0,
+        _write_cont_line(io, za, awr, urr_lssf, 0, 0,
                          urr_table.intlaw, Int(mat), 2, 152, ns)
         # LIST record: temp, 0, NLI=5, NLIB=1, NCP=1+6*nunr, nunr
         ncp = 1 + 6 * nunr
         _write_cont_line(io, 0.0, 0.0, 5, 1, ncp, nunr, Int(mat), 2, 152, ns)
-        # Pack data: sigma0, then per-energy (E, total, elastic, fission, capture, elastic_copy)
+        # Pack data: sigma0, then per-energy
+        # (E, total, elastic, fission, capture, total_copy).
+        # Ref: njoy-reference/src/reconr.f90:1663-1691.
         data = Float64[]
         push!(data, 1.0e10)  # sentinel sigma0 value (infinite dilution)
         for ie in 1:nunr
@@ -1094,7 +1195,7 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
             push!(data, urr_table.elastic[ie])
             push!(data, urr_table.fission[ie])
             push!(data, urr_table.capture[ie])
-            push!(data, urr_table.elastic[ie])  # copy of elastic (Fortran line 1690)
+            push!(data, urr_table.total[ie])
         end
         # Write data in 6-values-per-line ENDF format
         idx = 1
@@ -1114,10 +1215,10 @@ function _write_legacy_mf2(io::IO, mf2::MF2Data, mat::Int32, ns::Ref{Int};
     _write_fend_zero(io, Int(mat))
 end
 
-function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
-    energies = result.energies
-    awr = result.mf2.AWR
-    za = result.mf2.ZA
+function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int};
+                           za::Float64=result.mf2.ZA,
+                           awr::Float64=result.mf2.AWR,
+                           coded_output::Bool=false)
 
     # Build MF lookup: MT → actual MF from section data
     mt_to_mf = Dict{Int, Int}()
@@ -1126,10 +1227,9 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
     end
 
     cur_mf = 0
+    ns[] = 1
 
     for (mt, _) in reactions
-        ns[] = 1
-
         sec_data = _get_legacy_section(result, Int(mt))
         sec_data === nothing && continue
 
@@ -1140,17 +1240,28 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
 
         # Handle MF transition: write FEND when MF changes
         if cur_mf != 0 && out_mf != cur_mf
-            _write_fend_zero(io, Int(mat))
+            coded_output ? _write_record_sep(io, Int(mat), 0, 0; ns=ns) :
+                           _write_fend_zero(io, Int(mat))
         end
         cur_mf = out_mf
+
+        redundant = _is_reconr_redundant(result, Int(mt), out_mf)
+        # Fortran's coded-output path carries NS continuously only while
+        # copying original sections.  A computed redundant section uses the
+        # binary-style SEND=99999 and restarts the following section at one.
+        # Ref: njoy-reference/src/reconr.f90:5234-5355;
+        #      njoy-reference/src/endf.f90:1064-1170,1280-1355.
+        coded_output || (ns[] = 1)
 
         # HEAD: ZA, AWR, 0, L2, 0, 0
         # Fortran recout: redundant MTs get L2=99, non-redundant get L2=lfs (level number)
         imt = Int(mt)
-        l2_val = 99
+        l2_val = redundant ? 99 : 0
+        lr_val = 0
         for sec in result.mf3_sections
-            if Int(sec.mt) == imt
+            if !redundant && Int(sec.mt) == imt
                 l2_val = Int(sec.L2)
+                lr_val = Int(sec.LR)
                 break
             end
         end
@@ -1160,7 +1271,7 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
         # TAB1: QM, QI, 0, LR, NR=1, NP
         qi_out = (mt == 1 || mt == 4 || mt == 501) ? 0.0 : qi
         np = length(sec_e)
-        _write_cont_line(io, qm, qi_out, 0, 0, 1, np,
+        _write_cont_line(io, qm, qi_out, 0, lr_val, 1, np,
                          Int(mat), out_mf, Int(mt), ns)
 
         # Interpolation table
@@ -1177,12 +1288,19 @@ function _write_legacy_mf3(io::IO, result, mat::Int32, reactions, ns::Ref{Int})
         end
         _write_data_values(io, data, Int(mat), out_mf, Int(mt), ns; pair_data=true)
 
-        _write_send(io, Int(mat), out_mf)
+        if coded_output && !redundant
+            _write_record_sep(io, Int(mat), out_mf, 0; ns=ns)
+        else
+            _write_send(io, Int(mat), out_mf)
+            coded_output && (ns[] = 1)
+        end
     end
 
     if cur_mf != 0
-        _write_fend_zero(io, Int(mat))
+        coded_output ? _write_record_sep(io, Int(mat), 0, 0; ns=ns) :
+                       _write_fend_zero(io, Int(mat))
     end
+    ns
 end
 
 """

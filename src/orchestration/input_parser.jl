@@ -166,14 +166,17 @@ end
 struct ReconrParams
     nendf::Int; npend::Int; mat::Int; err::Float64; title::String
     materials::Vector{ReconrMatSpec}
+    coded_output::Bool
 end
 ReconrParams(nendf, npend, mat, err, title) =
-    ReconrParams(nendf, npend, mat, err, title, [ReconrMatSpec(mat, err, "")])
+    ReconrParams(abs(nendf), abs(npend), mat, err, title,
+                 [ReconrMatSpec(mat, err, "")], npend > 0)
 
 function parse_reconr(mc::ModuleCall)::ReconrParams
     cards = mc.raw_cards
     isempty(cards) && return ReconrParams(0, 0, 0, 0.001, "")
-    nendf = abs(_fint(cards[1], 1)); npend = abs(_fint(cards[1], 2))
+    nendf_raw = _fint(cards[1], 1); npend_raw = _fint(cards[1], 2)
+    nendf = abs(nendf_raw); npend = abs(npend_raw)
     title = length(cards) >= 2 ? strip(replace(join(cards[2], " "), r"^['\"]|['\"]$" => "")) : ""
     materials = ReconrMatSpec[]
     ci = 3
@@ -192,7 +195,8 @@ function parse_reconr(mc::ModuleCall)::ReconrParams
     end
     first_mat = isempty(materials) ? 0 : materials[1].mat
     first_err = isempty(materials) ? 0.001 : materials[1].err
-    ReconrParams(nendf, npend, first_mat, first_err, title, materials)
+    ReconrParams(nendf, npend, first_mat, first_err, title, materials,
+                 npend_raw > 0)
 end
 
 struct BroadrParams
