@@ -16,12 +16,32 @@ const RECONR_SERIAL_T84_DIR = joinpath(
     @__DIR__, "..", "..", "njoy-reference", "tests", "84")
 const RECONR_SERIAL_T84_ORACLE = joinpath(RECONR_SERIAL_T84_DIR, "referenceTape100")
 const RECONR_SERIAL_T84_WORK = "/tmp/njoy_gkw_t84_serialization"
+const RECONR_SERIAL_T85_DIR = joinpath(
+    @__DIR__, "..", "..", "njoy-reference", "tests", "85")
+const RECONR_SERIAL_T85_ORACLE = joinpath(RECONR_SERIAL_T85_DIR, "referenceTape50")
+const RECONR_SERIAL_T85_WORK = "/tmp/njoy_c33_t85_unfac"
 
 function first_record_difference(reference::Vector{String}, trial::Vector{String})
     common = min(length(reference), length(trial))
     mismatch = findfirst(i -> reference[i] != trial[i], 1:common)
     mismatch !== nothing && return mismatch
     length(reference) == length(trial) ? nothing : common + 1
+end
+
+# NJOY_jl-c33: the first unresolved MT152 values occupy tape50 lines 82-88.
+# Ref: njoy-reference/src/reconr.f90:4488-4490 (unfac uses rhoc², not rho²,
+# in the L=2 phase-shift denominator).
+@testset "T85 referenceTape50 MT152 lines 82-88 are byte-identical" begin
+    rm(RECONR_SERIAL_T85_WORK; recursive=true, force=true)
+    run_njoy(joinpath(RECONR_SERIAL_T85_DIR, "input");
+             work_dir=RECONR_SERIAL_T85_WORK, verbose=false)
+
+    trial_path = joinpath(RECONR_SERIAL_T85_WORK, "tape50")
+    @test isfile(trial_path)
+
+    reference = readlines(RECONR_SERIAL_T85_ORACLE)
+    trial = readlines(trial_path)
+    @test trial[82:88] == reference[82:88]
 end
 
 @testset "T84 referenceTape100 lines 1-1115 are byte-identical" begin

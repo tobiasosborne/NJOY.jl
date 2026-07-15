@@ -187,7 +187,9 @@ function _unfac(l::Int, rho, rhoc, amun)
         return amun * r2 / (1 + r2), rhoc - atan(rhoc)
     else
         r4 = r2 * r2
-        return amun * r4 / (9 + 3r2 + r4), rhoc - atan(3rhoc / (3 - r2))
+        # Ref: njoy-reference/src/reconr.f90:4488-4490 (unfac).  The L=2
+        # penetrability uses rho, but its phase-shift denominator uses rhoc².
+        return amun * r4 / (9 + 3r2 + r4), rhoc - atan(3rhoc / (3 - rhoc^2))
     end
 end
 

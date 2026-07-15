@@ -58,7 +58,13 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 93 (2026-07-15)
+## Current state — Phase 94 targeted delta (2026-07-15)
+
+Phase 94 added two official targeted BIT_IDENTICAL results without running the
+full suite: **T44 tape35 is 322/322** and **T85 tape50 is 7,809/7,809**, both at
+`1e-9`. Combined with the Phase 93 sweep, there are 13 known bit-identical
+tests. This is not a refreshed full-suite baseline; the latest complete sweep
+remains the Phase 93 result below, per the user's request to avoid a full run.
 
 The post-Phase-93 full sweep covers all 86 reference tests at the pinned
 Fortran oracle and the documented 300-second per-test timeout. It completed in
@@ -75,10 +81,22 @@ Fortran oracle and the documented 300-second per-test timeout. It completed in
 | `CRASH` | 0 |
 | `TIMEOUT` | 1 |
 
-Bit-identical full tests are T03, T09, T22, T50, T52, T53, T61, T62,
-**T81, T84**, and T86. Numeric-pass tests are T01, T33, T54, T80, and
-**T85**; inspect the per-tape tolerance columns because T85 currently passes
-at `1e-5`, not the first-round `1e-7` floor.
+Known bit-identical full tests are T03, T09, T22, **T44**, T50, T52, T53,
+T61, T62, **T81, T84, T85**, and T86. The Phase 93 numeric-pass cohort was
+T01, T33, T54, T80, and T85; the targeted Phase 94 T85 run removes T85 from
+that cohort.
+
+Phase 94 closed two source-proven defects:
+
+- `NJOY_jl-c33`: `_unfac` used `rho²` instead of Fortran's `rhoc²` in the
+  L=2 phase-shift denominator (`reconr.f90:4488-4490`). The seven remaining
+  MT152 records became exact and T85 moved to BIT_IDENTICAL.
+- `NJOY_jl-cgy`: BROADR synthesized a two-record MF1 header and read NWD from
+  the wrong record. It now copies the complete incoming PENDF metadata and
+  canonical blank description, changing only TEMP/dictionary size as
+  `broadr.f90:638-680` does. T44 moved to BIT_IDENTICAL.
+
+See `worklog/phase94_t85_t44_bit_identical.md`.
 
 Phase 93 closed two direct-RECONR defects:
 
@@ -91,10 +109,9 @@ Phase 93 closed two direct-RECONR defects:
   addition and the sixth payload value copies total rather than elastic.
   T85 is structurally exact and now NUMERIC_PASS with seven residual lines.
 
-T83's remaining `csunr2`/downstream-grid cluster is `NJOY_jl-fod`. T85's
-six-node last-digit grind is `NJOY_jl-c33`. T17 remains the sole timeout and
-again reached ERRORR before the 300-second cap. See
-`worklog/phase93_reconr_direct_pendf.md`.
+T83's remaining `csunr2`/downstream-grid cluster is `NJOY_jl-fod`. T17 remains
+the sole timeout in the latest full sweep and again reached ERRORR before the
+300-second cap.
 
 ### Prior Phase 92 context
 
@@ -177,18 +194,19 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 93 follow-ups:
+Immediate Phase 94 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
 - **`NJOY_jl-fod` (open):** match T83's `csunr2` accumulation/state-machine
   and downstream grid propagation. Direct serialization and MT152 packing are
   already faithful; start at tape50 line 103.
-- **`NJOY_jl-c33` (open):** eliminate T85's seven-line MT152 numerical
-  residual and reach at least the `1e-7` first-round floor.
-- **`NJOY_jl-1kf` (open):** reproduce T45's final TPID/MF1/MT451 ownership and
-  three missing metadata records. Photon sections and their directory tuples
-  are already exact; keep this follow-up isolated from `NJOY_jl-2k4`.
+- **`NJOY_jl-1kf` (open):** rerun T45 after Phase 94's shared BROADR header
+  fix. Its three missing metadata records should now be present, but the blank
+  TPID and downstream numerical residuals remain separate until verified.
+- **`NJOY_jl-sc5` (open):** T80 has only 47 exact-structure residual lines in
+  LEAPR `contin`; rerun T33 after this grind because the same fix may clear its
+  eight residual records.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
   section bodies but currently default MOD to zero; retain incoming nonzero MOD
   values from MF1/MT451 in a separately oracle-driven change.
@@ -207,6 +225,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 94 | 2026-07-15 | T85/T44 bit-identical; unresolved L=2 phase shift and BROADR full-header preservation | `phase94_t85_t44_bit_identical.md` |
 | 93 | 2026-07-15 | T81/T84 bit-identical; T85 numeric; direct RECONR serialization and MT152 layout fixed | `phase93_reconr_direct_pendf.md` |
 | 92 | 2026-07-14 | Stale docs/Beads reconciled; T45 MF12/MF13 totals unionized and preserved exactly | `phase92_staleness_t45_photons.md` |
 | 91 | 2026-06-26 | `_THIRD` and mixed-law lunion shading fixed; dead THERMR field removed; sweep refreshed | `phase91_reconr_third_lunion_shading.md` |

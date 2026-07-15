@@ -201,7 +201,7 @@ function broadr_module(tapes::TapeManager, params::BroadrParams)
 
     # Write multi-temperature PENDF (one MAT block per temperature)
     write_broadr_pendf(pendf_out_path, pendf_in, params.mat,
-                       all_temp_results, params.tol)
+                       all_temp_results, params.tol, iverf)
 
     @info "broadr: wrote $pendf_out_path"
 
@@ -277,14 +277,14 @@ end
 # =========================================================================
 
 """
-    write_broadr_pendf(path, pendf_in, mat, temp_results, tol)
+    write_broadr_pendf(path, pendf_in, mat, temp_results, tol, iverf=6)
 
 Write a multi-temperature PENDF tape matching Fortran broadr output.
 Each temperature produces a complete MAT block (MF1 + MF2 + MF3 + MEND).
 """
 function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
                             mat::Int, temp_results::AbstractVector,
-                            tol::Float64)
+                            tol::Float64, iverf::Int=6)
     open(path, "w") do io
         src_mat = nothing
         for m in pendf_in.materials
@@ -302,7 +302,8 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
             break
         end
 
-        descriptions = _extract_broadr_descriptions(src_mat.mf1_lines)
+        control_idx = iverf == 6 ? 4 : (iverf >= 5 ? 3 : 2)
+        descriptions = _extract_broadr_descriptions(src_mat.mf1_lines, control_idx)
 
         mf2_sections = Tuple{Int, Vector{String}}[]
         for sec in src_mat.sections
@@ -350,8 +351,24 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
 
             ns = Ref(1)
             self_nc = 2 + nwd + nxc
-            _write_cont_line(io, za, awr, 3, 1, 0, nxc, mat, 1, 451, ns)
-            _write_cont_line(io, temp, tol, 0, 0, nwd, nxc, mat, 1, 451, ns)
+            if length(src_mat.mf1_lines) >= control_idx
+                # BROADR copies the PENDF metadata records verbatim, then
+                # changes only TEMP and the corrected dictionary size in the
+                # descriptive-control record.
+                # Ref: njoy-reference/src/broadr.f90:638-680.
+                for li in 1:(control_idx - 1)
+                    p = rpad(src_mat.mf1_lines[li], 80)
+                    @printf(io, "%s%4d%2d%3d%5d\n", p[1:66], mat, 1, 451, ns[])
+                    ns[] += 1
+                end
+                p = rpad(src_mat.mf1_lines[control_idx], 80)
+                _write_cont_line(io, temp, parse_endf_float(p[12:22]),
+                                 _broadr_parse_int(p, 3), _broadr_parse_int(p, 4),
+                                 nwd, nxc, mat, 1, 451, ns)
+            else
+                _write_cont_line(io, za, awr, 3, 1, 0, nxc, mat, 1, 451, ns)
+                _write_cont_line(io, temp, tol, 0, 0, nwd, nxc, mat, 1, 451, ns)
+            end
             for desc in descriptions
                 line = rpad(desc, 66)[1:66]
                 @printf(io, "%s%4d%2d%3d%5d\n", line, mat, 1, 451, ns[])
@@ -447,15 +464,15 @@ function write_broadr_pendf(path::AbstractString, pendf_in::PENDFTape,
     end
 end
 
-"""Extract description text lines from MF1/MT451 raw lines."""
-function _extract_broadr_descriptions(mf1_lines::Vector{String})
-    length(mf1_lines) < 2 && return String[]
-    p = rpad(mf1_lines[2], 80)
+"""Extract description text after the MF1/MT451 descriptive-control record."""
+function _extract_broadr_descriptions(mf1_lines::Vector{String}, control_idx::Int)
+    length(mf1_lines) < control_idx && return String[]
+    p = rpad(mf1_lines[control_idx], 80)
     nwd = _broadr_parse_int(p, 5)
     nwd <= 0 && return String[]
     descs = String[]
     for i in 1:nwd
-        idx = 2 + i
+        idx = control_idx + i
         idx > length(mf1_lines) && break
         push!(descs, rpad(mf1_lines[idx], 66)[1:66])
     end

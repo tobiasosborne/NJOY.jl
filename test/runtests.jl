@@ -7375,6 +7375,9 @@ include("validation/test_reconr_photon_threshold.jl")
 # dictionary, sequence numbers, and reconstructed photon output.
 include("validation/test_reconr_pendf_serialization.jl")
 
+# BROADR must preserve the complete incoming PENDF MF1/MT451 layout.
+include("validation/test_broadr_header_serialization.jl")
+
 # Integration tests against NJOY2016 reference outputs (separate file)
 include("integration_tests.jl")
 
