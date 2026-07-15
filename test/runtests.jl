@@ -7378,6 +7378,9 @@ include("validation/test_reconr_pendf_serialization.jl")
 # BROADR must preserve the complete incoming PENDF MF1/MT451 layout.
 include("validation/test_broadr_header_serialization.jl")
 
+# LEAPR endout must preserve T33's exact sigfig/a11 serialization boundaries.
+include("validation/test_leapr_t33_serialization.jl")
+
 # Integration tests against NJOY2016 reference outputs (separate file)
 include("integration_tests.jl")
 

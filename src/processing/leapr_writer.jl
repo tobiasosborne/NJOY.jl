@@ -3,11 +3,8 @@
 # Ref: leapr.f90:2972-3623 (endout).
 # =================================================================
 
-"Fortran a11-style 11-char float format. leapr's endout emits values in
-7-sigfig scientific form (never the 9-sigfig fixed-point extension), so
-disable the extended form — the reference tape has e.g. `3.969624+1`,
-not `39.6962390`, even for values in (0.1, 1e7)."
-_leapr_a11(x::Real) = format_endf_float(Float64(x); extended=false)
+"Fortran a11-style 11-char float format (endf.f90:882-981)."
+_leapr_a11(x::Real) = format_endf_float(Float64(x))
 
 "Trailer bytes for an ENDF line: cols 67-80 = MAT/MF/MT/NS."
 @inline _leapr_trailer(mat, mf, mt, ns) = @sprintf("%4d%2d%3d%5d", mat, mf, mt, ns)
@@ -298,14 +295,19 @@ function _write_mf7_mt4(io::IO, p::LeaprParams,
     end
 
     # Effective-temperature TAB1s (tempf always; tempf1 when nss>0 and b7<=0)
+    # Ref: njoy-reference/src/leapr.f90:3588-3615 (endout).  Both axes are
+    # sigfig-rounded before tab1io delegates their formatting to a11.
+    temperatures7 = [round_sigfig(x, 7, 0) for x in p.temperatures]
     if p.nss > 0 && p.b7 <= 0 && !isempty(tempf1)
         ns = _leapr_write_cont(io, 0.0, 0.0, 0, 0, 1, ntempr, mat, 7, 4, ns)
         ns = _leapr_write_interp(io, [ntempr], [2], mat, 7, 4, ns)
-        ns = _leapr_write_pairs_3perline(io, p.temperatures, tempf1, mat, 7, 4, ns)
+        tempf1_7 = [round_sigfig(x, 7, 0) for x in tempf1]
+        ns = _leapr_write_pairs_3perline(io, temperatures7, tempf1_7, mat, 7, 4, ns)
     end
     ns = _leapr_write_cont(io, 0.0, 0.0, 0, 0, 1, ntempr, mat, 7, 4, ns)
     ns = _leapr_write_interp(io, [ntempr], [2], mat, 7, 4, ns)
-    ns = _leapr_write_pairs_3perline(io, p.temperatures, tempf, mat, 7, 4, ns)
+    tempf7 = [round_sigfig(x, 7, 0) for x in tempf]
+    ns = _leapr_write_pairs_3perline(io, temperatures7, tempf7, mat, 7, 4, ns)
 
     return ns
 end
@@ -348,6 +350,12 @@ function _leapr_s_value(ssm::AbstractArray{Float64,3}, ssp::AbstractArray{Float6
         raw * exp(+be/2)
     else           # isym ∈ {2, 3}
         raw
+    end
+    if ilog == 0
+        # Ref: njoy-reference/src/leapr.f90:3354-3417 (endout).  LEAPR
+        # applies biased sigfig rounding before the SMIN cutoff and a11.
+        val = round_sigfig(val, val >= 1e-9 ? 7 : 6, 0)
+        return val < smin ? 0.0 : val
     end
     val < smin && return 0.0
     ilog == 1 && return val > 0 ? log10(val) : -999.0
