@@ -58,7 +58,16 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 97 targeted delta (2026-08-22)
+## Current state — Phase 98 T45 diagnostic stop (2026-08-22)
+
+Phase 98 made no production-code change. It re-ran T45 on the pushed Phase 97
+tree and replaced the stale three-record metadata premise with an exact current
+map: tape40 is structurally exact (**7,188/7,188**), MF1 lines 2-69 and all
+MF12/MF13 photon bodies are exact, and 412 raw records remain. They split into
+one blank-TPID ownership defect (`NJOY_jl-1kf`), 405 substantive GASPR LR and
+residual-nuclide yield records (`NJOY_jl-9h4`), five isolated BROADR ULP
+records (`NJOY_jl-bdu`), and one MT205 record inherited from the upstream
+MT113 ULP. See `worklog/phase98_t45_rescope.md`.
 
 Phase 97 moved **T83 to raw-byte BIT_IDENTICAL** on tape50
 (**71,931/71,931**). The old `csunr2`/MT152 diagnosis was stale after Phase
@@ -219,14 +228,17 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 97 follow-ups:
+Immediate Phase 98 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
-- **`NJOY_jl-1kf` (open):** rerun T45 after Phase 94's shared BROADR header
-  fix. Phase 97's canonical regression confirms the old three-record gap is
-  closed (**7,188/7,188**); re-scope the bead to the blank TPID and downstream
-  numerical residuals before changing code.
+- **`NJOY_jl-1kf` (open, re-scoped):** preserve T45's intentional two-blank
+  RECONR label instead of substituting `"reconstructed data"`; exact red target
+  is tape40 line 1. Structure and MF1 records 2-69 are already exact.
+- **`NJOY_jl-9h4` (open):** port GASPR's MT51-91 TAB1-LR and residual-nuclide
+  gas yields in tape order. These explain 405 T45 MT203/204/207 records.
+- **`NJOY_jl-bdu` (open):** instrument the five isolated T45 BROADR ULP
+  records before changing erfc, sqrt-two constants, or `hunky` boundaries.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
   section bodies but currently default MOD to zero; retain incoming nonzero MOD
   values from MF1/MT451 in a separately oracle-driven change.
@@ -245,6 +257,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 98 | 2026-08-22 | T45 current-state diagnosis; TPID/GASPR/BROADR lanes split cleanly | `phase98_t45_rescope.md` |
 | 97 | 2026-08-22 | T83 raw-byte bit-identical; zero-background RML reactions restored to MT1 | `phase97_t83_rml_total.md` |
 | 96 | 2026-08-22 | T80 bit-identical; LEAPR MF7/MT4 B(4) EMAX sigfig restored | `phase96_t80_leapr_emax.md` |
 | 95 | 2026-07-15 | T33 bit-identical; LEAPR sigfig/a11 output restored, T80 reduced to one line | `phase95_t33_leapr_endout.md` |
