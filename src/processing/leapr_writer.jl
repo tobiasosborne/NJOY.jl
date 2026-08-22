@@ -255,7 +255,10 @@ function _write_mf7_mt4(io::IO, p::LeaprParams,
     #   scr(12) = npr
     therm = 0.0253
     β_max = p.beta[end]
-    β_max_therm = therm * β_max
+    # Ref: njoy-reference/src/leapr.f90:3310-3312 (endout).  ENDF-6 §7.4
+    # defines B(4) as principal-scatterer EMAX; NJOY sigfig-rounds it before
+    # LIST output.
+    β_max_therm = round_sigfig(therm * β_max, 7, 0)
     npl = 6 * (p.nss + 1)
     list_data = Float64[p.spr * p.npr, β_max, p.awr, β_max_therm, 0.0, Float64(p.npr)]
     if p.nss > 0

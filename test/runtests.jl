@@ -7381,6 +7381,9 @@ include("validation/test_broadr_header_serialization.jl")
 # LEAPR endout must preserve T33's exact sigfig/a11 serialization boundaries.
 include("validation/test_leapr_t33_serialization.jl")
 
+# LEAPR endout must sigfig-round the MF7/MT4 principal-scatterer EMAX field.
+include("validation/test_leapr_t80_serialization.jl")
+
 # Integration tests against NJOY2016 reference outputs (separate file)
 include("integration_tests.jl")
 

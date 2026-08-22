@@ -58,7 +58,15 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 95 targeted delta (2026-07-15)
+## Current state — Phase 96 targeted delta (2026-08-22)
+
+Phase 96 moved **T80 to BIT_IDENTICAL** on tape24 (**91,453/91,453**) by
+restoring LEAPR `endout`'s biased seven-significant-digit rounding of the
+MF7/MT4 principal-scatterer B(4) EMAX field before LIST/`a11` serialization.
+The exact tape24 line-19 regression is byte-identical. T09, T22, and both T33
+tapes remain bit-identical. Combined with the Phase 93 sweep and targeted
+Phases 94-96, there are 15 known bit-identical tests. No full sweep was run;
+see `worklog/phase96_t80_leapr_emax.md`.
 
 Phase 95 moved **T33 to BIT_IDENTICAL** on both tape24 and tape34
 (**53,151/53,151 each**) by restoring LEAPR `endout`'s sigfig-before-a11
@@ -89,9 +97,9 @@ Fortran oracle and the documented 300-second per-test timeout. It completed in
 | `TIMEOUT` | 1 |
 
 Known bit-identical full tests are T03, T09, T22, **T33, T44**, T50, T52, T53,
-T61, T62, **T81, T84, T85**, and T86. The Phase 93 numeric-pass cohort was
-T01, T33, T54, T80, and T85; targeted Phases 94-95 remove T85 and T33 from
-that cohort, while T80 now has only one record outside `1e-9`.
+T61, T62, **T80, T81, T84, T85**, and T86. The Phase 93 numeric-pass cohort
+was T01, T33, T54, T80, and T85; targeted Phases 94-96 remove T85, T33, and
+T80 from that cohort.
 
 Phase 94 closed two source-proven defects:
 
@@ -201,7 +209,7 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 95 follow-ups:
+Immediate Phase 96 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
@@ -211,10 +219,6 @@ Immediate Phase 95 follow-ups:
 - **`NJOY_jl-1kf` (open):** rerun T45 after Phase 94's shared BROADR header
   fix. Its three missing metadata records should now be present, but the blank
   TPID and downstream numerical residuals remain separate until verified.
-- **`NJOY_jl-sc5` (open):** T80 has one residual record, tape24 line 19.
-  `endout` must apply `sigfig(therm*beta(nbeta),7,0)` to the MF7 B-list field;
-  add that exact red assertion before changing the writer. The old phonon-loop
-  FP-order diagnosis was stale.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
   section bodies but currently default MOD to zero; retain incoming nonzero MOD
   values from MF1/MT451 in a separately oracle-driven change.
@@ -233,6 +237,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 96 | 2026-08-22 | T80 bit-identical; LEAPR MF7/MT4 B(4) EMAX sigfig restored | `phase96_t80_leapr_emax.md` |
 | 95 | 2026-07-15 | T33 bit-identical; LEAPR sigfig/a11 output restored, T80 reduced to one line | `phase95_t33_leapr_endout.md` |
 | 94 | 2026-07-15 | T85/T44 bit-identical; unresolved L=2 phase shift and BROADR full-header preservation | `phase94_t85_t44_bit_identical.md` |
 | 93 | 2026-07-15 | T81/T84 bit-identical; T85 numeric; direct RECONR serialization and MT152 layout fixed | `phase93_reconr_direct_pendf.md` |
