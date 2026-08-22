@@ -7375,6 +7375,10 @@ include("validation/test_reconr_photon_threshold.jl")
 # dictionary, sequence numbers, and reconstructed photon output.
 include("validation/test_reconr_pendf_serialization.jl")
 
+# RML reaction channels must contribute to the redundant MT1 total even when
+# their smooth MF3 background is zero.
+include("validation/test_reconr_t83_rml_total.jl")
+
 # BROADR must preserve the complete incoming PENDF MF1/MT451 layout.
 include("validation/test_broadr_header_serialization.jl")
 

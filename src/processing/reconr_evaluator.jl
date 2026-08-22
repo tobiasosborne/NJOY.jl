@@ -1148,7 +1148,10 @@ function merge_background_legacy(energies::Vector{Float64},
             else
                 interpolate(tab, e)
             end
-            bg == 0.0 && continue
+            # Ref: njoy-reference/src/reconr.f90:4791-4809 (emerge).  Fortran
+            # adds res(1+itype) even when the smooth MF3 background sn is zero.
+            has_resonance = haskey(res_xs[i].reactions, mt)
+            bg == 0.0 && !has_resonance && continue
             is_primary = (mt == 2 || mt == 18 || mt == 19 || mt == 102)
             if is_primary && urr_lssf == 0 && e >= eresr && e < eresh
                 continue
@@ -1159,7 +1162,7 @@ function merge_background_legacy(energies::Vector{Float64},
                 fission += bg
             elseif mt == 102
                 capture += bg
-            elseif haskey(res_xs[i].reactions, mt)
+            elseif has_resonance
                 sec_sn[si] = round_sigfig(bg + res_xs[i].reactions[mt], 7)
             else
                 sec_sn[si] = round_sigfig(bg, 7)

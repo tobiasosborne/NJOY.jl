@@ -58,7 +58,16 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 96 targeted delta (2026-08-22)
+## Current state — Phase 97 targeted delta (2026-08-22)
+
+Phase 97 moved **T83 to raw-byte BIT_IDENTICAL** on tape50
+(**71,931/71,931**). The old `csunr2`/MT152 diagnosis was stale after Phase
+94; MT152 was already exact. The actual defect was an early zero-background
+exit in `merge_background_legacy` before the RML MT800/MT801 reaction value
+could be added to redundant MT1. T81, T84, and T85 remain bit-identical, and
+T20's strict overlap improved. Combined with the Phase 93 sweep and targeted
+Phases 94-97, there are 16 known bit-identical tests. No full sweep was run;
+see `worklog/phase97_t83_rml_total.md`.
 
 Phase 96 moved **T80 to BIT_IDENTICAL** on tape24 (**91,453/91,453**) by
 restoring LEAPR `endout`'s biased seven-significant-digit rounding of the
@@ -97,9 +106,9 @@ Fortran oracle and the documented 300-second per-test timeout. It completed in
 | `TIMEOUT` | 1 |
 
 Known bit-identical full tests are T03, T09, T22, **T33, T44**, T50, T52, T53,
-T61, T62, **T80, T81, T84, T85**, and T86. The Phase 93 numeric-pass cohort
-was T01, T33, T54, T80, and T85; targeted Phases 94-96 remove T85, T33, and
-T80 from that cohort.
+T61, T62, **T80, T81, T83, T84, T85**, and T86. The Phase 93 numeric-pass
+cohort was T01, T33, T54, T80, and T85; targeted Phases 94-97 remove T85,
+T33, and T80 from that cohort.
 
 Phase 94 closed two source-proven defects:
 
@@ -124,9 +133,10 @@ Phase 93 closed two direct-RECONR defects:
   addition and the sixth payload value copies total rather than elastic.
   T85 is structurally exact and now NUMERIC_PASS with seven residual lines.
 
-T83's remaining `csunr2`/downstream-grid cluster is `NJOY_jl-fod`. T17 remains
-the sole timeout in the latest full sweep and again reached ERRORR before the
-300-second cap.
+T83's former `csunr2`/downstream-grid bead `NJOY_jl-fod` closed in Phase 97;
+the fresh oracle showed MT152 was already exact and isolated the real RML
+total-assembly defect. T17 remains the sole timeout in the latest full sweep
+and again reached ERRORR before the 300-second cap.
 
 ### Prior Phase 92 context
 
@@ -209,16 +219,14 @@ later phase closures, so confirm an issue's current premise against the latest
 worklog, Fortran, and Julia before claiming it. Do not revive a completed task
 merely because an old HANDOFF snapshot calls it open.
 
-Immediate Phase 96 follow-ups:
+Immediate Phase 97 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
-- **`NJOY_jl-fod` (open):** match T83's `csunr2` accumulation/state-machine
-  and downstream grid propagation. Direct serialization and MT152 packing are
-  already faithful; start at tape50 line 103.
 - **`NJOY_jl-1kf` (open):** rerun T45 after Phase 94's shared BROADR header
-  fix. Its three missing metadata records should now be present, but the blank
-  TPID and downstream numerical residuals remain separate until verified.
+  fix. Phase 97's canonical regression confirms the old three-record gap is
+  closed (**7,188/7,188**); re-scope the bead to the blank TPID and downstream
+  numerical residuals before changing code.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
   section bodies but currently default MOD to zero; retain incoming nonzero MOD
   values from MF1/MT451 in a separately oracle-driven change.
@@ -237,6 +245,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 97 | 2026-08-22 | T83 raw-byte bit-identical; zero-background RML reactions restored to MT1 | `phase97_t83_rml_total.md` |
 | 96 | 2026-08-22 | T80 bit-identical; LEAPR MF7/MT4 B(4) EMAX sigfig restored | `phase96_t80_leapr_emax.md` |
 | 95 | 2026-07-15 | T33 bit-identical; LEAPR sigfig/a11 output restored, T80 reduced to one line | `phase95_t33_leapr_endout.md` |
 | 94 | 2026-07-15 | T85/T44 bit-identical; unresolved L=2 phase shift and BROADR full-header preservation | `phase94_t85_t44_bit_identical.md` |
