@@ -83,11 +83,23 @@ The 6 remaining T45 records are exactly the pre-existing BROADR ULP cohort of
 `NJOY_jl-bdu` (MT1 line 80, MT102 lines 2371/2563, MT113 line 3713, MT800 line
 6015, and MT205 line 4419 which inherits the MT113 ULP).
 
-Targeted regression: all 16 known bit-identical tests re-verified
-BIT_IDENTICAL (T03, T09, T22, T33, T44, T50, T52, T53, T61, T62, T80, T81,
-T83, T84, T85, T86), T01 NUMERIC_PASS. The other GASPR tests (T12, T13, T24,
-T72) are unchanged in status — their failures are pre-existing ACER/plotr stub
-tapes, not GASPR. No full sweep was run; see
+The same phase also closed `NJOY_jl-xpf`. Tracing T13's MF3 inventory showed
+the tape chain is already correct (gaspr's tape25 carries MT203/207); it is
+`final_assembly!` that loses them by rebuilding the last moder output from the
+RunContext, which never knew about gaspr because `_collect_gaspr!` had zero
+call sites. Adding the call was necessary but not sufficient: `needs_assembly`
+keys off `!isempty(ctx.extra_mf3)`, so collecting the gas sections would have
+newly triggered a reconstruction for gaspr-only chains like T45 and clobbered
+an already-exact tape. MT203-207 are now excluded from that predicate —
+collected defensively, never a reason to rebuild. T13 tape28 goes 23 → 25
+sections (18,123 → 19,829 lines against a 25,430-line reference).
+
+Targeted regression, run before and after each change: all 16 known
+bit-identical tests re-verified BIT_IDENTICAL (T03, T09, T22, T33, T44, T50,
+T52, T53, T61, T62, T80, T81, T83, T84, T85, T86), T01 NUMERIC_PASS, and all
+27 targeted statuses identical across the xpf change. The other GASPR tests
+(T12, T13, T24, T72) are unchanged in status — their failures are pre-existing
+ACER/plotr stub tapes, not GASPR. No full sweep was run; see
 `worklog/phase99_t45_gaspr_residual_lr.md`.
 
 ### Prior Phase 98 context
@@ -267,11 +279,11 @@ Immediate Phase 98 follow-ups:
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
 - **`NJOY_jl-1kf`, `NJOY_jl-9h4`: CLOSED in Phase 99.**
-- **`NJOY_jl-xpf` (open, CONFIRMED not stale):** `_collect_gaspr!`
-  (pipeline.jl:471-480) has zero call sites while broadr/heatr/thermr all call
-  their `_collect_*!` sibling, so when heatr/thermr populate `ctx.extra_mf3`,
-  `final_assembly!` rebuilds the tape without gaspr's MT203-207. T13 tape28
-  shows NXC 30 vs 23. Now the highest-value GASPR follow-up.
+- **`NJOY_jl-xpf`: CLOSED in Phase 99.**
+- **heatr partial KERMAs (new, P2):** `heatr_module` hardcodes
+  `added_mf3[301]`/`[444]` and ignores the deck's `npk` MT list, so T13's
+  requested MT302/303/304/402/443 never reach any tape. These are the entire
+  remaining T13 tape28 section gap (25 vs 30).
 - **`NJOY_jl-bdu` (open):** instrument the five isolated T45 BROADR ULP
   records before changing erfc, sqrt-two constants, or `hunky` boundaries.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
@@ -292,7 +304,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
-| 99 | 2026-09-07 | T45 GASPR residual/LR gas yields + blank TPID; 412 -> 6 residual records | `phase99_t45_gaspr_residual_lr.md` |
+| 99 | 2026-09-07 | T45 GASPR residual/LR gas yields + blank TPID (412 -> 6); T13 keeps MT203/207 through assembly | `phase99_t45_gaspr_residual_lr.md` |
 | 98 | 2026-08-22 | T45 current-state diagnosis; TPID/GASPR/BROADR lanes split cleanly | `phase98_t45_rescope.md` |
 | 97 | 2026-08-22 | T83 raw-byte bit-identical; zero-background RML reactions restored to MT1 | `phase97_t83_rml_total.md` |
 | 96 | 2026-08-22 | T80 bit-identical; LEAPR MF7/MT4 B(4) EMAX sigfig restored | `phase96_t80_leapr_emax.md` |
