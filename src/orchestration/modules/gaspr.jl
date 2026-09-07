@@ -53,9 +53,17 @@ function gaspr_module(tapes::TapeManager, params::GasprParams)
 
     tape = read_pendf(in_path)
 
+    # Gas yields depend on the residual nucleus, so we need the material ZA and
+    # the incident-particle ZA. Fortran reads both from the *original* ENDF
+    # tape's MF1/MT451 (gaspr.f90:95-102: `nsub=n1h`, `zain=int(nsub/10)`), not
+    # from the PENDF, so do the same here.
+    endf_path = params.nendf > 0 ? resolve(tapes, params.nendf) : ""
+
     new_materials = PENDFMaterial[]
     for material in tape.materials
-        push!(new_materials, _gaspr_one_material(material))
+        hdr = isempty(endf_path) ? nothing :
+              read_mf1_header_info(endf_path, material.mat)
+        push!(new_materials, _gaspr_one_material(material, hdr))
     end
 
     write_pendf_tape(out_path, PENDFTape(tape.tpid, new_materials))
@@ -67,16 +75,32 @@ end
 # One material: extract MF3, accumulate gas, splice MT=203..207
 # =========================================================================
 
-function _gaspr_one_material(material::PENDFMaterial)::PENDFMaterial
+function _gaspr_one_material(material::PENDFMaterial,
+                             hdr=nothing)::PENDFMaterial
     mat = material.mat
 
-    # Pull every MF3 section's (energies, xs)
+    # ZA/AWR of the material, and the incident-particle ZA. Fall back to the
+    # PENDF's own MF1 head and a neutron projectile when the ENDF tape could
+    # not be read (Fortran's own default is `zain=1`, gaspr.f90:97).
+    za_mf1, awr_mf1 = _gaspr_za_awr(material.mf1_lines)
+    za    = hdr === nothing ? za_mf1  : hdr.za
+    awr   = hdr === nothing ? awr_mf1 : hdr.awr
+    zain  = hdr === nothing ? 1       : hdr.zain
+    iverf = hdr === nothing ? 6       : hdr.iverf
+
+    # Pull every MF3 section's (energies, xs) and its breakup flag LR.
+    # LR lives in the L2 field (cols 34-44) of the section's TAB1 header, and
+    # for MT51-91 it is the *only* thing that says what gas the level emits
+    # (gaspr.f90:565-611) — parsing it is the whole point of this bead.
     mf3 = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+    mf3_lr = Dict{Int, Int}()
     for sec in material.sections
         sec.mf == 3 || continue
         e, xs = _parse_mf3_lines(sec.lines)
         isempty(e) && continue
         mf3[sec.mt] = (e, xs)
+        mf3_lr[sec.mt] = length(sec.lines) >= 2 ?
+            _parse_int(rpad(sec.lines[2], 80)[34:44]) : 0
     end
 
     # Need MT=1 to provide the gas-grid skeleton (Fortran gaspr.f90:435 —
@@ -89,16 +113,25 @@ function _gaspr_one_material(material::PENDFMaterial)::PENDFMaterial
     # Identify gas-producing MTs and the threshold (min first-energy among them).
     # Fortran sets thrg = min(enext) across all MTs that pass the gas filter
     # (gaspr.f90:285-424).
-    gas_mts_present = Int[]
+    # `thrg` uses the Fortran's own (deliberately looser) candidate test, which
+    # keeps a reaction whose residual is merely light even when it yields no
+    # gas — see `gas_threshold_candidate`.
     thrg = Inf
     for (mt, (e, _)) in mf3
-        mt in _GASPR_SKIP_MTS && continue
-        any(!iszero, gas_yield(mt)) || continue
-        push!(gas_mts_present, mt)
+        gas_threshold_candidate(mt, get(mf3_lr, mt, 0), za, zain; iverf) || continue
         e[1] < thrg && (thrg = e[1])
     end
 
-    if isempty(gas_mts_present)
+    # Accumulate in ascending MT, i.e. the order the sections sit on the tape,
+    # because Fortran sums into sgas as it walks the scratch tape and the
+    # floating-point accumulation order is observable at 7 significant digits.
+    gas_mts_present = Int[]
+    for mt in sort!(collect(keys(mf3)))
+        any(!iszero, gas_channel(mt, get(mf3_lr, mt, 0), za, zain; iverf)) || continue
+        push!(gas_mts_present, mt)
+    end
+
+    if isempty(gas_mts_present) || !isfinite(thrg)
         @info "gaspr: no gas-producing reactions in MAT=$mat — copying unchanged"
         return material
     end
@@ -114,7 +147,7 @@ function _gaspr_one_material(material::PENDFMaterial)::PENDFMaterial
     # PENDF after broadr is linearized, so LinLin matches Fortran terpa default.
     sgas = zeros(5, ngas)
     for mt in gas_mts_present
-        p, d, t, h3, a = gas_yield(mt)
+        p, d, t, h3, a = gas_channel(mt, get(mf3_lr, mt, 0), za, zain; iverf)
         e_src, xs_src = mf3[mt]
         for (i, eg) in enumerate(gas_grid)
             y = _interp_linlin_at(e_src, xs_src, eg)
@@ -146,8 +179,8 @@ function _gaspr_one_material(material::PENDFMaterial)::PENDFMaterial
         es  = gas_grid[i_start:end]
         xss = [round_sigfig(sgas[jg, i], 7, 0) for i in i_start:ngas]
 
-        # Carry ZA/AWR from material's MF1/MT451 head line for these new sections
-        za, awr = _gaspr_za_awr(material.mf1_lines)
+        # ZA/AWR for the new sections are the same ones the residual arithmetic
+        # used, i.e. the original ENDF MF1/MT451 head (gaspr.f90:82-83, 1067-1068).
         new_sections[mt] = _gaspr_build_mf3_section(es, xss, mat, mt, za, awr)
         np_per_mt[mt] = np
     end

@@ -27,8 +27,14 @@ function reconr_module(tapes::TapeManager, params::ReconrParams;
         mf1_header = read_mf1_header_info(endf_path, mspec.mat)
         mf1_header === nothing &&
             error("RECONR MF1/MT451 header not found for MAT=$(mspec.mat) in $endf_path")
+        # RECONR's label card is mandatory (reconr.f90:168 `read(nsysi,*) text`)
+        # and whatever it holds — including all blanks — is written verbatim to
+        # the TPID (reconr.f90:192 `tpidio`), then passed through unchanged by
+        # BROADR, GASPR and MODER. So an empty parsed title means "the deck
+        # asked for a blank label", never "substitute a default": T45's deck
+        # line is literally `'  '/` and its tape40 line 1 is 66 blanks.
         write_pendf_file(pendf_path, r; mat=mspec.mat, err=mspec.err,
-                         title=isempty(title) ? nothing : title,
+                         title=title,
                          descriptions=descriptions,
                          mf1_header=mf1_header,
                          coded_output=params.coded_output)

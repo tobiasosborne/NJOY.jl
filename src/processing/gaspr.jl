@@ -31,116 +31,236 @@ struct GasProductionResult
 end
 
 # ==========================================================================
-# Multiplicity table  (gaspr.f90 lines 500-826)
+# Reaction channel table  (gaspr.f90:495-826)
 # ==========================================================================
+#
+# Fortran does not carry a plain MT -> multiplicity table.  For every MF3
+# reaction it tracks TWO things simultaneously (gaspr.f90:495, 507-818):
+#
+#   izr         the residual-nucleus ZA, initialised to `za + zain` and
+#               decremented by the ZA of every particle the reaction emits
+#   y203..y207  the count of p / d / t / 3He / alpha *explicitly* emitted
+#
+# and only afterwards converts a light residual nucleus into gas
+# (gaspr.f90:820-825).  Keeping the two halves in one table is what makes the
+# port faithful: a lone multiplicity table silently drops every reaction whose
+# gas comes from the residual rather than from the named ejectile.
+
+# mt => (ΔZA removed from the residual, (p, d, t, 3He, alpha) emitted)
+# Transcribed one-for-one from the `if (mth.eq.N)` chain at gaspr.f90:507-818.
+const _GASPR_MT_CHANNEL = Dict{Int,Tuple{Int,NTuple{5,Int}}}(
+     11 => (1004, (0,1,0,0,0)),   16 => (   2, (0,0,0,0,0)),
+     17 => (   3, (0,0,0,0,0)),   22 => (2005, (0,0,0,0,1)),
+     23 => (6013, (0,0,0,0,3)),   24 => (2006, (0,0,0,0,1)),
+     25 => (2007, (0,0,0,0,1)),   28 => (1002, (1,0,0,0,0)),
+     29 => (4009, (0,0,0,0,2)),   30 => (4010, (0,0,0,0,2)),
+     32 => (1003, (0,1,0,0,0)),   33 => (1004, (0,0,1,0,0)),
+     34 => (2004, (0,0,0,1,0)),   35 => (5011, (0,1,0,0,2)),
+     36 => (5012, (0,0,1,0,2)),   37 => (   4, (0,0,0,0,0)),
+     41 => (1003, (1,0,0,0,0)),   42 => (1004, (1,0,0,0,0)),
+     44 => (2003, (2,0,0,0,0)),   45 => (3006, (1,0,0,0,1)),
+    103 => (1001, (1,0,0,0,0)),  104 => (1002, (0,1,0,0,0)),
+    105 => (1003, (0,0,1,0,0)),  106 => (2003, (0,0,0,1,0)),
+    107 => (2004, (0,0,0,0,1)),  108 => (4008, (0,0,0,0,2)),
+    109 => (6012, (0,0,0,0,3)),  111 => (2002, (2,0,0,0,0)),
+    112 => (3005, (1,0,0,0,1)),  113 => (5011, (0,0,1,0,2)),
+    114 => (5010, (0,1,0,0,2)),  115 => (2003, (1,1,0,0,0)),
+    116 => (2004, (1,0,1,0,0)),  117 => (3006, (0,1,0,0,1)),
+    152 => (   5, (0,0,0,0,0)),  153 => (   6, (0,0,0,0,0)),
+    154 => (1005, (0,0,1,0,0)),  155 => (3007, (0,0,1,0,1)),
+    156 => (1005, (1,0,0,0,0)),  157 => (1005, (0,1,0,0,0)),
+    158 => (3007, (0,1,0,0,1)),  159 => (3007, (1,0,0,0,1)),
+    160 => (   7, (0,0,0,0,0)),  161 => (   8, (0,0,0,0,0)),
+    162 => (1006, (1,0,0,0,0)),  163 => (1007, (1,0,0,0,0)),
+    164 => (1008, (1,0,0,0,0)),  165 => (2008, (0,0,0,0,1)),
+    166 => (2009, (0,0,0,0,1)),  167 => (2010, (0,0,0,0,1)),
+    168 => (2011, (0,0,0,0,1)),  169 => (1006, (0,1,0,0,0)),
+    170 => (1007, (0,1,0,0,0)),  171 => (1008, (0,1,0,0,0)),
+    172 => (1006, (0,0,1,0,0)),  173 => (1007, (0,0,1,0,0)),
+    174 => (1008, (0,0,1,0,0)),  175 => (1009, (0,0,1,0,0)),
+    176 => (2005, (0,0,0,1,0)),  177 => (2006, (0,0,0,1,0)),
+    178 => (2007, (0,0,0,1,0)),  179 => (2005, (2,0,0,0,0)),
+    180 => (4011, (0,0,0,0,2)),  181 => (3008, (1,0,0,0,1)),
+    182 => (2005, (0,1,1,0,0)),  183 => (2004, (1,1,0,0,0)),
+    184 => (2005, (1,0,1,0,0)),  185 => (2006, (0,1,1,0,0)),
+    186 => (3005, (1,0,0,1,0)),  187 => (3006, (0,1,0,1,0)),
+    188 => (3007, (0,0,1,1,0)),  189 => (3008, (0,0,1,0,1)),
+    190 => (2004, (2,0,0,0,0)),  191 => (3004, (1,0,0,1,0)),
+    192 => (3005, (0,1,0,1,0)),  193 => (4007, (0,0,0,1,1)),
+    194 => (2006, (2,0,0,0,0)),  195 => (4012, (0,0,0,0,2)),
+    196 => (3009, (1,0,0,0,1)),  197 => (3003, (3,0,0,0,0)),
+    198 => (3004, (3,0,0,0,0)),  199 => (4009, (2,0,0,0,1)),
+    200 => (2007, (2,0,0,0,0)),
+)
+
+# lr => (ΔZA removed from the residual, (p, d, t, 3He, alpha) emitted)
+# The breakup flag carried in the MF3 TAB1 L2 field of a discrete-level
+# section.  Applied only for MT51-91, and only after the emitted neutron has
+# already been removed from the residual.  Ref: gaspr.f90:565-611.
+# LR=39/40 (`izr=izr` in the Fortran) deliberately change nothing.
+const _GASPR_LR_CHANNEL = Dict{Int,Tuple{Int,NTuple{5,Int}}}(
+    22 => (2004, (0,0,0,0,1)),   23 => (6012, (0,0,0,0,3)),
+    24 => (2005, (0,0,0,0,1)),   25 => (2006, (0,0,0,0,1)),
+    28 => (1001, (1,0,0,0,0)),   29 => (4008, (0,0,0,0,2)),
+    30 => (4009, (0,0,0,0,2)),   32 => (1002, (0,1,0,0,0)),
+    33 => (1003, (0,0,1,0,0)),   34 => (2003, (0,0,0,1,0)),
+    35 => (5010, (0,1,0,0,2)),   36 => (5011, (0,0,1,0,2)),
+    39 => (   0, (0,0,0,0,0)),   40 => (   0, (0,0,0,0,0)),
+)
+
+# Residual-nucleus ZA => extra gas it contributes (gaspr.f90:820-825):
+#     if (izr.eq.1001) y203=y203+1   ...   if (izr.eq.4008) y207=y207+2
+# The Fortran writes six independent `if`s, but the guards are mutually
+# exclusive (izr is a single integer), so a lookup is equivalent.
+# The Be-8 entry is the physically interesting one: Be-8 is unbound and
+# breaks into two alphas, which is why B-10(n,t) — whose residual is Be-8 —
+# produces two alphas on top of its explicit triton.
+const _GASPR_RESIDUAL_GAS = Dict{Int,NTuple{5,Int}}(
+    1001 => (1,0,0,0,0),   # proton
+    1002 => (0,1,0,0,0),   # deuteron
+    1003 => (0,0,1,0,0),   # triton
+    2003 => (0,0,0,1,0),   # He-3
+    2004 => (0,0,0,0,1),   # alpha
+    4008 => (0,0,0,0,2),   # Be-8 -> 2 alpha
+)
 
 """
     gas_multiplicity(mt::Integer) -> NTuple{5,Int}
 
-Return (proton, deuteron, triton, He-3, alpha) multiplicities for ENDF
-reaction `mt`.  Pure function; integer arithmetic only.
+(proton, deuteron, triton, He-3, alpha) particles *explicitly emitted* by
+reaction `mt`, i.e. Fortran's `y203..y207` before the residual-nucleus rules
+of gaspr.f90:820-825 are applied.
+
+This is only half of a reaction's gas production. Use [`gas_channel`](@ref)
+for the value GASPR actually accumulates.
 """
-function gas_multiplicity(mt::Integer)
-    # Two-body charged-particle reactions MT103-107
-    mt == 103 && return (1,0,0,0,0)  # (n,p)
-    mt == 104 && return (0,1,0,0,0)  # (n,d)
-    mt == 105 && return (0,0,1,0,0)  # (n,t)
-    mt == 106 && return (0,0,0,1,0)  # (n,3He)
-    mt == 107 && return (0,0,0,0,1)  # (n,alpha)
-    # Multi-particle MT108-117
-    mt == 108 && return (0,0,0,0,2)  # (n,2alpha)
-    mt == 109 && return (0,0,0,0,3)  # (n,3alpha)
-    mt == 111 && return (2,0,0,0,0)  # (n,2p)
-    mt == 112 && return (1,0,0,0,1)  # (n,p+alpha)
-    mt == 113 && return (0,0,1,0,2)  # (n,t+2alpha)
-    mt == 114 && return (0,1,0,0,2)  # (n,d+2alpha)
-    mt == 115 && return (1,1,0,0,0)  # (n,p+d)
-    mt == 116 && return (1,0,1,0,0)  # (n,p+t)
-    mt == 117 && return (0,1,0,0,1)  # (n,d+alpha)
-    # (n,n'+particle) reactions
-    mt == 11  && return (0,1,0,0,0)  # (n,2nd)
-    mt == 22  && return (0,0,0,0,1)  # (n,n+alpha)
-    mt == 23  && return (0,0,0,0,3)  # (n,n+3alpha)
-    mt == 24  && return (0,0,0,0,1)  # (n,2n+alpha)
-    mt == 25  && return (0,0,0,0,1)  # (n,3n+alpha)
-    mt == 28  && return (1,0,0,0,0)  # (n,n+p)
-    mt == 29  && return (0,0,0,0,2)  # (n,n+2alpha)
-    mt == 30  && return (0,0,0,0,2)  # (n,2n+2alpha)
-    mt == 32  && return (0,1,0,0,0)  # (n,n+d)
-    mt == 33  && return (0,0,1,0,0)  # (n,n+t)
-    mt == 34  && return (0,0,0,1,0)  # (n,n+3He)
-    mt == 35  && return (0,1,0,0,2)  # (n,n+d+2alpha)
-    mt == 36  && return (0,0,1,0,2)  # (n,n+t+2alpha)
-    mt == 41  && return (1,0,0,0,0)  # (n,2n+p)
-    mt == 42  && return (1,0,0,0,0)  # (n,3n+p)
-    mt == 44  && return (2,0,0,0,0)  # (n,n+2p)
-    mt == 45  && return (1,0,0,0,1)  # (n,n+p+alpha)
-    # Higher multi-particle MTs 154-200
-    mt == 154 && return (0,0,1,0,0)
-    mt == 155 && return (0,0,1,0,1)
-    mt == 156 && return (1,0,0,0,0)
-    mt == 157 && return (0,1,0,0,0)
-    mt == 158 && return (0,1,0,0,1)
-    mt == 159 && return (1,0,0,0,1)
-    mt == 162 && return (1,0,0,0,0)
-    mt == 163 && return (1,0,0,0,0)
-    mt == 164 && return (1,0,0,0,0)
-    mt == 165 && return (0,0,0,0,1)
-    mt == 166 && return (0,0,0,0,1)
-    mt == 167 && return (0,0,0,0,1)
-    mt == 168 && return (0,0,0,0,1)
-    mt == 169 && return (0,1,0,0,0)
-    mt == 170 && return (0,1,0,0,0)
-    mt == 171 && return (0,1,0,0,0)
-    mt == 172 && return (0,0,1,0,0)
-    mt == 173 && return (0,0,1,0,0)
-    mt == 174 && return (0,0,1,0,0)
-    mt == 175 && return (0,0,1,0,0)
-    mt == 176 && return (0,0,0,1,0)
-    mt == 177 && return (0,0,0,1,0)
-    mt == 178 && return (0,0,0,1,0)
-    mt == 179 && return (2,0,0,0,0)
-    mt == 180 && return (0,0,0,0,2)
-    mt == 181 && return (1,0,0,0,1)
-    mt == 182 && return (0,1,1,0,0)
-    mt == 183 && return (1,1,0,0,0)
-    mt == 184 && return (1,0,1,0,0)
-    mt == 185 && return (0,1,1,0,0)
-    mt == 186 && return (1,0,0,1,0)
-    mt == 187 && return (0,1,0,1,0)
-    mt == 188 && return (0,0,1,1,0)
-    mt == 189 && return (0,0,1,0,1)
-    mt == 190 && return (2,0,0,0,0)
-    mt == 191 && return (1,0,0,1,0)
-    mt == 192 && return (0,1,0,1,0)
-    mt == 193 && return (0,0,0,1,1)
-    mt == 194 && return (2,0,0,0,0)
-    mt == 195 && return (0,0,0,0,2)
-    mt == 196 && return (1,0,0,0,1)
-    mt == 197 && return (3,0,0,0,0)
-    mt == 198 && return (3,0,0,0,0)
-    mt == 199 && return (2,0,0,0,1)
-    mt == 200 && return (2,0,0,0,0)
-    return (0,0,0,0,0)
+gas_multiplicity(mt::Integer) =
+    get(_GASPR_MT_CHANNEL, Int(mt), (0, (0,0,0,0,0)))[2]
+
+"""
+    gaspr_skips_mt(mt::Integer; iverf::Integer=6) -> Bool
+
+Whether GASPR's accumulation pass skips reaction `mt` outright.
+
+Ref: njoy-reference/src/gaspr.f90:475-491. The discrete-level bands
+(MT600-849 for `iverf>=6`, MT700-798 for `iverf<6`) are skipped so that the
+MT103-107 totals are not double counted — for B-10 that is what keeps MT700
+`(n,t0)` from being added on top of MT105.
+"""
+function gaspr_skips_mt(mt::Integer; iverf::Integer=6)
+    mt = Int(mt)
+    lvmin, lvmax = iverf >= 6 ? (600, 849) : (700, 798)
+    mt > 200 && mt < lvmin && return true          # gaspr.f90:475
+    (mt > lvmax || mt == 0) && return true         # gaspr.f90:476
+    mt <= 4 && return true                         # gaspr.f90:477
+    6 <= mt <= 10 && return true
+    12 <= mt <= 15 && return true
+    18 <= mt <= 21 && return true
+    38 <= mt <= 40 && return true
+    mt == 43 && return true
+    46 <= mt <= 50 && return true
+    92 <= mt <= 101 && return true
+    lvmin <= mt <= lvmax && return true            # gaspr.f90:486-490
+    mt in (152, 153, 160, 161) && return true      # gaspr.f90:491
+    false
 end
 
-# MTs that never produce gas
-const _GASPR_SKIP_MTS = Set{Int}([
-    1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-    26, 27, 31, 37, 38, 39, 40, 43, 46, 47, 48, 49, 50,
-    92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
-    152, 153, 160, 161, 203, 204, 205, 206, 207,
-])
+"""
+    gas_residual_za(mt, lr, za, zain; iverf=6) -> Int
+
+Residual-nucleus ZA left by reaction `mt`, i.e. Fortran's `izr`.
+
+Starts at `za + zain` (gaspr.f90:495) and loses the ZA of every emitted
+particle. For MT51-91 the emitted neutron is removed first (`izr=izr-1`,
+gaspr.f90:565) and the breakup flag `lr` removes the rest.
+"""
+function gas_residual_za(mt::Integer, lr::Integer, za::Real, zain::Real;
+                         iverf::Integer=6)
+    mt = Int(mt)
+    izr = round(Int, za + zain)
+    gaspr_skips_mt(mt; iverf) && return izr
+    if 51 <= mt <= 91
+        izr -= 1
+        izr -= get(_GASPR_LR_CHANNEL, Int(lr), (0, (0,0,0,0,0)))[1]
+    else
+        izr -= get(_GASPR_MT_CHANNEL, mt, (0, (0,0,0,0,0)))[1]
+    end
+    izr
+end
+
+"""
+    gas_channel(mt, lr, za, zain; iverf=6) -> NTuple{5,Int}
+
+Total (proton, deuteron, triton, He-3, alpha) yield GASPR accumulates for
+reaction `mt`: the explicitly emitted particles plus whatever the residual
+nucleus itself contributes.
+
+`za` is the material ZA, `zain` the incident-particle ZA (`int(nsub/10)`,
+so 1 for neutrons — gaspr.f90:97-102), and `lr` the MF3 TAB1 breakup flag.
+
+Ref: njoy-reference/src/gaspr.f90:495-826.
+
+Two behaviours here have no counterpart in a plain multiplicity table and
+were the T45 defect:
+
+  * MT51-91 gas comes entirely from `lr`, e.g. B-10's LR=28 levels emit a
+    proton and its LR=35 levels a deuteron and two alphas;
+  * a light residual nucleus is itself gas, e.g. B-10(n,t) leaves Be-8
+    (`izr = 5010+1-1003 = 4008`), adding two alphas to MT207.
+
+The MF6/MT5 energy-dependent-yield path (Fortran's `111` sentinel,
+gaspr.f90:501-506) is not ported; MT5 contributes nothing here, as before.
+"""
+function gas_channel(mt::Integer, lr::Integer, za::Real, zain::Real;
+                     iverf::Integer=6)
+    mt = Int(mt)
+    gaspr_skips_mt(mt; iverf) && return (0,0,0,0,0)
+    izr = round(Int, za + zain)
+    y = (0,0,0,0,0)
+    if 51 <= mt <= 91
+        izr -= 1                                    # gaspr.f90:565
+        dz, y = get(_GASPR_LR_CHANNEL, Int(lr), (0, (0,0,0,0,0)))
+        izr -= dz
+    else
+        dz, y = get(_GASPR_MT_CHANNEL, mt, (0, (0,0,0,0,0)))
+        izr -= dz
+    end
+    r = get(_GASPR_RESIDUAL_GAS, izr, nothing)      # gaspr.f90:820-825
+    r === nothing ? y : y .+ r
+end
+
+"""
+    gas_threshold_candidate(mt, lr, za, zain; iverf=6) -> Bool
+
+Whether reaction `mt` takes part in choosing the gas-production threshold
+`thrg` (the low end of the output grid).
+
+Ref: njoy-reference/src/gaspr.f90:421-424. Deliberately *not* the same test
+as "does this reaction yield gas": the Fortran keeps a reaction whose
+residual is merely light (`0 < izr <= 2004`) even when it produces nothing,
+and force-includes the Be-8 residual. Reproduced verbatim rather than
+simplified, because `thrg` is a minimum and a wrong predicate silently
+shifts the first output energy.
+"""
+function gas_threshold_candidate(mt::Integer, lr::Integer, za::Real, zain::Real;
+                                 iverf::Integer=6)
+    gaspr_skips_mt(mt; iverf) && return false
+    izr = gas_residual_za(mt, lr, za, zain; iverf)
+    izg = any(!iszero, gas_channel(mt, lr, za, zain; iverf))
+    izr == 4008 && (izg = true)                     # gaspr.f90:421
+    izg || !(izr > 2004 || izr <= 0)                # gaspr.f90:422-423
+end
 
 """
     gas_yield(mt::Integer) -> NTuple{5,Int}
 
-Return gas particle yields for reaction `mt`, with skip-set short-circuit.
+Explicitly emitted gas particles for `mt`, zero for reactions GASPR skips.
+
+Residual-nucleus contributions are *not* included — they need the material
+ZA. Prefer [`gas_channel`](@ref); this remains for callers that only have an
+MT to hand.
 """
-function gas_yield(mt::Integer)
-    mt in _GASPR_SKIP_MTS && return (0,0,0,0,0)
-    gas_multiplicity(mt)
-end
+gas_yield(mt::Integer) = gaspr_skips_mt(mt) ? (0,0,0,0,0) : gas_multiplicity(mt)
 
 # ==========================================================================
 # Core pure function: Dict-based interface

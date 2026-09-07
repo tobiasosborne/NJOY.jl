@@ -288,6 +288,7 @@ export group_integrate, group_average, group_average_shielded
 # Public API -- GASPR (gas production cross sections)
 export GasProductionResult
 export gas_multiplicity, gas_yield, accumulate_gas, gas_production
+export gas_channel, gas_residual_za, gas_threshold_candidate, gaspr_skips_mt
 export gas_production_dict, compute_gas_production
 
 # Public API -- MIXR (cross section mixing)

@@ -58,7 +58,41 @@ The old `ac5adf5` baseline is a rebased-away, unreachable commit and must not be
 used. `reference_test.jl` and `sweep_reference_tests.jl` run a fail-soft pin
 preflight; fix any warning before trusting a comparison.
 
-## Current state — Phase 98 T45 diagnostic stop (2026-08-22)
+## Current state — Phase 99 T45 GASPR residual/LR yields (2026-09-07)
+
+Phase 99 closed the two largest T45 lanes. **T45 tape40 residual records went
+412 -> 6** and the test moved `DIFFS -> NUMERIC_PASS` (7,183/7,188 at 1e-5).
+
+`NJOY_jl-9h4` (405 records) was a missing half of GASPR's semantics. Fortran
+does not use an MT -> multiplicity table: for each MF3 reaction it tracks the
+residual-nucleus ZA `izr = za + zain` alongside the explicitly emitted
+particles, then converts a *light* residual into gas (gaspr.f90:820-825),
+including `if (izr.eq.4008) y207=y207+2` — Be-8 is unbound and breaks into two
+alphas. B-10's MT105 (n,t) leaves exactly Be-8, so the oracle's MT207 is
+`MT107 + 2*MT113 + 2*MT105` while Julia produced only `MT107 + 2*MT113`.
+Separately, all gas from MT51-91 comes from the LR breakup flag in the MF3 TAB1
+L2 field (gaspr.f90:565-611), which Julia never read — B-10 carries LR=22 on 14
+levels, LR=35 on 14 and LR=28 on 2, explaining the MT203/MT204 threshold
+divergences at 8.806 MeV and 7.155 MeV.
+
+`NJOY_jl-1kf` (1 record) was the blank TPID: RECONR's label card is mandatory
+and written verbatim (reconr.f90:168,192), so an empty parsed title means "the
+deck asked for blanks", not "substitute a default".
+
+The 6 remaining T45 records are exactly the pre-existing BROADR ULP cohort of
+`NJOY_jl-bdu` (MT1 line 80, MT102 lines 2371/2563, MT113 line 3713, MT800 line
+6015, and MT205 line 4419 which inherits the MT113 ULP).
+
+Targeted regression: all 16 known bit-identical tests re-verified
+BIT_IDENTICAL (T03, T09, T22, T33, T44, T50, T52, T53, T61, T62, T80, T81,
+T83, T84, T85, T86), T01 NUMERIC_PASS. The other GASPR tests (T12, T13, T24,
+T72) are unchanged in status — their failures are pre-existing ACER/plotr stub
+tapes, not GASPR. No full sweep was run; see
+`worklog/phase99_t45_gaspr_residual_lr.md`.
+
+### Prior Phase 98 context
+
+#### Phase 98 T45 diagnostic stop (2026-08-22)
 
 Phase 98 made no production-code change. It re-ran T45 on the pushed Phase 97
 tree and replaced the stale three-record metadata premise with an exact current
@@ -232,11 +266,12 @@ Immediate Phase 98 follow-ups:
 
 - **`NJOY_jl-5tu` (open):** make T17 complete under the documented default
   300-second sweep limit; the current bottleneck is ERRORR, not BROADR.
-- **`NJOY_jl-1kf` (open, re-scoped):** preserve T45's intentional two-blank
-  RECONR label instead of substituting `"reconstructed data"`; exact red target
-  is tape40 line 1. Structure and MF1 records 2-69 are already exact.
-- **`NJOY_jl-9h4` (open):** port GASPR's MT51-91 TAB1-LR and residual-nuclide
-  gas yields in tape order. These explain 405 T45 MT203/204/207 records.
+- **`NJOY_jl-1kf`, `NJOY_jl-9h4`: CLOSED in Phase 99.**
+- **`NJOY_jl-xpf` (open, CONFIRMED not stale):** `_collect_gaspr!`
+  (pipeline.jl:471-480) has zero call sites while broadr/heatr/thermr all call
+  their `_collect_*!` sibling, so when heatr/thermr populate `ctx.extra_mf3`,
+  `final_assembly!` rebuilds the tape without gaspr's MT203-207. T13 tape28
+  shows NXC 30 vs 23. Now the highest-value GASPR follow-up.
 - **`NJOY_jl-bdu` (open):** instrument the five isolated T45 BROADR ULP
   records before changing erfc, sqrt-two constants, or `hunky` boundaries.
 - **`NJOY_jl-6lg` (open):** BROADR's new passthrough directory entries preserve
@@ -257,6 +292,7 @@ paths, PURR probability tables, WIMSR, CCCCR, and PLOTR.
 
 | Phase | Date | Outcome | Worklog |
 |---:|---|---|---|
+| 99 | 2026-09-07 | T45 GASPR residual/LR gas yields + blank TPID; 412 -> 6 residual records | `phase99_t45_gaspr_residual_lr.md` |
 | 98 | 2026-08-22 | T45 current-state diagnosis; TPID/GASPR/BROADR lanes split cleanly | `phase98_t45_rescope.md` |
 | 97 | 2026-08-22 | T83 raw-byte bit-identical; zero-background RML reactions restored to MT1 | `phase97_t83_rml_total.md` |
 | 96 | 2026-08-22 | T80 bit-identical; LEAPR MF7/MT4 B(4) EMAX sigfig restored | `phase96_t80_leapr_emax.md` |
