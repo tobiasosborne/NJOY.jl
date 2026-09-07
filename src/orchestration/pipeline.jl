@@ -250,6 +250,10 @@ function run_njoy(input_path::AbstractString;
         elseif mc.name == :gaspr
             params = parse_gaspr(mc)
             gaspr_module(tapes, params)
+            # Collect MT=203..207 so a later final_assembly! cannot drop them.
+            # gaspr's own output tape is already complete; this is purely
+            # defensive (see the needs_assembly comment below).
+            _collect_gaspr!(ctx, tapes, params)
 
         elseif mc.name == :mixr
             params = parse_mixr(mc)
@@ -277,7 +281,15 @@ function run_njoy(input_path::AbstractString;
     #    Only run when thermr/heatr data needs to be merged into the final tape.
     #    For chains like T02 (reconr→broadr→unresr→groupr), each module writes
     #    its own complete output tape — no assembly needed.
-    needs_assembly = !isempty(ctx.thermr_mts) || !isempty(ctx.extra_mf3) || !isempty(ctx.mf6_records)
+    #    GASPR's MT=203..207 are deliberately excluded from this test. gaspr
+    #    writes a complete output tape (Fortran gaspr.f90:1032-1132 copies the
+    #    whole input PENDF and splices the gas sections in), so a chain that
+    #    ends moder→gaspr→moder needs no reconstruction — T45's tape40 is
+    #    correct precisely because it is a straight copy. The gas sections are
+    #    still collected above so that a reconstruction forced by heatr/thermr
+    #    (T13, T24, T72) carries them through instead of dropping them.
+    needs_assembly = !isempty(ctx.thermr_mts) || !isempty(ctx.mf6_records) ||
+                     any(mt -> !(203 <= mt <= 207), keys(ctx.extra_mf3))
     if ctx.reconr_result !== nothing && last_moder_out > 0 && needs_assembly
         final_assembly!(tapes, last_moder_out,
             ctx.reconr_result, ctx.override_mf3, ctx.extra_mf3,

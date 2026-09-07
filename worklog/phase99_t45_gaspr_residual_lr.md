@@ -1,9 +1,10 @@
 # Phase 99 — T45 GASPR residual/LR gas yields + blank TPID
 
 **Date:** 2026-09-07
-**Beads:** `NJOY_jl-9h4` (closed), `NJOY_jl-1kf` (closed), `NJOY_jl-xpf` (confirmed, notes updated),
-`NJOY_jl-jbi` + `NJOY_jl-<egas>` (filed)
+**Beads:** `NJOY_jl-9h4`, `NJOY_jl-1kf`, `NJOY_jl-xpf` (all closed); `NJOY_jl-jbi`,
+the `egas(1)`/`thrg` bead and the heatr partial-KERMA bead filed.
 **Result:** T45 tape40 residual records **412 → 6**; T45 `DIFFS → NUMERIC_PASS`.
+T13 tape28 recovers MT203/MT207 (23 → 25 sections).
 
 ## Starting point
 
@@ -132,12 +133,37 @@ that TPID line 1 is 66 blanks.
   point, so T45 is unaffected.
 * **`NJOY_jl-jbi`** — MF6/MT5 energy-dependent yields (the `y=111` sentinel,
   gaspr.f90:501-506/839-868) remain unported. Pre-existing, not a regression.
-* **`NJOY_jl-xpf` CONFIRMED, not stale.** `_collect_gaspr!` (pipeline.jl:471-480)
-  has zero call sites — dead code — while broadr/heatr/thermr all call their
-  `_collect_*!` sibling. When heatr or thermr populate `ctx.extra_mf3`,
-  `final_assembly!` rebuilds the tape from the RunContext and never reads
-  gaspr's output, dropping MT203-207. T13's tape28 shows NXC 30 vs 23,
-  consistent with this. Left for its own oracle-gated change.
+
+## Follow-on in the same phase — `NJOY_jl-xpf` (closed)
+
+Confirmed real, then fixed, but the root cause was subtler than the bead's
+premise. Tracing the MF3 inventory along T13's chain showed the tape pipeline
+is already correct end to end:
+
+| tape | MF3 MTs |
+|---|---|
+| tape23 (broadr) | 1,2,4,16,28,51-58,91,102,103,107,111 |
+| tape24 (heatr) | + 301, 444 |
+| tape25 (gaspr) | + **203, 207** |
+| tape28 (final) | back to tape24's set — **203/207 lost** |
+
+So gaspr had written a complete tape; `final_assembly!` destroyed it by
+rebuilding the last moder output from the RunContext, which only knew about
+heatr's contributions. Adding the missing `_collect_gaspr!` call was necessary
+but not sufficient: `needs_assembly` is `!isempty(ctx.extra_mf3)`, so
+collecting the gas sections would have *newly triggered* a reconstruction for
+gaspr-only chains like T45 — clobbering the tape this phase had just made
+exact. MT203-207 are therefore excluded from the `needs_assembly` predicate:
+collected defensively so a heatr/thermr-forced rebuild keeps them, never a
+reason to rebuild.
+
+T13 tape28: 23 → 25 sections, 18,123 → 19,829 lines (ref 25,430). T45 unchanged
+at 6 residual records. All 27 targeted test statuses identical, all 16 BI
+canaries intact. Test: `test/validation/test_t13_gaspr_collection.jl`.
+
+The five sections still missing from T13's tape28 (MT302/303/304/402/443) are
+heatr's, not gaspr's: `heatr_module` hardcodes `added_mf3[301]`/`[444]` and
+ignores the deck's `npk=6` partial-KERMA MT list. Filed as its own P2 bead.
 
 ## Method note
 
